@@ -5418,7 +5418,18 @@ Rectangle {
                         color: !iosCameraSettingsPopup.antiFlickerEnabled ? "#E8E8E8" : (active ? "#4DB6AC" : "#E8F5E9")
                         border.color: !iosCameraSettingsPopup.antiFlickerEnabled ? "#C0C0C0" : (active ? "#4DB6AC" : "#A5D6A7")
                         Text { anchors.centerIn: parent; text: "80"; font.pixelSize: 13; font.family: "PingFang HK"; color: !iosCameraSettingsPopup.antiFlickerEnabled ? "#999" : (parent.active ? "#FFF" : "#333") }
-                        MouseArea { anchors.fill: parent; cursorShape: iosCameraSettingsPopup.antiFlickerEnabled ? Qt.PointingHandCursor : Qt.ForbiddenCursor; onClicked: { if (iosCameraSettingsPopup.antiFlickerEnabled) { iosCameraSettingsPopup.antiFlickerFps = 80; sendAntiFlickerConfig() } } }
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: iosCameraSettingsPopup.antiFlickerEnabled ? Qt.PointingHandCursor : Qt.ForbiddenCursor
+                            onClicked: {
+                                if (!iosCameraSettingsPopup.antiFlickerEnabled) return
+                                iosCameraSettingsPopup.antiFlickerFps = 80
+                                iosCameraSettingsPopup.fpsValue = 80
+                                fpsSlider.value = 80
+                                gstPlayer.setConfigFps(20)
+                                sendAntiFlickerConfig()
+                            }
+                        }
                     }
 
                     // 100 档（25fps）
@@ -5428,7 +5439,18 @@ Rectangle {
                         color: !iosCameraSettingsPopup.antiFlickerEnabled ? "#E8E8E8" : (active ? "#4DB6AC" : "#E8F5E9")
                         border.color: !iosCameraSettingsPopup.antiFlickerEnabled ? "#C0C0C0" : (active ? "#4DB6AC" : "#A5D6A7")
                         Text { anchors.centerIn: parent; text: "100"; font.pixelSize: 13; font.family: "PingFang HK"; color: !iosCameraSettingsPopup.antiFlickerEnabled ? "#999" : (parent.active ? "#FFF" : "#333") }
-                        MouseArea { anchors.fill: parent; cursorShape: iosCameraSettingsPopup.antiFlickerEnabled ? Qt.PointingHandCursor : Qt.ForbiddenCursor; onClicked: { if (iosCameraSettingsPopup.antiFlickerEnabled) { iosCameraSettingsPopup.antiFlickerFps = 100; sendAntiFlickerConfig() } } }
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: iosCameraSettingsPopup.antiFlickerEnabled ? Qt.PointingHandCursor : Qt.ForbiddenCursor
+                            onClicked: {
+                                if (!iosCameraSettingsPopup.antiFlickerEnabled) return
+                                iosCameraSettingsPopup.antiFlickerFps = 100
+                                iosCameraSettingsPopup.fpsValue = 100
+                                fpsSlider.value = 100
+                                gstPlayer.setConfigFps(25)
+                                sendAntiFlickerConfig()
+                            }
+                        }
                     }
 
                     // 200 档（50fps，仅 deviceLevel>=4 可用）
@@ -5439,7 +5461,22 @@ Rectangle {
                         color: !accessible ? "#E8E8E8" : (!iosCameraSettingsPopup.antiFlickerEnabled ? "#E8E8E8" : (active ? "#4DB6AC" : "#E8F5E9"))
                         border.color: !accessible ? "#C0C0C0" : (!iosCameraSettingsPopup.antiFlickerEnabled ? "#C0C0C0" : (active ? "#4DB6AC" : "#A5D6A7"))
                         Text { anchors.centerIn: parent; text: "200"; font.pixelSize: 13; font.family: "PingFang HK"; color: !parent.accessible || !iosCameraSettingsPopup.antiFlickerEnabled ? "#999" : (parent.active ? "#FFF" : "#333") }
-                        MouseArea { anchors.fill: parent; cursorShape: (parent.accessible && iosCameraSettingsPopup.antiFlickerEnabled) ? Qt.PointingHandCursor : Qt.ForbiddenCursor; onClicked: { if (parent.accessible && iosCameraSettingsPopup.antiFlickerEnabled) { iosCameraSettingsPopup.antiFlickerFps = 200; sendAntiFlickerConfig() } } }
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: (parent.accessible && iosCameraSettingsPopup.antiFlickerEnabled) ? Qt.PointingHandCursor : Qt.ForbiddenCursor
+                            onClicked: {
+                                if (!parent.accessible || !iosCameraSettingsPopup.antiFlickerEnabled) return
+                                iosCameraSettingsPopup.antiFlickerFps = 200
+                                iosCameraSettingsPopup.fpsValue = 200
+                                fpsSlider.value = 200
+                                gstPlayer.setConfigFps(50)
+                                // 200档自动切超高帧
+                                if (iosCameraSettingsPopup.qualityType !== "ultra") {
+                                    switchQuality("ultra", "超高帧")
+                                }
+                                sendAntiFlickerConfig()
+                            }
+                        }
                     }
                 }
             }
