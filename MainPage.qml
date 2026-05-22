@@ -5396,7 +5396,7 @@ Rectangle {
                         Rectangle {
                             width: 20; height: 20; radius: 10
                             color: "#FFFFFF"
-                            x: parent.parent.parent.parent.antiFlickerEnabled ? 22 : 2
+                            x: iosCameraSettingsPopup.antiFlickerEnabled ? 22 : 2
                             anchors.verticalCenter: parent.verticalCenter
                             Behavior on x { NumberAnimation { duration: 150 } }
                         }
@@ -5471,7 +5471,7 @@ Rectangle {
             "fps": enabled ? fps : 0
         }
         console.log("🔦 抗频闪:", enabled ? "开启 fps=" + fps : "关闭")
-        captureManager.sendStompCommand(JSON.stringify(payload))
+        sendConfigUpdate("anti_flicker", payload)
 
         if (enabled) {
             // 同步 FPS 滑块 UI
