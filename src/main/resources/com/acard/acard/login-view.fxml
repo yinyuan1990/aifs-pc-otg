@@ -1,0 +1,114 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<?import javafx.geometry.Insets?>
+<?import javafx.scene.control.*?>
+<?import javafx.scene.layout.*?>
+<?import javafx.scene.text.*?>
+
+<BorderPane xmlns="http://javafx.com/javafx/17.0.2-ea" xmlns:fx="http://javafx.com/fxml/1" fx:controller="com.acard.acard.controller.LoginController">
+   <center>
+      <VBox alignment="CENTER" maxHeight="-Infinity" maxWidth="1.7976931348623157E308" minHeight="-Infinity" minWidth="-Infinity"
+            prefHeight="500.0" spacing="20.0" style="-fx-background-color: white;">
+         <padding>
+            <Insets left="0.0" right="0.0"/>
+         </padding>
+         
+         <!-- 标题区域 -->
+         <VBox alignment="CENTER" spacing="15.0">
+            <padding>
+               <Insets top="30.0" bottom="30.0" left="30.0" right="30.0"/>
+            </padding>
+            <children>
+               <Label text="欢迎登录 很任性" textFill="#1a73e8">
+                  <font>
+                     <Font name="System Bold" size="28.0"/>
+                  </font>
+               </Label>
+
+            </children>
+         </VBox>
+
+         <!-- 登录表单区域 -->
+         <VBox alignment="CENTER" spacing="25.0" maxWidth="1.7976931348623157E308"
+               style="-fx-background-color: white;">
+            <padding>
+               <Insets bottom="0.0" top="0.0" left="10.0" right="10.0"/>
+            </padding>
+            <children >
+
+               <!-- 账号输入 -->
+               <TextField fx:id="usernameField" promptText="请输入账号" prefHeight="40.0"
+                          style="-fx-padding: 12 0 12 0; -fx-background-color: transparent; -fx-border-color: transparent; -fx-border-width: 0 0 1 0; -fx-border-color: #dadce0; -fx-focus-color: #1a73e8; -fx-faint-focus-color: transparent;">
+                  <font>
+                     <Font size="16.0"/>
+                  </font>
+               </TextField>
+
+               <!-- 密码输入 -->
+               <PasswordField fx:id="passwordField" promptText="请输入密码" prefHeight="40.0"
+                              style="-fx-padding: 12 0 12 0; -fx-background-color: transparent; -fx-border-color: transparent; -fx-border-width: 0 0 1 0; -fx-border-color: #dadce0; -fx-focus-color: #1a73e8; -fx-faint-focus-color: transparent;">
+                  <font>
+                     <Font size="16.0"/>
+                  </font>
+               </PasswordField>
+
+               <!-- 监控账号选择 -->
+               <HBox alignment="CENTER_LEFT" prefHeight="40.0" style="-fx-padding: 2 0 2 0; -fx-background-color: transparent; -fx-border-color: transparent; -fx-border-width: 0 0 1 0; -fx-border-color: #dadce0;">
+
+                  <children>
+                     <ComboBox fx:id="accountComboBox" prefHeight="30.0" maxWidth="1.7976931348623157E308" HBox.hgrow="ALWAYS" promptText="请选择监控账号(非必选)"
+                               style="-fx-background-color: transparent; -fx-border-color: transparent; -fx-font-size: 16px; -fx-alignment: center-left;"/>
+                     <Button fx:id="clearButton" text="清空" prefHeight="30.0" prefWidth="60.0" alignment="CENTER_RIGHT"
+                             style="-fx-background-color: transparent; -fx-border-color: transparent; -fx-text-fill: #5f6368; -fx-font-size: 12px;"/>
+                  </children>
+               </HBox>
+
+
+               <!-- 登录按钮 -->
+               <Button fx:id="loginButton" maxWidth="1.7976931348623157E308" onAction="#handleLogin" prefHeight="40.0"
+                       style="-fx-background-color: #1a73e8; -fx-text-fill: white; -fx-background-radius: 4; -fx-cursor: hand; -fx-padding: 10 12 10 12"
+                       text="登录">
+                  <font>
+                     <Font name="System Bold" size="16.0"/>
+                  </font>
+               </Button>
+
+
+               <!-- 底部按钮区域 -->
+               <HBox alignment="CENTER_LEFT">
+                  <children>
+                     <Button fx:id="registerButton" onAction="#handleRegister"
+                             style="-fx-background-color: transparent; -fx-text-fill: #1a73e8; -fx-border-color: transparent; -fx-cursor: hand;"
+                             text="注册">
+                        <font>
+                           <Font size="16.0"/>
+                        </font>
+                     </Button>
+                     <Region HBox.hgrow="ALWAYS"/>
+                     <Button fx:id="bindButton" onAction="#handleBind"
+                             style="-fx-background-color: transparent; -fx-text-fill: #1a73e8; -fx-border-color: transparent; -fx-cursor: hand;"
+                             text="绑定">
+                        <font>
+                           <Font size="16.0"/>
+                        </font>
+                     </Button>
+                  </children>
+               </HBox>
+
+               <!-- 错误信息显示 -->
+               <Label fx:id="errorLabel" text="" textFill="#d93025" visible="false" wrapText="true" >
+                  <font>
+                     <Font size="16.0"/>
+                  </font>
+               </Label>
+
+
+            </children>
+         </VBox>
+         
+         <!-- 进度指示器 -->
+         <ProgressIndicator fx:id="progressIndicator" visible="false" />
+      </VBox>
+   </center>
+
+</BorderPane>

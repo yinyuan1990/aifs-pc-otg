@@ -1,0 +1,56 @@
+# 编译产物
+build/
+release/
+installer_output/
+
+# 运行时依赖（DLL/可执行文件）
+redist/
+*.exe
+*.dll
+*.lib
+*.pdb
+*.exp
+*.ilk
+*.obj
+*.o
+*.a
+
+# Java 编译产物
+*.class
+*.jar
+*.war
+target/
+src/main/lib/
+
+# 视频资源（大文件）
+*.mp4
+
+# 备份目录
+2026-1-31/
+backup_v7.1/
+copycodejpeg/
+copygstream/
+copyh264/
+
+# iOS 子项目（独立 git 仓库）
+ios/
+
+# IDE 配置
+.idea/
+.qtcreator/
+*.user
+*.iml
+
+# 压缩包
+*.zip
+*.rar
+
+# 日志
+*.log
+kirin_log.txt
+yh.txt
+
+# Qt 生成文件
+moc_*.cpp
+qrc_*.cpp
+ui_*.h

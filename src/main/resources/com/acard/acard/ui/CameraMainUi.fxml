@@ -1,0 +1,492 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<?import javafx.geometry.Insets?>
+<?import javafx.scene.control.*?>
+<?import javafx.scene.layout.*?>
+<?import javafx.scene.text.*?>
+<?import javafx.scene.shape.Circle?>
+<?import javafx.scene.image.Image?>
+<?import javafx.scene.image.ImageView?>
+
+<?import java.net.URL?>
+<BorderPane xmlns="http://javafx.com/javafx/17.0.2-ea" xmlns:fx="http://javafx.com/fxml/1"
+            fx:controller="com.acard.acard.ui.CameraMainController"
+            style="-fx-background-color: #1F1F1F;
+                   -fx-background-radius: 20;
+                   -fx-border-radius: 20;
+                   -fx-effect: dropshadow(gaussian, rgba(0,0,0,0.3), 15, 0, 0, 3);"
+>
+   <stylesheets>
+      <URL value="@checkbox-style.css" />
+      <URL value="@combobox-dark.css" />
+   </stylesheets>
+   
+   <top>
+      <!-- 顶部菜单栏 - 深色主题 -->
+      <VBox>
+         <children>
+            <!-- 自定义标题栏 -->
+            <HBox fx:id="titleBar" alignment="CENTER_LEFT" prefHeight="48.0" spacing="16"
+                  style="-fx-background-color: #1F1F1F;
+                         -fx-background-radius: 20 20 0 0;">
+               <children>
+                  <!-- 菜单下拉按钮 -->
+                  <MenuButton fx:id="windowMenuButton" mnemonicParsing="false" prefHeight="32.0"
+                              styleClass="no-arrow-menu"
+                              style="-fx-background-color: #292929;
+                         -fx-background-radius: 8;
+                                     -fx-text-fill: #FAFAFA;
+                         -fx-font-size: 14px;
+                                     -fx-padding: 8 12 8 12;">
+                     <graphic>
+                        <HBox alignment="CENTER" spacing="4">
+                           <children>
+                              <ImageView fitHeight="16" fitWidth="16" preserveRatio="true">
+                                 <image><Image url="@../../design/frame.png"/></image>
+                              </ImageView>
+                              <Label text="菜单" style="-fx-text-fill: #FAFAFA; -fx-font-size: 14px;"/>
+                              <ImageView fitHeight="4" fitWidth="8" preserveRatio="true">
+                                 <image><Image url="@../../design/down.png"/></image>
+                              </ImageView>
+                           </children>
+                        </HBox>
+                     </graphic>
+                     <items>
+                        <MenuItem fx:id="fullScreenMenuItem" mnemonicParsing="false" onAction="#handleFullScreen" text="全屏(F)" />
+                        <MenuItem fx:id="realTimeWindowMenuItem" mnemonicParsing="false" onAction="#handleRealTimeWindow" text="实时窗口切换(G)" />
+                        <MenuItem fx:id="slowMotionWindowMenuItem" mnemonicParsing="false" onAction="#handleSlowMotionWindow" text="慢放窗口切换(H)" />
+                     </items>
+                     <HBox.margin>
+                        <Insets left="12.0" />
+                     </HBox.margin>
+                  </MenuButton>
+
+                  <!-- AI功能按钮（新增） -->
+                  <Button fx:id="aiFunctionButton" mnemonicParsing="false" onAction="#handleAiFunction" prefHeight="32.0"
+                          style="-fx-background-color: #292929;
+                     -fx-background-radius: 8;
+                                 -fx-padding: 8 12 8 12;">
+                     <graphic>
+                        <HBox alignment="CENTER" spacing="4">
+                           <children>
+                              <ImageView fitHeight="16" fitWidth="16" preserveRatio="true">
+                                 <image><Image url="@../../design/ai.png"/></image>
+                              </ImageView>
+                              <Label text="AI" style="-fx-text-fill: linear-gradient(to right, #A9F7A2, #6BE9E6, #3977F4); -fx-font-size: 14px;"/>
+                           </children>
+                        </HBox>
+                     </graphic>
+                  </Button>
+
+                  <!-- 设备绑定按钮 -->
+                  <Button fx:id="deviceBindButton" mnemonicParsing="false" onAction="#handleDeviceBind" prefHeight="32.0"
+                          style="-fx-background-color: #292929;
+                     -fx-background-radius: 8;
+                                 -fx-padding: 8 12 8 12;">
+                     <graphic>
+                        <HBox alignment="CENTER" spacing="4">
+                           <children>
+                              <ImageView fitHeight="16" fitWidth="16" preserveRatio="true">
+                                 <image><Image url="@../../design/sbbd.png"/></image>
+                              </ImageView>
+                              <Label text="绑定" style="-fx-text-fill: #FAFAFA; -fx-font-size: 14px;"/>
+                           </children>
+                        </HBox>
+                     </graphic>
+                  </Button>
+
+                  <!-- 相机设定按钮 -->
+                  <Button fx:id="cameraSettingsButton" mnemonicParsing="false" onAction="#handleCameraSettings" prefHeight="32.0"
+                          style="-fx-background-color: #292929;
+                     -fx-background-radius: 8;
+                                 -fx-padding: 8 12 8 12;">
+                     <graphic>
+                        <HBox alignment="CENTER" spacing="4">
+                           <children>
+                              <ImageView fitHeight="16" fitWidth="16" preserveRatio="true">
+                                 <image><Image url="@../../design/xjsd.png"/></image>
+                              </ImageView>
+                              <Label text="相机" style="-fx-text-fill: #FAFAFA; -fx-font-size: 14px;"/>
+                           </children>
+                        </HBox>
+                     </graphic>
+                  </Button>
+
+                  <!-- 快捷键设置按钮 -->
+                  <Button fx:id="shortcutKeysButton" mnemonicParsing="false" onAction="#handleShortcutKeys" prefHeight="32.0"
+                          style="-fx-background-color: #292929;
+                     -fx-background-radius: 8;
+                                 -fx-padding: 8 12 8 12;">
+                     <graphic>
+                        <HBox alignment="CENTER" spacing="4">
+                           <children>
+                              <ImageView fitHeight="16" fitWidth="16" preserveRatio="true">
+                                 <image><Image url="@../../design/kjjsz.png"/></image>
+                              </ImageView>
+                              <Label text="快捷键" style="-fx-text-fill: #FAFAFA; -fx-font-size: 14px;"/>
+                           </children>
+                        </HBox>
+                     </graphic>
+                  </Button>
+
+                  <!-- 横向排列按钮 -->
+                  <Button fx:id="arrangementModeButton" mnemonicParsing="false" onAction="#toggleArrangementMode" prefHeight="32.0"
+                          style="-fx-background-color: #292929;
+                     -fx-background-radius: 8;
+                                 -fx-padding: 8 12 8 12;">
+                     <graphic>
+                        <HBox alignment="CENTER" spacing="4">
+                           <children>
+                              <ImageView fitHeight="16" fitWidth="16" preserveRatio="true">
+                                 <image><Image url="@../../design/hxpl.png"/></image>
+                              </ImageView>
+                              <Label fx:id="arrangementModeLabel" text="横向排列" style="-fx-text-fill: #FAFAFA; -fx-font-size: 14px;"/>
+                           </children>
+                        </HBox>
+                     </graphic>
+                  </Button>
+
+                  <!-- 全屏模式按钮 -->
+                  <Button fx:id="btnFullScreenMode" mnemonicParsing="false" onAction="#toggleFullScreenMode" prefHeight="32.0"
+                          style="-fx-background-color: #292929;
+                                 -fx-background-radius: 8;
+                                 -fx-padding: 8 12 8 12;">
+                     <graphic>
+                        <HBox alignment="CENTER" spacing="4">
+                           <children>
+                              <ImageView fitHeight="16" fitWidth="16" preserveRatio="true">
+                                 <image><Image url="@../../design/qp.png"/></image>
+                              </ImageView>
+                              <Label fx:id="fullScreenModeLabel" text="全屏（关）" style="-fx-text-fill: #FAFAFA; -fx-font-size: 14px;"/>
+                           </children>
+                        </HBox>
+                     </graphic>
+                     <tooltip>
+                        <Tooltip text="切换全屏模式开关（默认关闭）" />
+                     </tooltip>
+                  </Button>
+
+                  <!-- 行下拉 -->
+                  <MenuButton fx:id="rowMenuButton" mnemonicParsing="false" 
+                              prefHeight="32.0" minHeight="32.0" maxHeight="32.0"
+                              prefWidth="70" minWidth="70"
+                              styleClass="dark-menu-button"
+                              style="-fx-background-color: #292929;
+                                     -fx-background-radius: 8;">
+                     <graphic>
+                        <Label fx:id="rowLabel" text="行：5" style="-fx-text-fill: #FAFAFA; -fx-font-size: 14px;"/>
+                     </graphic>
+                  </MenuButton>
+
+                  <!-- 列下拉 -->
+                  <MenuButton fx:id="colMenuButton" mnemonicParsing="false" 
+                              prefHeight="32.0" minHeight="32.0" maxHeight="32.0"
+                              prefWidth="70" minWidth="70"
+                              styleClass="dark-menu-button"
+                              style="-fx-background-color: #292929;
+                                     -fx-background-radius: 8;">
+                     <graphic>
+                        <Label fx:id="colLabel" text="列：5" style="-fx-text-fill: #FAFAFA; -fx-font-size: 14px;"/>
+                     </graphic>
+                  </MenuButton>
+
+                  <!-- 前下拉 -->
+                  <MenuButton fx:id="frontMenuButton" mnemonicParsing="false" 
+                              prefHeight="32.0" minHeight="32.0" maxHeight="32.0"
+                              prefWidth="85" minWidth="85"
+                              styleClass="dark-menu-button"
+                              style="-fx-background-color: #292929;
+                                     -fx-background-radius: 8;">
+                     <graphic>
+                        <Label fx:id="frontLabel" text="前：10" style="-fx-text-fill: #FAFAFA; -fx-font-size: 14px;"/>
+                     </graphic>
+                  </MenuButton>
+
+                  <!-- 后下拉 -->
+                  <MenuButton fx:id="backMenuButton" mnemonicParsing="false" 
+                              prefHeight="32.0" minHeight="32.0" maxHeight="32.0"
+                              prefWidth="85" minWidth="85"
+                              styleClass="dark-menu-button"
+                              style="-fx-background-color: #292929;
+                                     -fx-background-radius: 8;">
+                     <graphic>
+                        <Label fx:id="backLabel" text="后：10" style="-fx-text-fill: #FAFAFA; -fx-font-size: 14px;"/>
+                     </graphic>
+                  </MenuButton>
+
+                  <!-- 偏移下拉 -->
+                  <MenuButton fx:id="offsetMenuButton" mnemonicParsing="false" 
+                              prefHeight="32.0" minHeight="32.0" maxHeight="32.0"
+                              prefWidth="85" minWidth="85"
+                              styleClass="dark-menu-button"
+                              style="-fx-background-color: #292929;
+                                     -fx-background-radius: 8;">
+                     <graphic>
+                        <Label fx:id="offsetLabel" text="偏移：0" style="-fx-text-fill: #FAFAFA; -fx-font-size: 14px;"/>
+                     </graphic>
+                  </MenuButton>
+
+                  <!-- 右侧窗口控制区域 -->
+                  <Region fx:id="dragRegion" HBox.hgrow="ALWAYS" />
+
+                  <!-- 默认头像 -->
+                  <Button fx:id="avatarButton" mnemonicParsing="false" onAction="#handleAvatar" 
+                          prefHeight="32.0" prefWidth="32.0"
+                          minHeight="32.0" minWidth="32.0"
+                          maxHeight="32.0" maxWidth="32.0"
+                          style="-fx-background-color: transparent;
+                                 -fx-padding: 0;">
+                     <graphic>
+                        <ImageView fitHeight="32" fitWidth="32" preserveRatio="true">
+                           <image><Image url="@../../design/head.png"/></image>
+                        </ImageView>
+                     </graphic>
+                  </Button>
+
+                  <!-- 最小化按钮 -->
+                  <Button fx:id="minimizeButton" mnemonicParsing="false" onAction="#handleMinimize" 
+                          prefHeight="20.0" prefWidth="20.0"
+                          style="-fx-background-color: transparent;
+                                 -fx-padding: 0;">
+                     <graphic>
+                        <ImageView fitHeight="20" fitWidth="20" preserveRatio="true">
+                           <image><Image url="@../../design/bar.png"/></image>
+                        </ImageView>
+                     </graphic>
+                  </Button>
+
+                  <!-- 最大化/还原按钮 -->
+                  <Button fx:id="maximizeButton" mnemonicParsing="false" onAction="#handleMaximize" 
+                          prefHeight="20.0" prefWidth="20.0"
+                          style="-fx-background-color: transparent;
+                                 -fx-padding: 0;">
+                     <graphic>
+                        <ImageView fitHeight="20" fitWidth="20" preserveRatio="true">
+                           <image><Image url="@../../design/max.png"/></image>
+                        </ImageView>
+                     </graphic>
+                  </Button>
+
+                  <!-- 关闭按钮 -->
+                  <Button fx:id="closeButton" mnemonicParsing="false" onAction="#handleClose" 
+                          prefHeight="20.0" prefWidth="20.0"
+                          style="-fx-background-color: transparent;
+                                 -fx-padding: 0;">
+                     <graphic>
+                        <ImageView fitHeight="20" fitWidth="20" preserveRatio="true">
+                           <image><Image url="@../../design/close.png"/></image>
+                        </ImageView>
+                     </graphic>
+                     <HBox.margin>
+                        <Insets right="12.0" />
+                     </HBox.margin>
+                  </Button>
+               </children>
+               <padding>
+                  <Insets left="8.0" right="8.0" top="8.0" bottom="8.0" />
+               </padding>
+            </HBox>
+         </children>
+      </VBox>
+   </top>
+
+
+   <center>
+      <!-- 主要内容区域 -->
+      <SplitPane fx:id="mainContentArea" dividerPositions="0.65" style="-fx-background-color: #1F1F1F;">
+         <BorderPane.margin>
+            <Insets left="10" right="10" />
+         </BorderPane.margin>
+         <items>
+            <!-- 元素1 - 主显示区域 (60%) -->
+            <StackPane fx:id="element1" minWidth="200" style="-fx-background-color: #1F1F1F; -fx-border-color: #1F1F1F; -fx-border-width: 1;">
+               <children>
+                  <Label fx:id="element1Label" text="元素1 - 主显示区域" textFill="#333333">
+                     <font>
+                        <Font size="18.0" />
+                     </font>
+                  </Label>
+               </children>
+            </StackPane>
+            
+            <!-- 元素2 - 副显示区域 (40%) - 使用SplitPane可拖动分割 -->
+            <SplitPane fx:id="element2" orientation="VERTICAL" dividerPositions="0.5"
+                       style="-fx-background-color: #1F1F1F; -fx-box-border: transparent;">
+               <items>
+                  <!-- 元素2-1 - 实时窗口 -->
+                  <StackPane fx:id="element2_1" style="-fx-background-color: #292929;" minHeight="50.0">
+                     <children>
+                        <Label fx:id="element2_1Label" text="元素2-1 - 实时窗口" textFill="#666666">
+                           <font>
+                              <Font size="14.0" />
+                           </font>
+                        </Label>
+                     </children>
+                  </StackPane>
+                  
+                  <!-- 元素2-2 - 慢放窗口 -->
+                  <StackPane fx:id="element2_2" style="-fx-background-color: transparent;" minHeight="50.0">
+                     <children>
+                        <Label fx:id="element2_2Label" text="元素2-2 - 慢放窗口" textFill="#666666">
+                           <font>
+                              <Font size="14.0" />
+                           </font>
+                        </Label>
+                     </children>
+                  </StackPane>
+               </items>
+            </SplitPane>
+         </items>
+      </SplitPane>
+   </center>
+
+
+
+   
+   <bottom>
+
+      <HBox alignment="CENTER_LEFT" prefHeight="30.0"
+            style="-fx-background-color: #292929;
+                   -fx-border-color: transparent;
+                   -fx-border-width: 0;
+                   -fx-background-radius: 8;
+                   -fx-border-radius: 8;
+                   -fx-padding: 8;">
+         <BorderPane.margin>
+            <Insets top="10" />
+         </BorderPane.margin>
+
+         <children>
+            <!-- 左侧状态组 -->
+            <HBox alignment="CENTER_LEFT" spacing="4">
+               <!-- 监控设备 -->
+               <ImageView fitWidth="14" fitHeight="14" preserveRatio="true">
+                  <image><Image url="@/com/acard/design/sb.png"/></image>
+               </ImageView>
+               <Label fx:id="monitorDeviceValue" text="iOS(建议清晰度：50)" textFill="#CCCCCC">
+                  <font><Font name="PingFang HK" size="12.0" /></font>
+            </Label>
+            </HBox>
+
+            <!-- 分隔线 -->
+            <ImageView fitWidth="1" fitHeight="10" preserveRatio="false">
+               <image><Image url="@/com/acard/design/line.png"/></image>
+               <HBox.margin><Insets left="12" right="12" /></HBox.margin>
+            </ImageView>
+
+            <HBox alignment="CENTER_LEFT" spacing="4">
+               <!-- 在线状态（原推送状态）：在线中/未上线 -->
+               <ImageView fitWidth="14" fitHeight="14" preserveRatio="true">
+                  <image><Image url="@/com/acard/design/tszt.png"/></image>
+               </ImageView>
+               <Label fx:id="pushStatusValue" text="未上线" textFill="#CCCCCC">
+                  <font><Font name="PingFang HK" size="12.0" /></font>
+               </Label>
+            </HBox>
+
+            <!-- 分隔线 -->
+            <ImageView fitWidth="1" fitHeight="10" preserveRatio="false">
+               <image><Image url="@/com/acard/design/line.png"/></image>
+               <HBox.margin><Insets left="12" right="12" /></HBox.margin>
+            </ImageView>
+
+            <HBox alignment="CENTER_LEFT" spacing="4">
+               <!-- 网络质量 + fps（挨在一起，无图标） -->
+               <Label fx:id="networkQualityValue" text="未知" textFill="#34C759">
+                  <font><Font name="PingFang HK" size="12.0" /></font>
+               </Label>
+               <Label fx:id="tsfpsValue" text="0fps" textFill="#CCCCCC">
+                  <font><Font name="PingFang HK" size="12.0" /></font>
+                  <HBox.margin><Insets left="6" /></HBox.margin>
+               </Label>
+            </HBox>
+
+            <!-- 分隔线 -->
+            <ImageView fitWidth="1" fitHeight="10" preserveRatio="false">
+               <image><Image url="@/com/acard/design/line.png"/></image>
+               <HBox.margin><Insets left="12" right="12" /></HBox.margin>
+            </ImageView>
+
+            <HBox alignment="CENTER_LEFT" spacing="4">
+               <!-- 码率 -->
+               <Label fx:id="kbpsValue" text="0kb/s" textFill="#CCCCCC">
+                  <font><Font name="PingFang HK" size="12.0" /></font>
+               </Label>
+            </HBox>
+
+            <!-- 分隔线 -->
+            <ImageView fitWidth="1" fitHeight="10" preserveRatio="false">
+               <image><Image url="@/com/acard/design/line.png"/></image>
+               <HBox.margin><Insets left="12" right="12" /></HBox.margin>
+            </ImageView>
+
+            <HBox alignment="CENTER_LEFT" spacing="4">
+               <!-- 电量 -->
+               <ImageView fitWidth="14" fitHeight="14" preserveRatio="true">
+                  <image><Image url="@/com/acard/design/dl.png"/></image>
+               </ImageView>
+               <Label fx:id="batteryValue" text="0%" textFill="#CCCCCC">
+                  <font><Font name="PingFang HK" size="12.0" /></font>
+               </Label>
+            </HBox>
+
+            <!-- 分隔线 -->
+            <ImageView fitWidth="1" fitHeight="10" preserveRatio="false">
+               <image><Image url="@/com/acard/design/line.png"/></image>
+               <HBox.margin><Insets left="12" right="12" /></HBox.margin>
+            </ImageView>
+
+            <HBox alignment="CENTER_LEFT" spacing="4">
+               <!-- 联网类型 -->
+               <Label fx:id="networkTypeValue" text="Wifi" textFill="#CCCCCC">
+                  <font><Font name="PingFang HK" size="12.0" /></font>
+               </Label>
+            </HBox>
+
+            <!-- 分隔线 -->
+            <ImageView fitWidth="1" fitHeight="10" preserveRatio="false">
+               <image><Image url="@/com/acard/design/line.png"/></image>
+               <HBox.margin><Insets left="12" right="12" /></HBox.margin>
+            </ImageView>
+
+            <!-- iOS端：网络质量 + 码率 -->
+            <HBox alignment="CENTER_LEFT" spacing="4">
+               <Label fx:id="controlNetworkQualityValue" text="优秀" textFill="#34C759">
+                  <font><Font name="PingFang HK" size="12.0" /></font>
+               </Label>
+               <Label fx:id="bandwidthValue" text="0kb/s" textFill="#CCCCCC">
+                  <font><Font name="PingFang HK" size="12.0" /></font>
+                  <HBox.margin><Insets left="6" /></HBox.margin>
+               </Label>
+            </HBox>
+
+            <!-- 中间弹性空间 -->
+            <Region HBox.hgrow="ALWAYS" />
+
+            <!-- 滚轮帧数显示 -->
+            <Label fx:id="scrollFrameLabel" text="滚轮帧数: 0" 
+                   style="-fx-background-color: #1F1F1F; -fx-text-fill: #FAFAFA; -fx-font-size: 12px; -fx-background-radius: 8; -fx-padding: 6 12;">
+               <font><Font name="PingFang HK" size="12.0" /></font>
+            </Label>
+
+            <!-- 开启慢放按钮 -->
+            <Button fx:id="startSlowmoButton" text="开启慢放" 
+                    style="-fx-background-color: #1F1F1F; -fx-text-fill: #FAFAFA; -fx-font-size: 12px; -fx-background-radius: 8; -fx-padding: 6 12; -fx-cursor: hand;"
+                    onAction="#onStartSlowmoClick">
+               <font><Font name="PingFang HK" size="12.0" /></font>
+               <HBox.margin><Insets left="8" /></HBox.margin>
+            </Button>
+            
+            <!-- 清空慢放按钮 -->
+            <Button fx:id="clearSlowmoButton" text="清空慢放" 
+                    style="-fx-background-color: #1F1F1F; -fx-text-fill: #FAFAFA; -fx-font-size: 12px; -fx-background-radius: 8; -fx-padding: 6 12; -fx-cursor: hand;"
+                    onAction="#onClearSlowmoClick">
+               <font><Font name="PingFang HK" size="12.0" /></font>
+               <HBox.margin><Insets left="8" /></HBox.margin>
+            </Button>
+         </children>
+      </HBox>
+      <!-- 状态栏 -->
+
+   </bottom>
+</BorderPane>

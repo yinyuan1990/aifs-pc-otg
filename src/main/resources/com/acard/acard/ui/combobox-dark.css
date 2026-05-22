@@ -1,0 +1,446 @@
+/* ========== 深色 ComboBox 样式 ========== */
+
+/* ComboBox 的选中项文字颜色 */
+.dark-combo-box .list-cell {
+    -fx-text-fill: white;
+    -fx-background-color: #4b5563;
+    -fx-font-weight: 600;
+}
+
+/* ComboBox 的选中项（显示在框内的） */
+.dark-combo-box .list-cell:filled:selected {
+    -fx-background-color: #4b5563;
+    -fx-text-fill: white;
+    -fx-font-weight: 600;
+}
+
+/* ComboBox 下拉列表背景 */
+.dark-combo-box .list-view {
+    -fx-background-color: #374151;
+}
+
+/* ComboBox 下拉列表的项 */
+.dark-combo-box .list-view .list-cell {
+    -fx-background-color: #374151;
+    -fx-text-fill: white;
+    -fx-font-weight: 600;
+}
+
+/* ComboBox 下拉列表的项（悬停） */
+.dark-combo-box .list-view .list-cell:hover {
+    -fx-background-color: #4b5563;
+    -fx-text-fill: white;
+    -fx-font-weight: 600;
+}
+
+/* ComboBox 下拉列表的项（选中） */
+.dark-combo-box .list-view .list-cell:filled:selected {
+    -fx-background-color: #135bec;
+    -fx-text-fill: white;
+    -fx-font-weight: 600;
+}
+
+/* ComboBox 箭头按钮 */
+.dark-combo-box .arrow-button {
+    -fx-background-color: transparent;
+}
+
+/* ComboBox 箭头 */
+.dark-combo-box .arrow {
+    -fx-background-color: white;
+}
+
+/* ========== Slider（滑块）样式 ========== */
+
+/* 滑块轨道（已走过的部分）*/
+.slider .track {
+    -fx-background-color: #4b5563;
+    -fx-background-radius: 3;
+}
+
+/* 滑块轨道（蓝色进度部分）*/
+.slider .track .fill {
+    -fx-background-color: #135bec;
+    -fx-background-radius: 3;
+}
+
+/* 滑块圆圈（thumb）*/
+.slider .thumb {
+    -fx-background-color: #135bec;
+    -fx-background-radius: 50%;
+    -fx-pref-width: 16px;
+    -fx-pref-height: 16px;
+    -fx-min-width: 16px;
+    -fx-min-height: 16px;
+    -fx-max-width: 16px;
+    -fx-max-height: 16px;
+}
+
+/* 滑块圆圈（悬停状态）*/
+.slider .thumb:hover {
+    -fx-background-color: #1e69ff;
+    -fx-scale-x: 1.1;
+    -fx-scale-y: 1.1;
+}
+
+/* 滑块圆圈（按下状态）- 保持蓝色不变 */
+.slider .thumb:pressed {
+    -fx-background-color: #135bec;
+}
+
+/* ========== 矩形滑块样式（慢放进度条专用） ========== */
+
+/* 矩形滑块 - 轨道 */
+.rect-slider .track {
+    -fx-background-color: #4b5563;
+    -fx-background-radius: 2;
+    -fx-pref-height: 6px;
+}
+
+/* 矩形滑块 - 滑块手柄（矩形，宽20px） */
+.rect-slider .thumb {
+    -fx-background-color: #135bec;
+    -fx-background-radius: 3;
+    -fx-pref-width: 20px;
+    -fx-pref-height: 20px;
+    -fx-min-width: 20px;
+    -fx-min-height: 20px;
+    -fx-max-width: 20px;
+    -fx-max-height: 20px;
+    -fx-cursor: hand;
+}
+
+/* 矩形滑块 - 悬停状态 */
+.rect-slider .thumb:hover {
+    -fx-background-color: #1e69ff;
+}
+
+/* 矩形滑块 - 按下状态 */
+.rect-slider .thumb:pressed {
+    -fx-background-color: #0d4abf;
+}
+
+/* ========== 隐藏 MenuButton 默认箭头 ========== */
+
+/* 隐藏默认的下拉箭头按钮 */
+.no-arrow-menu .arrow-button {
+    -fx-padding: 0;
+    -fx-min-width: 0;
+    -fx-pref-width: 0;
+    -fx-max-width: 0;
+}
+
+/* 隐藏箭头图标 */
+.no-arrow-menu .arrow {
+    -fx-padding: 0;
+    -fx-shape: "";
+    -fx-min-width: 0;
+    -fx-pref-width: 0;
+    -fx-max-width: 0;
+    -fx-min-height: 0;
+    -fx-pref-height: 0;
+    -fx-max-height: 0;
+}
+
+/* ========== 慢放进度条样式 ========== */
+
+.slowmo-slider .track {
+    -fx-background-color: rgba(255, 255, 255, 0.3);
+    -fx-background-radius: 38;
+    -fx-pref-height: 4;
+}
+
+.slowmo-slider .colored-track {
+    -fx-background-color: #FAFAFA;
+    -fx-background-radius: 35;
+}
+
+.slowmo-slider .thumb {
+    -fx-background-color: #FAFAFA;
+    -fx-background-radius: 50%;
+    -fx-pref-width: 10;
+    -fx-pref-height: 10;
+    -fx-background-insets: 0;
+}
+
+.slowmo-slider:focused .thumb {
+    -fx-background-color: #FAFAFA;
+}
+
+/* ========== SplitPane 深色主题 ========== */
+
+.split-pane {
+    -fx-background-color: #1F1F1F;
+    -fx-padding: 0;
+}
+
+/* 水平分割线 */
+.split-pane > .split-pane-divider {
+    -fx-background-color: #1F1F1F;
+    -fx-padding: 3;
+    -fx-background-insets: 0;
+}
+
+/* 垂直方向的SplitPane分割线 */
+.split-pane:vertical > .split-pane-divider {
+    -fx-background-color: #1F1F1F;
+    -fx-padding: 3;
+    -fx-background-insets: 0;
+    -fx-cursor: v-resize;
+}
+
+/* ========== ScrollPane 深色背景 ========== */
+
+.scroll-pane {
+    -fx-background-color: #1F1F1F;
+    -fx-background: #1F1F1F;
+    -fx-border-color: transparent;
+    -fx-border-width: 0;
+    -fx-padding: 0;
+}
+
+.scroll-pane > .viewport {
+    -fx-background-color: #1F1F1F;
+}
+
+.scroll-pane:focused {
+    -fx-background-color: #1F1F1F;
+    -fx-border-color: transparent;
+}
+
+/* ========== 深色 MenuButton 样式（使用自带箭头） ========== */
+
+/* MenuButton 自带箭头颜色 */
+.dark-menu-button .arrow {
+    -fx-background-color: #FAFAFA;
+}
+
+/* MenuButton 箭头按钮背景透明 */
+.dark-menu-button .arrow-button {
+    -fx-background-color: transparent;
+}
+
+/* MenuButton 文字颜色白色 */
+.dark-menu-button .label {
+    -fx-text-fill: #FAFAFA;
+}
+
+/* ========== 深色 MenuButton 下拉菜单样式 ========== */
+
+/* ========== GpuView 底部按钮样式 ========== */
+
+/* ComboBox 深色样式 */
+.dark-combo-box {
+    -fx-background-color: #292929;
+    -fx-background-radius: 8;
+    -fx-border-color: transparent;
+}
+
+/* 选中值显示区域 - 所有可能的选择器 */
+.dark-combo-box .cell,
+.dark-combo-box .list-cell,
+.dark-combo-box .combo-box-base,
+.dark-combo-box > .list-cell,
+.dark-combo-box .text-input {
+    -fx-text-fill: #FAFAFA;
+    -fx-font-size: 12px;
+    -fx-background-color: #292929;
+    -fx-background-insets: 0;
+    -fx-background-radius: 8;
+    -fx-padding: 0 4 0 8;
+    -fx-border-color: transparent;
+}
+
+/* 聚焦状态也保持一致 */
+.dark-combo-box:focused .cell,
+.dark-combo-box:focused .list-cell {
+    -fx-background-color: #292929;
+    -fx-border-color: transparent;
+}
+
+.dark-combo-box .arrow-button {
+    -fx-background-color: #292929;
+    -fx-padding: 0 8 0 0;
+}
+
+.dark-combo-box .arrow {
+    -fx-background-color: #999999;
+}
+
+/* 下拉弹出框样式 */
+.dark-combo-box .combo-box-popup .list-view {
+    -fx-background-color: #292929;
+    -fx-border-color: #3a3a3a;
+    -fx-border-radius: 8;
+    -fx-background-radius: 8;
+    -fx-padding: 4;
+}
+
+.dark-combo-box .combo-box-popup .list-cell {
+    -fx-text-fill: #FAFAFA;
+    -fx-background-color: transparent;
+    -fx-padding: 6 12;
+}
+
+.dark-combo-box .combo-box-popup .list-cell:hover {
+    -fx-background-color: #3a3a3a;
+    -fx-background-radius: 4;
+}
+
+.dark-combo-box .combo-box-popup .list-cell:selected {
+    -fx-background-color: #3a3a3a;
+    -fx-background-radius: 4;
+}
+
+/* 下拉菜单背景 */
+.no-arrow-menu .context-menu,
+.dark-menu-button .context-menu {
+    -fx-background-color: #292929;
+    -fx-background-radius: 8;
+    -fx-border-color: #3a3a3a;
+    -fx-border-radius: 8;
+    -fx-border-width: 1;
+    -fx-padding: 4;
+}
+
+/* 下拉菜单项 */
+.no-arrow-menu .menu-item,
+.dark-menu-button .menu-item {
+    -fx-background-color: transparent;
+    -fx-padding: 6 12 6 12;
+}
+
+/* 下拉菜单项文字 */
+.no-arrow-menu .menu-item .label,
+.dark-menu-button .menu-item .label {
+    -fx-text-fill: #FAFAFA;
+    -fx-font-size: 14px;
+}
+
+/* 下拉菜单项悬停 */
+.no-arrow-menu .menu-item:hover,
+.dark-menu-button .menu-item:hover {
+    -fx-background-color: #3a3a3a;
+    -fx-background-radius: 4;
+}
+
+/* 下拉菜单项聚焦 */
+.no-arrow-menu .menu-item:focused,
+.dark-menu-button .menu-item:focused {
+    -fx-background-color: #3a3a3a;
+    -fx-background-radius: 4;
+}
+
+/* 下拉菜单项选中/按下 */
+.no-arrow-menu .menu-item:pressed,
+.dark-menu-button .menu-item:pressed {
+    -fx-background-color: #135bec;
+    -fx-background-radius: 4;
+}
+
+/* ========== 登录界面设备选择下拉框样式 ========== */
+
+.device-combo-box {
+    -fx-background-color: #292929;
+    -fx-background-radius: 28;
+    -fx-border-color: #3a3a3a;
+    -fx-border-width: 1;
+    -fx-border-radius: 28;
+}
+
+.device-combo-box .list-cell {
+    -fx-background-color: transparent;
+    -fx-text-fill: white;
+    -fx-padding: 10 15;
+    -fx-background-radius: 28 0 0 28;
+}
+
+.device-combo-box .arrow-button {
+    -fx-background-color: transparent;
+    -fx-background-radius: 0 28 28 0;
+    -fx-padding: 0 15 0 0;
+}
+
+.device-combo-box .arrow {
+    -fx-background-color: #64748b;
+}
+
+/* 下拉弹出框 */
+.device-combo-box .combo-box-popup .list-view {
+    -fx-background-color: #292929;
+    -fx-border-color: #3a3a3a;
+    -fx-border-radius: 12;
+    -fx-background-radius: 12;
+    -fx-padding: 8;
+}
+
+.device-combo-box .combo-box-popup .list-cell {
+    -fx-background-color: transparent;
+    -fx-text-fill: white;
+    -fx-padding: 8 12;
+}
+
+.device-combo-box .combo-box-popup .list-cell:hover {
+    -fx-background-color: #3a3a3a;
+    -fx-background-radius: 8;
+}
+
+.device-combo-box .combo-box-popup .list-cell:selected {
+    -fx-background-color: #607AFB;
+    -fx-background-radius: 8;
+}
+
+/* ========== 深色滚动条样式 ========== */
+
+.dark-scroll-pane {
+    -fx-background-color: transparent;
+    -fx-background: transparent;
+}
+
+.dark-scroll-pane > .viewport {
+    -fx-background-color: transparent;
+}
+
+/* 垂直滚动条 */
+.dark-scroll-pane .scroll-bar:vertical {
+    -fx-background-color: transparent;
+    -fx-pref-width: 8px;
+    -fx-padding: 2;
+}
+
+.dark-scroll-pane .scroll-bar:vertical .track {
+    -fx-background-color: #292929;
+    -fx-background-radius: 4;
+}
+
+.dark-scroll-pane .scroll-bar:vertical .thumb {
+    -fx-background-color: #4a4a4a;
+    -fx-background-radius: 4;
+}
+
+.dark-scroll-pane .scroll-bar:vertical .thumb:hover {
+    -fx-background-color: #5a5a5a;
+}
+
+.dark-scroll-pane .scroll-bar:vertical .thumb:pressed {
+    -fx-background-color: #607AFB;
+}
+
+/* 隐藏滚动条箭头按钮 */
+.dark-scroll-pane .scroll-bar .increment-button,
+.dark-scroll-pane .scroll-bar .decrement-button {
+    -fx-pref-height: 0;
+    -fx-pref-width: 0;
+    -fx-min-height: 0;
+    -fx-min-width: 0;
+    -fx-padding: 0;
+}
+
+.dark-scroll-pane .scroll-bar .increment-arrow,
+.dark-scroll-pane .scroll-bar .decrement-arrow {
+    -fx-pref-height: 0;
+    -fx-pref-width: 0;
+    -fx-padding: 0;
+    -fx-shape: "";
+}
+

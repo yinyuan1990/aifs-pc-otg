@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<?import javafx.scene.control.ScrollPane?>
+<?import javafx.scene.layout.GridPane?>
+
+<!--
+    ⚡ Element1 V2 - 高效版本
+    - 0延迟切换排列方向
+    - 增量操作，不清空重建
+    - 智能尺寸适配
+    - 支持拖动实时刷新
+-->
+
+<ScrollPane fx:id="scroll" 
+            xmlns:fx="http://javafx.com/fxml"
+            fx:controller="com.acard.acard.ui.Element1ControllerV2"
+            fitToWidth="true" 
+            fitToHeight="true"
+            hbarPolicy="NEVER"
+            vbarPolicy="NEVER"
+            style="-fx-background-color: #1F1F1F; -fx-background: #1F1F1F; -fx-border-color: transparent; -fx-border-width: 0;">
+    
+    <GridPane fx:id="grid"
+              style="-fx-background-color: #1F1F1F; -fx-padding: 2;"
+              hgap="2"
+              vgap="2"/>
+    
+</ScrollPane>
+

@@ -1,0 +1,882 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>帧率平滑算法演示 - Phoenix</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        
+        body {
+            font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif;
+            background: linear-gradient(135deg, #0d1117 0%, #161b22 50%, #21262d 100%);
+            min-height: 100vh;
+            color: #e6edf3;
+            padding: 20px;
+            line-height: 1.6;
+        }
+        
+        .container { max-width: 1600px; margin: 0 auto; }
+        
+        h1 {
+            text-align: center;
+            font-size: 2.2em;
+            margin-bottom: 8px;
+            background: linear-gradient(90deg, #58a6ff, #3fb950, #f0883e);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        
+        .subtitle { text-align: center; color: #8b949e; margin-bottom: 25px; }
+        
+        .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px; }
+        .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 20px; margin-bottom: 20px; }
+        .full-width { grid-column: 1 / -1; }
+        
+        .card {
+            background: rgba(22, 27, 34, 0.8);
+            border-radius: 12px;
+            padding: 20px;
+            border: 1px solid #30363d;
+        }
+        
+        .card-title {
+            font-size: 1.1em;
+            margin-bottom: 15px;
+            color: #58a6ff;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            border-bottom: 1px solid #30363d;
+            padding-bottom: 10px;
+        }
+        
+        /* 数学公式样式 */
+        .math-block {
+            background: #0d1117;
+            border-radius: 8px;
+            padding: 15px;
+            margin: 10px 0;
+            font-family: 'Cambria Math', 'Times New Roman', serif;
+            font-size: 1.1em;
+            border-left: 3px solid #58a6ff;
+            overflow-x: auto;
+        }
+        
+        .math-block .formula {
+            color: #f0883e;
+            font-weight: bold;
+        }
+        
+        .math-block .desc {
+            color: #8b949e;
+            font-size: 0.9em;
+            margin-top: 5px;
+        }
+        
+        .var { color: #58a6ff; font-style: italic; }
+        .const { color: #3fb950; }
+        .highlight { color: #f0883e; font-weight: bold; }
+        
+        /* 参数表格 */
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 10px 0;
+            font-size: 0.9em;
+        }
+        
+        th, td {
+            padding: 10px;
+            text-align: left;
+            border-bottom: 1px solid #30363d;
+        }
+        
+        th { background: #21262d; color: #58a6ff; }
+        tr:hover { background: rgba(88, 166, 255, 0.1); }
+        
+        /* 控制面板 */
+        .controls { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; }
+        
+        .control-group {
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+        }
+        
+        .control-group label { font-size: 0.85em; color: #8b949e; }
+        
+        .control-group input[type="range"] {
+            width: 100%;
+            height: 6px;
+            border-radius: 3px;
+            background: #30363d;
+            outline: none;
+            -webkit-appearance: none;
+        }
+        
+        .control-group input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 16px;
+            height: 16px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, #58a6ff, #3fb950);
+            cursor: pointer;
+        }
+        
+        .value-display {
+            font-size: 1.3em;
+            font-weight: bold;
+            color: #3fb950;
+            text-align: right;
+        }
+        
+        /* 状态指示 */
+        .status-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; }
+        
+        .status-item {
+            text-align: center;
+            padding: 12px 8px;
+            background: #0d1117;
+            border-radius: 8px;
+            border: 1px solid #30363d;
+        }
+        
+        .status-label { font-size: 0.75em; color: #8b949e; }
+        .status-value { font-size: 1.4em; font-weight: bold; margin-top: 5px; }
+        .status-value.good { color: #3fb950; }
+        .status-value.warn { color: #f0883e; }
+        .status-value.bad { color: #f85149; }
+        
+        /* 延迟等级指示器 */
+        .level-indicator {
+            display: flex;
+            gap: 8px;
+            margin: 15px 0;
+        }
+        
+        .level-bar {
+            flex: 1;
+            height: 40px;
+            border-radius: 6px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.8em;
+            font-weight: bold;
+            opacity: 0.3;
+            transition: all 0.3s ease;
+            flex-direction: column;
+        }
+        
+        .level-bar.active {
+            opacity: 1;
+            transform: scale(1.05);
+            box-shadow: 0 0 15px currentColor;
+        }
+        
+        .level-bar.l0 { background: #238636; color: #fff; }
+        .level-bar.l1 { background: #3fb950; color: #000; }
+        .level-bar.l2 { background: #f0883e; color: #000; }
+        .level-bar.l3 { background: #db6d28; color: #fff; }
+        .level-bar.l4 { background: #f85149; color: #fff; }
+        
+        .level-bar .latency { font-size: 0.7em; opacity: 0.8; }
+        
+        /* 管道可视化 */
+        .pipeline {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 15px 0;
+        }
+        
+        .pipeline-stage {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .stage-box {
+            width: 110px;
+            height: 70px;
+            border-radius: 10px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.8em;
+            font-weight: bold;
+        }
+        
+        .stage-box.ios { background: linear-gradient(135deg, #f85149, #da3633); }
+        .stage-box.gst { background: linear-gradient(135deg, #a371f7, #8957e5); }
+        .stage-box.app { background: linear-gradient(135deg, #58a6ff, #1f6feb); }
+        .stage-box.render { background: linear-gradient(135deg, #3fb950, #238636); }
+        
+        .stage-value { font-size: 1.2em; margin-top: 3px; }
+        
+        .pipeline-arrow {
+            flex: 1;
+            height: 3px;
+            background: linear-gradient(90deg, transparent, #58a6ff, transparent);
+            margin: 0 -5px;
+        }
+        
+        .frame-container {
+            height: 50px;
+            display: flex;
+            align-items: center;
+            gap: 3px;
+            padding: 8px;
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 6px;
+        }
+        
+        .frame {
+            width: 10px;
+            height: 35px;
+            border-radius: 2px;
+            transition: all 0.2s ease;
+        }
+        
+        .frame.active { background: linear-gradient(180deg, #3fb950, #58a6ff); }
+        .frame.waiting { background: #30363d; }
+        
+        /* 图表 */
+        .chart-container {
+            height: 180px;
+            background: #0d1117;
+            border-radius: 8px;
+            padding: 10px;
+            position: relative;
+        }
+        
+        canvas { width: 100%; height: 100%; }
+        
+        /* 按钮 */
+        .btn-group { display: flex; gap: 10px; margin-top: 15px; }
+        
+        .btn {
+            flex: 1;
+            padding: 10px 16px;
+            border: none;
+            border-radius: 6px;
+            font-size: 0.9em;
+            font-weight: bold;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+        
+        .btn-primary { background: linear-gradient(135deg, #238636, #3fb950); color: #fff; }
+        .btn-primary:hover { transform: translateY(-2px); box-shadow: 0 4px 12px rgba(63, 185, 80, 0.4); }
+        .btn-danger { background: linear-gradient(135deg, #da3633, #f85149); color: #fff; }
+        .btn-secondary { background: #30363d; color: #e6edf3; border: 1px solid #484f58; }
+        
+        /* 日志 */
+        .log-container {
+            height: 120px;
+            overflow-y: auto;
+            background: #0d1117;
+            border-radius: 6px;
+            padding: 10px;
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 0.8em;
+        }
+        
+        .log-line { padding: 2px 0; border-bottom: 1px solid #21262d; }
+        .log-time { color: #6e7681; }
+        .log-level { color: #a371f7; }
+        .log-receive { color: #58a6ff; }
+        .log-render { color: #3fb950; }
+        .log-buffer { color: #f0883e; }
+        
+        /* 实时计算展示 */
+        .calc-display {
+            background: #0d1117;
+            border-radius: 8px;
+            padding: 15px;
+            font-family: 'Consolas', monospace;
+            font-size: 0.95em;
+        }
+        
+        .calc-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 5px 0;
+            border-bottom: 1px dashed #30363d;
+        }
+        
+        .calc-row:last-child { border-bottom: none; }
+        .calc-label { color: #8b949e; }
+        .calc-value { color: #3fb950; font-weight: bold; }
+        
+        @media (max-width: 1200px) {
+            .grid-2, .grid-3 { grid-template-columns: 1fr; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎬 帧率平滑算法 - 完整数学模型</h1>
+        <p class="subtitle">Phoenix 应用层 Jitter Buffer + 自适应消费 + 渐进式延迟调整</p>
+        
+        <!-- 数学原理部分 -->
+        <div class="grid-2">
+            <div class="card">
+                <div class="card-title">📐 核心数学公式</div>
+                
+                <div class="math-block">
+                    <div class="formula">1. 指数移动平均 (EMA)</div>
+                    <div><span class="var">X</span>(t) = <span class="const">α</span> × <span class="var">X</span><sub>raw</sub> + (1 - <span class="const">α</span>) × <span class="var">X</span>(t-1)</div>
+                    <div class="desc">α 越小越平滑，响应越慢；α 越大响应越快但波动大</div>
+                </div>
+                
+                <div class="math-block">
+                    <div class="formula">2. 到达速率估计</div>
+                    <div><span class="var">R</span>(t) = <span class="const">0.3</span> × <span class="var">R</span><sub>raw</sub> + <span class="const">0.7</span> × <span class="var">R</span>(t-1)</div>
+                    <div class="desc">R<sub>raw</sub> = 当前秒实际到达帧数，支持 5-60fps 任意帧率</div>
+                </div>
+                
+                <div class="math-block">
+                    <div class="formula">3. 缓冲深度平滑</div>
+                    <div><span class="var">D</span>(t) = <span class="const">0.2</span> × <span class="var">D</span><sub>raw</sub> + <span class="const">0.8</span> × <span class="var">D</span>(t-1)</div>
+                    <div class="desc">β=0.2 非常平滑，避免深度波动导致间隔跳变</div>
+                </div>
+                
+                <div class="math-block">
+                    <div class="formula">4. 自适应消费间隔</div>
+                    <div><span class="var">I</span><sub>base</sub> = 1000 / <span class="var">R</span>(t)</div>
+                    <div><span class="var">E</span>(t) = <span class="var">Target</span> - <span class="var">D</span>(t)</div>
+                    <div><span class="var">I</span><sub>raw</sub> = <span class="var">I</span><sub>base</sub> + <span class="const">K<sub>p</sub></span> × <span class="var">E</span>(t)</div>
+                    <div><span class="var">I</span>(t) = <span class="const">0.3</span> × <span class="var">I</span><sub>raw</sub> + <span class="const">0.7</span> × <span class="var">I</span>(t-1)</div>
+                    <div class="desc">K<sub>p</sub>=2.0 比例补偿系数，误差越大调整越快</div>
+                </div>
+            </div>
+            
+            <div class="card">
+                <div class="card-title">📊 算法参数表</div>
+                <table>
+                    <tr><th>参数</th><th>符号</th><th>值</th><th>含义</th></tr>
+                    <tr><td>到达率EMA系数</td><td class="var">α</td><td class="const">0.3</td><td>响应较快，跟踪帧率变化</td></tr>
+                    <tr><td>深度EMA系数</td><td class="var">β</td><td class="const">0.2</td><td>非常平滑，避免跳变</td></tr>
+                    <tr><td>间隔EMA系数</td><td class="var">γ</td><td class="const">0.3</td><td>渐变过渡，丝滑体验</td></tr>
+                    <tr><td>比例补偿系数</td><td class="var">K<sub>p</sub></td><td class="const">2.0</td><td>误差放大倍数</td></tr>
+                    <tr><td>最大加速倍率</td><td>-</td><td class="const">1.3x</td><td>温和追赶，防快进</td></tr>
+                    <tr><td>最大减速倍率</td><td>-</td><td class="const">0.5x</td><td>等待帧到来</td></tr>
+                    <tr><td>降级确认时间</td><td>-</td><td class="const">10秒</td><td>网络稳定才降延迟</td></tr>
+                </table>
+                
+                <div class="math-block">
+                    <div class="formula">5. 动态范围限制</div>
+                    <div><span class="var">I</span><sub>min</sub> = <span class="var">I</span><sub>base</sub> / <span class="const">1.3</span> (最快1.3倍速)</div>
+                    <div><span class="var">I</span><sub>max</sub> = <span class="var">I</span><sub>base</sub> / <span class="const">0.5</span> (最慢0.5倍速)</div>
+                    <div><span class="var">I</span><sub>final</sub> = clamp(<span class="var">I</span>(t), <span class="var">I</span><sub>min</sub>, <span class="var">I</span><sub>max</sub>)</div>
+                    <div class="desc">自动适应 5-60fps 任意帧率</div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- 延迟等级系统 -->
+        <div class="card full-width">
+            <div class="card-title">🎚️ 渐进式延迟调整系统</div>
+            <div class="grid-2">
+                <div>
+                    <h4 style="color: #8b949e; margin-bottom: 10px;">延迟等级配置</h4>
+                    <table>
+                        <tr><th>等级</th><th>名称</th><th>GStreamer</th><th>应用层缓冲</th><th>总延迟</th></tr>
+                        <tr><td>0</td><td style="color:#238636">EXCELLENT</td><td>200ms</td><td>6帧(200ms)</td><td>~400ms</td></tr>
+                        <tr><td>1</td><td style="color:#3fb950">GOOD</td><td>300ms</td><td>9帧(300ms)</td><td>~600ms</td></tr>
+                        <tr><td>2</td><td style="color:#f0883e">FAIR</td><td>500ms</td><td>15帧(500ms)</td><td>~1000ms</td></tr>
+                        <tr><td>3</td><td style="color:#db6d28">POOR</td><td>1000ms</td><td>30帧(1000ms)</td><td>~2000ms</td></tr>
+                        <tr><td>4</td><td style="color:#f85149">BAD</td><td>2000ms</td><td>60帧(2000ms)</td><td>~4000ms</td></tr>
+                    </table>
+                </div>
+                <div>
+                    <h4 style="color: #8b949e; margin-bottom: 10px;">调整规则</h4>
+                    <div class="math-block">
+                        <div class="formula">升级规则（网络变差）</div>
+                        <div>if <span class="var">Quality</span><sub>new</sub> > <span class="var">Level</span><sub>current</sub>:</div>
+                        <div style="padding-left: 20px;"><span class="highlight">立即升级</span> → 快速响应网络恶化</div>
+                    </div>
+                    <div class="math-block">
+                        <div class="formula">降级规则（网络变好）</div>
+                        <div>if <span class="var">Quality</span><sub>new</sub> < <span class="var">Level</span><sub>current</sub>:</div>
+                        <div style="padding-left: 20px;"><span class="var">Counter</span>++</div>
+                        <div style="padding-left: 20px;">if <span class="var">Counter</span> ≥ <span class="const">10</span>:</div>
+                        <div style="padding-left: 40px;"><span class="highlight">降一级</span> → 渐进式降级防快进</div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="level-indicator">
+                <div class="level-bar l0" id="level-0">EXCELLENT<br><span class="latency">200+200ms</span></div>
+                <div class="level-bar l1" id="level-1">GOOD<br><span class="latency">300+300ms</span></div>
+                <div class="level-bar l2" id="level-2">FAIR<br><span class="latency">500+500ms</span></div>
+                <div class="level-bar l3" id="level-3">POOR<br><span class="latency">1000+1000ms</span></div>
+                <div class="level-bar l4" id="level-4">BAD<br><span class="latency">2000+2000ms</span></div>
+            </div>
+        </div>
+        
+        <!-- 控制面板和状态 -->
+        <div class="grid-3">
+            <div class="card">
+                <div class="card-title">🎮 模拟控制</div>
+                <div class="controls">
+                    <div class="control-group">
+                        <label>iOS 推流帧率 (5-60fps)</label>
+                        <input type="range" id="targetFps" min="5" max="60" value="30">
+                        <div class="value-display" id="targetFpsValue">30 fps</div>
+                    </div>
+                    <div class="control-group">
+                        <label>网络抖动强度 (0-100%)</label>
+                        <input type="range" id="jitter" min="0" max="100" value="20">
+                        <div class="value-display" id="jitterValue">20%</div>
+                    </div>
+                    <div class="control-group">
+                        <label>丢包率 (0-50%)</label>
+                        <input type="range" id="packetLoss" min="0" max="50" value="5">
+                        <div class="value-display" id="packetLossValue">5%</div>
+                    </div>
+                    <div class="control-group">
+                        <label>qDepay积压模拟 (0-20)</label>
+                        <input type="range" id="qDepay" min="0" max="20" value="0">
+                        <div class="value-display" id="qDepayValue">0</div>
+                    </div>
+                </div>
+                <div class="btn-group">
+                    <button class="btn btn-primary" onclick="toggleSimulation()">▶ 开始</button>
+                    <button class="btn btn-danger" onclick="simulateNetworkDrop()">⚡ 断网</button>
+                    <button class="btn btn-secondary" onclick="resetSimulation()">↺ 重置</button>
+                </div>
+            </div>
+            
+            <div class="card">
+                <div class="card-title">📈 实时状态</div>
+                <div class="status-grid">
+                    <div class="status-item">
+                        <div class="status-label">到达率</div>
+                        <div class="status-value good" id="arrivalRate">30.0</div>
+                    </div>
+                    <div class="status-item">
+                        <div class="status-label">缓冲深度</div>
+                        <div class="status-value good" id="bufferDepth">6</div>
+                    </div>
+                    <div class="status-item">
+                        <div class="status-label">深度EMA</div>
+                        <div class="status-value good" id="depthEma">6.0</div>
+                    </div>
+                    <div class="status-item">
+                        <div class="status-label">间隔(ms)</div>
+                        <div class="status-value good" id="interval">33</div>
+                    </div>
+                    <div class="status-item">
+                        <div class="status-label">稳定计数</div>
+                        <div class="status-value" id="stableCounter">0</div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="card">
+                <div class="card-title">🧮 实时计算</div>
+                <div class="calc-display">
+                    <div class="calc-row">
+                        <span class="calc-label">I<sub>base</sub> = 1000/R(t)</span>
+                        <span class="calc-value" id="calc-base">33.3ms</span>
+                    </div>
+                    <div class="calc-row">
+                        <span class="calc-label">E(t) = Target - D(t)</span>
+                        <span class="calc-value" id="calc-error">0.0</span>
+                    </div>
+                    <div class="calc-row">
+                        <span class="calc-label">I<sub>raw</sub> = base + 2×E</span>
+                        <span class="calc-value" id="calc-raw">33.3ms</span>
+                    </div>
+                    <div class="calc-row">
+                        <span class="calc-label">I<sub>min</sub> ~ I<sub>max</sub></span>
+                        <span class="calc-value" id="calc-range">25.6~66.7ms</span>
+                    </div>
+                    <div class="calc-row">
+                        <span class="calc-label">I<sub>final</sub> (EMA平滑)</span>
+                        <span class="calc-value highlight" id="calc-final">33.3ms</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- 管道可视化 -->
+        <div class="card">
+            <div class="card-title">🔄 数据流管道</div>
+            <div class="pipeline">
+                <div class="pipeline-stage">
+                    <div class="stage-box ios">iOS推流<div class="stage-value" id="ios-fps">30fps</div></div>
+                </div>
+                <div class="pipeline-arrow"></div>
+                <div class="pipeline-stage">
+                    <div class="stage-box gst">GStreamer<div class="stage-value" id="gst-latency">200ms</div></div>
+                    <div class="frame-container" id="gst-frames"></div>
+                </div>
+                <div class="pipeline-arrow"></div>
+                <div class="pipeline-stage">
+                    <div class="stage-box app">应用层缓冲<div class="stage-value" id="app-buffer">6帧</div></div>
+                    <div class="frame-container" id="app-frames"></div>
+                </div>
+                <div class="pipeline-arrow"></div>
+                <div class="pipeline-stage">
+                    <div class="stage-box render">渲染显示<div class="stage-value" id="render-fps">30fps</div></div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- 图表和日志 -->
+        <div class="grid-2">
+            <div class="card">
+                <div class="card-title">📉 缓冲深度 & 消费间隔</div>
+                <div class="chart-container"><canvas id="chart1"></canvas></div>
+            </div>
+            <div class="card">
+                <div class="card-title">📋 算法日志</div>
+                <div class="log-container" id="logContainer"></div>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        // ========== 算法常量 ==========
+        const ALPHA_RATE = 0.3, BETA_DEPTH = 0.2, GAMMA_INTERVAL = 0.3, KP = 2.0;
+        const MAX_SPEEDUP = 1.3, MAX_SLOWDOWN = 0.5;
+        const GST_LATENCY = [200, 300, 500, 1000, 2000];
+        const QUEUE_TARGETS = [6, 9, 15, 30, 60];
+        const UPGRADE_SECONDS = 10;
+        
+        // ========== 状态变量 ==========
+        let running = false;
+        let targetFps = 30, jitterPercent = 20, packetLoss = 5, qDepaySimulated = 0;
+        let arrivalRateEma = 30, depthEma = 6, intervalEma = 33.3;
+        let currentLevel = 0, queueTarget = 6, goodNetworkCounter = 0;
+        let gstQueue = [], appQueue = [];
+        let chartData = { buffer: [], interval: [], target: [] };
+        const MAX_POINTS = 60;
+        
+        // ========== 初始化 ==========
+        function init() {
+            document.getElementById('targetFps').addEventListener('input', e => {
+                targetFps = parseInt(e.target.value);
+                document.getElementById('targetFpsValue').textContent = targetFps + ' fps';
+            });
+            document.getElementById('jitter').addEventListener('input', e => {
+                jitterPercent = parseInt(e.target.value);
+                document.getElementById('jitterValue').textContent = jitterPercent + '%';
+            });
+            document.getElementById('packetLoss').addEventListener('input', e => {
+                packetLoss = parseInt(e.target.value);
+                document.getElementById('packetLossValue').textContent = packetLoss + '%';
+            });
+            document.getElementById('qDepay').addEventListener('input', e => {
+                qDepaySimulated = parseInt(e.target.value);
+                document.getElementById('qDepayValue').textContent = qDepaySimulated;
+            });
+            
+            updateDisplay();
+            requestAnimationFrame(mainLoop);
+        }
+        
+        // ========== 主循环 ==========
+        let lastFrameTime = 0, lastSecond = 0, framesThisSecond = { receive: 0, render: 0 };
+        
+        function mainLoop(timestamp) {
+            if (running) {
+                simulateFrameArrival(timestamp);
+                simulateConsumption(timestamp);
+                
+                const sec = Math.floor(timestamp / 1000);
+                if (sec !== lastSecond) {
+                    updateStatistics();
+                    lastSecond = sec;
+                }
+            }
+            updateDisplay();
+            requestAnimationFrame(mainLoop);
+        }
+        
+        function simulateFrameArrival(timestamp) {
+            const baseInterval = 1000 / targetFps;
+            const jittered = baseInterval * (1 + (Math.random() - 0.5) * jitterPercent / 50);
+            
+            if (timestamp - lastFrameTime >= jittered) {
+                if (Math.random() * 100 > packetLoss) {
+                    gstQueue.push({ time: timestamp });
+                    const delay = GST_LATENCY[currentLevel] * (0.7 + Math.random() * 0.6);
+                    setTimeout(() => {
+                        if (gstQueue.length > 0) {
+                            gstQueue.shift();
+                            if (appQueue.length < 90) {
+                                appQueue.push({ time: Date.now() });
+                                framesThisSecond.receive++;
+                            }
+                        }
+                    }, delay);
+                }
+                lastFrameTime = timestamp;
+            }
+        }
+        
+        let lastConsumeTime = 0;
+        
+        function simulateConsumption(timestamp) {
+            const interval = calcSmoothInterval(appQueue.length);
+            if (timestamp - lastConsumeTime >= interval) {
+                if (appQueue.length > 0) {
+                    appQueue.shift();
+                    framesThisSecond.render++;
+                }
+                lastConsumeTime = timestamp;
+            }
+        }
+        
+        // ========== 核心算法 ==========
+        function calcSmoothInterval(queueDepth) {
+            // D(t) = β×D_raw + (1-β)×D(t-1)
+            depthEma = BETA_DEPTH * queueDepth + (1 - BETA_DEPTH) * depthEma;
+            
+            // E(t) = Target - D(t)
+            const error = queueTarget - depthEma;
+            
+            // I_base = 1000/R(t)
+            const baseInterval = 1000 / arrivalRateEma;
+            
+            // I_raw = I_base + Kp × E
+            const rawInterval = baseInterval + KP * error;
+            
+            // I(t) = γ×I_raw + (1-γ)×I(t-1)
+            intervalEma = GAMMA_INTERVAL * rawInterval + (1 - GAMMA_INTERVAL) * intervalEma;
+            
+            // 动态范围限制
+            let minInterval = baseInterval / MAX_SPEEDUP;
+            let maxInterval = baseInterval / MAX_SLOWDOWN;
+            minInterval = Math.max(minInterval, 10);
+            maxInterval = Math.min(maxInterval, 200);
+            
+            return Math.max(minInterval, Math.min(maxInterval, intervalEma));
+        }
+        
+        function detectNetworkQuality() {
+            if (qDepaySimulated > 15) return 4;
+            if (qDepaySimulated > 10) return 3;
+            if (qDepaySimulated > 5) return 2;
+            
+            const rateRatio = arrivalRateEma / targetFps;
+            const bufferRatio = depthEma / queueTarget;
+            
+            if (rateRatio >= 0.95 && bufferRatio >= 0.8) return 0;
+            if (rateRatio >= 0.85 && bufferRatio >= 0.6) return 1;
+            if (rateRatio >= 0.70 && bufferRatio >= 0.4) return 2;
+            if (rateRatio >= 0.50) return 3;
+            return 4;
+        }
+        
+        function adjustLatencyLevel() {
+            const suggested = detectNetworkQuality();
+            
+            if (suggested > currentLevel) {
+                // 升级：立即
+                goodNetworkCounter = 0;
+                currentLevel = suggested;
+                queueTarget = calcDynamicTarget();
+                addLog(`📈 网络变差，升级到 Level ${currentLevel}`);
+            } else if (suggested < currentLevel) {
+                // 降级：需要持续稳定
+                goodNetworkCounter++;
+                if (goodNetworkCounter >= UPGRADE_SECONDS) {
+                    currentLevel = Math.max(0, currentLevel - 1);
+                    queueTarget = calcDynamicTarget();
+                    goodNetworkCounter = 0;
+                    addLog(`📉 网络稳定10秒，降级到 Level ${currentLevel}`);
+                }
+            } else {
+                goodNetworkCounter = 0;
+            }
+        }
+        
+        function calcDynamicTarget() {
+            const targetMs = QUEUE_TARGETS[currentLevel] * (1000 / 30);
+            let target = Math.round(targetMs * arrivalRateEma / 1000);
+            return Math.max(2, Math.min(90, target));
+        }
+        
+        function updateStatistics() {
+            // R(t) = α×R_raw + (1-α)×R(t-1)
+            arrivalRateEma = ALPHA_RATE * framesThisSecond.receive + (1 - ALPHA_RATE) * arrivalRateEma;
+            arrivalRateEma = Math.max(5, Math.min(60, arrivalRateEma));
+            
+            // 调整延迟等级
+            adjustLatencyLevel();
+            
+            // 记录图表数据
+            chartData.buffer.push(depthEma);
+            chartData.interval.push(intervalEma);
+            chartData.target.push(queueTarget);
+            while (chartData.buffer.length > MAX_POINTS) {
+                chartData.buffer.shift();
+                chartData.interval.shift();
+                chartData.target.shift();
+            }
+            
+            drawChart();
+            addLog(`收=${framesThisSecond.receive} 渲=${framesThisSecond.render} 缓冲=${appQueue.length} 间隔=${intervalEma.toFixed(1)}ms Level=${currentLevel}`);
+            
+            framesThisSecond = { receive: 0, render: 0 };
+        }
+        
+        // ========== 显示更新 ==========
+        function updateDisplay() {
+            document.getElementById('arrivalRate').textContent = arrivalRateEma.toFixed(1);
+            document.getElementById('bufferDepth').textContent = appQueue.length;
+            document.getElementById('depthEma').textContent = depthEma.toFixed(1);
+            document.getElementById('interval').textContent = Math.round(intervalEma);
+            document.getElementById('stableCounter').textContent = goodNetworkCounter;
+            
+            // 计算显示
+            const base = 1000 / arrivalRateEma;
+            const error = queueTarget - depthEma;
+            const raw = base + KP * error;
+            const minI = Math.max(10, base / MAX_SPEEDUP);
+            const maxI = Math.min(200, base / MAX_SLOWDOWN);
+            
+            document.getElementById('calc-base').textContent = base.toFixed(1) + 'ms';
+            document.getElementById('calc-error').textContent = error.toFixed(1);
+            document.getElementById('calc-raw').textContent = raw.toFixed(1) + 'ms';
+            document.getElementById('calc-range').textContent = `${minI.toFixed(1)}~${maxI.toFixed(1)}ms`;
+            document.getElementById('calc-final').textContent = intervalEma.toFixed(1) + 'ms';
+            
+            // 管道显示
+            document.getElementById('ios-fps').textContent = targetFps + 'fps';
+            document.getElementById('gst-latency').textContent = GST_LATENCY[currentLevel] + 'ms';
+            document.getElementById('app-buffer').textContent = appQueue.length + '帧';
+            document.getElementById('render-fps').textContent = Math.round(arrivalRateEma) + 'fps';
+            
+            // 等级指示器
+            for (let i = 0; i < 5; i++) {
+                const el = document.getElementById('level-' + i);
+                el.classList.toggle('active', i === currentLevel);
+            }
+            
+            // 帧显示
+            updateFrames('gst-frames', gstQueue.length, 12);
+            updateFrames('app-frames', appQueue.length, 15);
+            
+            // 状态颜色
+            updateColor('arrivalRate', arrivalRateEma, targetFps * 0.9, targetFps * 0.7);
+            updateColor('bufferDepth', appQueue.length, queueTarget * 0.7, queueTarget * 0.4);
+            updateColor('depthEma', depthEma, queueTarget * 0.7, queueTarget * 0.4);
+        }
+        
+        function updateFrames(containerId, count, max) {
+            const container = document.getElementById(containerId);
+            container.innerHTML = '';
+            for (let i = 0; i < max; i++) {
+                const f = document.createElement('div');
+                f.className = 'frame ' + (i < count ? 'active' : 'waiting');
+                container.appendChild(f);
+            }
+        }
+        
+        function updateColor(id, value, good, warn) {
+            const el = document.getElementById(id);
+            el.classList.remove('good', 'warn', 'bad');
+            el.classList.add(value >= good ? 'good' : value >= warn ? 'warn' : 'bad');
+        }
+        
+        // ========== 图表 ==========
+        function drawChart() {
+            const canvas = document.getElementById('chart1');
+            const ctx = canvas.getContext('2d');
+            const rect = canvas.parentElement.getBoundingClientRect();
+            canvas.width = rect.width - 20;
+            canvas.height = rect.height - 20;
+            
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            // 绘制目标线
+            if (chartData.target.length > 0) {
+                const targetY = canvas.height - (chartData.target[chartData.target.length-1] / 70 * canvas.height);
+                ctx.strokeStyle = 'rgba(88, 166, 255, 0.3)';
+                ctx.setLineDash([5, 5]);
+                ctx.beginPath();
+                ctx.moveTo(0, targetY);
+                ctx.lineTo(canvas.width, targetY);
+                ctx.stroke();
+                ctx.setLineDash([]);
+            }
+            
+            // 缓冲深度
+            drawLine(ctx, canvas, chartData.buffer, '#3fb950', 70);
+            // 间隔
+            drawLine(ctx, canvas, chartData.interval.map(v => v / 3), '#a371f7', 70);
+        }
+        
+        function drawLine(ctx, canvas, data, color, maxVal) {
+            if (data.length < 2) return;
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            data.forEach((v, i) => {
+                const x = (i / (MAX_POINTS - 1)) * canvas.width;
+                const y = canvas.height - (v / maxVal * canvas.height);
+                i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+            });
+            ctx.stroke();
+        }
+        
+        // ========== 日志 ==========
+        function addLog(msg) {
+            const container = document.getElementById('logContainer');
+            const time = new Date().toLocaleTimeString();
+            const line = document.createElement('div');
+            line.className = 'log-line';
+            line.innerHTML = `<span class="log-time">[${time}]</span> <span class="log-level">L${currentLevel}</span> ${msg}`;
+            container.appendChild(line);
+            container.scrollTop = container.scrollHeight;
+            while (container.children.length > 30) container.removeChild(container.firstChild);
+        }
+        
+        // ========== 控制 ==========
+        function toggleSimulation() {
+            running = !running;
+            event.target.textContent = running ? '⏸ 暂停' : '▶ 开始';
+        }
+        
+        function simulateNetworkDrop() {
+            const orig = packetLoss;
+            packetLoss = 100;
+            document.getElementById('packetLoss').value = 100;
+            document.getElementById('packetLossValue').textContent = '100%';
+            addLog('⚡ 模拟断网3秒');
+            setTimeout(() => {
+                packetLoss = orig;
+                document.getElementById('packetLoss').value = orig;
+                document.getElementById('packetLossValue').textContent = orig + '%';
+                addLog('✅ 网络恢复');
+            }, 3000);
+        }
+        
+        function resetSimulation() {
+            running = false;
+            arrivalRateEma = targetFps;
+            depthEma = queueTarget = 6;
+            intervalEma = 1000 / targetFps;
+            currentLevel = 0;
+            goodNetworkCounter = 0;
+            gstQueue = [];
+            appQueue = [];
+            chartData = { buffer: [], interval: [], target: [] };
+            document.getElementById('logContainer').innerHTML = '';
+            document.querySelector('.btn-primary').textContent = '▶ 开始';
+            updateDisplay();
+        }
+        
+        init();
+    </script>
+</body>
+</html>

@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?import javafx.scene.layout.*?>
+<?import javafx.scene.control.*?>
+<?import javafx.geometry.*?>
+<?import javafx.scene.text.*?>
+<BorderPane xmlns="http://javafx.com/javafx/17.0.6" xmlns:fx="http://javafx.com/fxml/1"
+            prefWidth="520" prefHeight="360">
+    <top>
+        <HBox fx:id="titleBar" spacing="8" alignment="CENTER_LEFT" style="-fx-background-color: #2b2b2b; -fx-padding: 10;">
+            <Label text="相机设定" style="-fx-text-fill: white; -fx-font-size: 16; -fx-font-weight: bold;"/>
+        </HBox>
+    </top>
+    <center>
+        <GridPane hgap="10" vgap="12" padding="10">
+            <columnConstraints>
+                <ColumnConstraints halignment="RIGHT" minWidth="120"/>
+                <ColumnConstraints halignment="LEFT" hgrow="ALWAYS"/>
+                <ColumnConstraints minWidth="80" halignment="LEFT"/>
+            </columnConstraints>
+
+            <!-- 曝光补偿 -->
+            <Label text="曝光补偿 (-2~2)" GridPane.rowIndex="0" GridPane.columnIndex="0"/>
+            <Slider fx:id="exposureSlider" min="-2" max="2" showTickLabels="true" showTickMarks="true"
+                    majorTickUnit="1" blockIncrement="0.1" GridPane.rowIndex="0" GridPane.columnIndex="1"/>
+            <Label fx:id="exposureValue" text="0.0" GridPane.rowIndex="0" GridPane.columnIndex="2"/>
+
+            <!-- 焦距 -->
+            <Label text="焦距 (0.5~3.0)" GridPane.rowIndex="1" GridPane.columnIndex="0"/>
+            <Slider fx:id="focusSlider" min="0.5" max="3.0" showTickLabels="true" showTickMarks="true"
+                    majorTickUnit="0.5" blockIncrement="0.01" GridPane.rowIndex="1" GridPane.columnIndex="1"/>
+            <Label fx:id="focusValue" text="0.50" GridPane.rowIndex="1" GridPane.columnIndex="2"/>
+
+            <!-- 清晰度 -->
+            <Label text="清晰度" GridPane.rowIndex="2" GridPane.columnIndex="0"/>
+            <ComboBox fx:id="clarityCombo" GridPane.rowIndex="2" GridPane.columnIndex="1" prefWidth="180"/>
+
+            <!-- FPS -->
+            <Label text="帧率 (10~60)" GridPane.rowIndex="3" GridPane.columnIndex="0"/>
+            <Slider fx:id="fpsSlider" min="10" max="60" showTickLabels="true" showTickMarks="true"
+                    majorTickUnit="10" blockIncrement="1" GridPane.rowIndex="3" GridPane.columnIndex="1"/>
+            <Label fx:id="fpsValue" text="30" GridPane.rowIndex="3" GridPane.columnIndex="2"/>
+        </GridPane>
+    </center>
+    <bottom>
+        <HBox spacing="10" alignment="CENTER_RIGHT" style="-fx-padding: 10;">
+            <Button fx:id="cancelButton" text="取消"/>
+            <Button fx:id="okButton" text="确定" defaultButton="true"/>
+        </HBox>
+    </bottom>
+</BorderPane>

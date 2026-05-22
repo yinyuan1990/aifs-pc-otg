@@ -1,0 +1,397 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<?import javafx.geometry.Insets?>
+<?import javafx.scene.control.*?>
+<?import javafx.scene.layout.*?>
+<?import javafx.scene.text.*?>
+<?import javafx.scene.image.ImageView?>
+<?import javafx.scene.image.Image?>
+
+<StackPane xmlns="http://javafx.com/javafx/17.0.2-ea"
+           xmlns:fx="http://javafx.com/fxml/1"
+           fx:controller="com.acard.acard.controller.NewLoginController"
+           prefWidth="520" prefHeight="780"
+           stylesheets="@ui/combobox-dark.css"
+           style="-fx-background-color: #1F1F1F; 
+                  -fx-background-radius: 16; 
+                  -fx-border-radius: 16;">
+    
+    <!-- 主容器 -->
+    <VBox fx:id="mainContainer" 
+          prefWidth="520"
+          style="-fx-background-color: #1F1F1F;
+                 -fx-background-radius: 16; 
+                 -fx-border-radius: 16;">
+        <!-- 登录表单区域 -->
+        <VBox prefWidth="520"
+              style="-fx-background-color: #1F1F1F;"
+              spacing="0">
+            <padding>
+                <Insets top="30" bottom="30" left="40" right="40"/>
+            </padding>
+            
+            <!-- Logo 和标题 -->
+            <HBox alignment="CENTER_LEFT" spacing="12">
+                <VBox.margin>
+                    <Insets bottom="40"/>
+                </VBox.margin>
+                <ImageView fitWidth="50" fitHeight="50" preserveRatio="true">
+                    <image>
+                        <Image url="@/images/icon.png"/>
+                    </image>
+                </ImageView>
+                <Label text="AI 幻镜"
+                       style="-fx-font-size: 22px; -fx-font-weight: bold; -fx-text-fill: white;"/>
+            </HBox>
+            
+            <!-- Tab 切换区域 -->
+            <VBox spacing="0">
+                <VBox.margin>
+                    <Insets bottom="24"/>
+                </VBox.margin>
+                <HBox spacing="32" style="-fx-border-color: #3a3a3a; -fx-border-width: 0 0 1 0; -fx-padding: 0 0 0 0;">
+                    <Button fx:id="tabLogin" text="登录" 
+                            style="-fx-background-color: transparent; 
+                                   -fx-text-fill: white; 
+                                   -fx-font-size: 14px; 
+                                   -fx-font-weight: bold;
+                                   -fx-border-color: transparent transparent #607AFB transparent;
+                                   -fx-border-width: 0 0 3 0;
+                                   -fx-padding: 16 0 13 0;
+                                   -fx-cursor: hand;
+                                   -fx-background-insets: 0;
+                                   -fx-background-radius: 0;"/>
+                    <Button fx:id="tabSwitch" text="切换账号" 
+                            style="-fx-background-color: transparent; 
+                                   -fx-text-fill: #94a3b8; 
+                                   -fx-font-size: 14px; 
+                                   -fx-font-weight: bold;
+                                   -fx-border-color: transparent;
+                                   -fx-border-width: 0 0 3 0;
+                                   -fx-padding: 16 0 13 0;
+                                   -fx-cursor: hand;
+                                   -fx-background-insets: 0;
+                                   -fx-background-radius: 0;"/>
+                    <!-- 弹性空白，把注册按钮推到右边 -->
+                    <Region HBox.hgrow="ALWAYS"/>
+                    <Button fx:id="tabRegister" text="注册" 
+                            style="-fx-background-color: transparent; 
+                                   -fx-text-fill: #94a3b8; 
+                                   -fx-font-size: 14px; 
+                                   -fx-font-weight: bold;
+                                   -fx-border-color: transparent;
+                                   -fx-border-width: 0 0 3 0;
+                                   -fx-padding: 16 0 13 0;
+                                   -fx-cursor: hand;
+                                   -fx-background-insets: 0;
+                                   -fx-background-radius: 0;"/>
+                </HBox>
+            </VBox>
+            
+            <!-- 登录表单 -->
+            <VBox fx:id="loginForm" spacing="32">
+                <!-- 账号输入 -->
+                <VBox spacing="10">
+                    <Label text="账号" 
+                           style="-fx-font-size: 16px; -fx-font-weight: 500; -fx-text-fill: white;"/>
+                    <TextField fx:id="usernameField" 
+                               promptText="请输入您的账号"
+                               styleClass="rounded-input"
+                               style="-fx-background-color: #292929; 
+                                      -fx-text-fill: white;
+                                      -fx-prompt-text-fill: #64748b;
+                                      -fx-border-color: #3a3a3a; 
+                                      -fx-border-width: 1; 
+                                      -fx-border-radius: 28;
+                                      -fx-background-radius: 28;
+                                      -fx-padding: 15;
+                                      -fx-font-size: 16px;"
+                               prefHeight="56"/>
+                </VBox>
+                
+                <!-- 密码输入 -->
+                <VBox spacing="10">
+                    <Label text="密码" 
+                           style="-fx-font-size: 16px; -fx-font-weight: 500; -fx-text-fill: white;"/>
+                    <HBox fx:id="passwordContainer" spacing="0">
+                        <PasswordField fx:id="passwordField" 
+                                       promptText="请输入您的密码"
+                                       styleClass="rounded-input-left"
+                                       style="-fx-background-color: #292929; 
+                                              -fx-text-fill: white;
+                                              -fx-prompt-text-fill: #64748b;
+                                              -fx-border-color: #3a3a3a; 
+                                              -fx-border-width: 1 0 1 1; 
+                                              -fx-border-radius: 28 0 0 28;
+                                              -fx-background-radius: 28 0 0 28;
+                                              -fx-padding: 15;
+                                              -fx-font-size: 16px;"
+                                       prefHeight="56"
+                                       HBox.hgrow="ALWAYS"/>
+                        <Button fx:id="togglePasswordBtn" text="👁" 
+                                styleClass="rounded-button-right"
+                                style="-fx-background-color: #292929; 
+                                       -fx-text-fill: #64748b;
+                                       -fx-border-color: #3a3a3a; 
+                                       -fx-border-width: 1 1 1 0; 
+                                       -fx-border-radius: 0 28 28 0;
+                                       -fx-background-radius: 0 28 28 0;
+                                       -fx-padding: 15;
+                                       -fx-cursor: hand;
+                                       -fx-font-size: 16px;"
+                                prefWidth="56"
+                                prefHeight="56"/>
+                    </HBox>
+                </VBox>
+                
+                <!-- 设备端选择下拉框 -->
+                <VBox fx:id="deviceSelectContainer" spacing="10" visible="true" managed="true">
+                    <Label text="选择设备" 
+                           style="-fx-font-size: 16px; -fx-font-weight: 500; -fx-text-fill: white;"/>
+                    <HBox spacing="10" alignment="CENTER_LEFT">
+                        <ComboBox fx:id="deviceComboBox" 
+                                  promptText="选择要控制的设备"
+                                  styleClass="device-combo-box"
+                                  style="-fx-background-color: #292929; 
+                                         -fx-border-color: #3a3a3a; 
+                                         -fx-border-width: 1; 
+                                         -fx-border-radius: 28;
+                                         -fx-background-radius: 28;"
+                                  prefHeight="56"
+                                  HBox.hgrow="ALWAYS"/>
+                        <Button fx:id="refreshDeviceBtn" text="🔄" 
+                                style="-fx-background-color: #292929; 
+                                       -fx-text-fill: #64748b;
+                                       -fx-border-color: #3a3a3a; 
+                                       -fx-border-width: 1; 
+                                       -fx-border-radius: 50%;
+                                       -fx-background-radius: 50%;
+                                       -fx-cursor: hand;
+                                       -fx-font-size: 16px;"
+                                prefWidth="56"
+                                prefHeight="56"/>
+                    </HBox>
+                    <Label fx:id="deviceStatusLabel" text="" 
+                           style="-fx-font-size: 13px; -fx-text-fill: #64748b;"/>
+                </VBox>
+                
+                <!-- 记住我 & 忘记密码（已隐藏） -->
+                <HBox alignment="CENTER_LEFT" spacing="0" visible="false" managed="false">
+                    <CheckBox fx:id="rememberMeCheckbox" text="记住我" 
+                              style="-fx-text-fill: #94a3b8; -fx-font-size: 14px;"/>
+                    <Region HBox.hgrow="ALWAYS"/>
+                    <Button text="忘记密码？" 
+                            style="-fx-background-color: transparent; 
+                                   -fx-text-fill: white; 
+                                   -fx-font-size: 14px;
+                                   -fx-font-weight: 600;
+                                   -fx-cursor: hand;
+                                   -fx-padding: 0;
+                                   -fx-background-insets: 0;
+                                   -fx-background-radius: 0;
+                                   -fx-border-width: 0;"/>
+                </HBox>
+                
+                <!-- 登录按钮 -->
+                <Button fx:id="loginButton" text="登录" 
+                        onAction="#handleLogin"
+                        maxWidth="Infinity"
+                        styleClass="rounded-button"
+                        style="-fx-background-color: #292929; 
+                               -fx-text-fill: white; 
+                               -fx-font-size: 16px;
+                               -fx-font-weight: 600;
+                               -fx-background-radius: 28;
+                               -fx-padding: 16;
+                               -fx-cursor: hand;"
+                        prefHeight="56"/>
+                
+                <!-- 错误信息 -->
+                <Label fx:id="errorLabel" text="" 
+                       textFill="#ef4444" 
+                       visible="false" 
+                       wrapText="true"
+                       style="-fx-font-size: 14px;"/>
+                
+                <!-- 进度指示器 -->
+                <ProgressIndicator fx:id="progressIndicator" 
+                                   visible="false" 
+                                   maxWidth="40" 
+                                   maxHeight="40"/>
+            </VBox>
+            
+            <!-- 注册表单（默认隐藏） -->
+            <VBox fx:id="registerForm" spacing="32" visible="false" managed="false">
+                <!-- 账号输入 -->
+                <VBox spacing="10">
+                    <Label text="账号" 
+                           style="-fx-font-size: 16px; -fx-font-weight: 500; -fx-text-fill: white;"/>
+                    <TextField fx:id="regUsernameField" 
+                               promptText="请输入8-15位账号（字母或数字）"
+                               styleClass="rounded-input"
+                               style="-fx-background-color: #292929; 
+                                      -fx-text-fill: white;
+                                      -fx-prompt-text-fill: #64748b;
+                                      -fx-border-color: #3a3a3a; 
+                                      -fx-border-width: 1; 
+                                      -fx-border-radius: 28;
+                                      -fx-background-radius: 28;
+                                      -fx-padding: 15;
+                                      -fx-font-size: 16px;"
+                               prefHeight="56"/>
+                </VBox>
+                
+                <!-- 密码输入 -->
+                <VBox spacing="10">
+                    <Label text="密码" 
+                           style="-fx-font-size: 16px; -fx-font-weight: 500; -fx-text-fill: white;"/>
+                    <PasswordField fx:id="regPasswordField" 
+                                   promptText="请输入密码（6-20位）"
+                                   styleClass="rounded-input"
+                                   style="-fx-background-color: #292929; 
+                                          -fx-text-fill: white;
+                                          -fx-prompt-text-fill: #64748b;
+                                          -fx-border-color: #3a3a3a; 
+                                          -fx-border-width: 1; 
+                                          -fx-border-radius: 28;
+                                          -fx-background-radius: 28;
+                                          -fx-padding: 15;
+                                          -fx-font-size: 16px;"
+                                   prefHeight="56"/>
+                </VBox>
+                
+                <!-- 昵称（自动生成，不可编辑） -->
+                <VBox spacing="10">
+                    <Label text="昵称" 
+                           style="-fx-font-size: 16px; -fx-font-weight: 500; -fx-text-fill: white;"/>
+                    <HBox spacing="10" alignment="CENTER_LEFT">
+                        <TextField fx:id="regNicknameField" 
+                                   editable="false"
+                                   promptText="自动生成的昵称"
+                                   styleClass="rounded-input"
+                                   style="-fx-background-color: #292929; 
+                                          -fx-text-fill: #607AFB;
+                                          -fx-font-weight: bold;
+                                          -fx-prompt-text-fill: #64748b;
+                                          -fx-border-color: #3a3a3a; 
+                                          -fx-border-width: 1; 
+                                          -fx-border-radius: 28;
+                                          -fx-background-radius: 28;
+                                          -fx-padding: 15;
+                                          -fx-font-size: 16px;"
+                                   prefHeight="56"
+                                   HBox.hgrow="ALWAYS"/>
+                        <Button fx:id="refreshNicknameBtn" text="换一个" 
+                                style="-fx-background-color: #607AFB; 
+                                       -fx-text-fill: white;
+                                       -fx-font-size: 14px;
+                                       -fx-font-weight: 600;
+                                       -fx-border-radius: 28;
+                                       -fx-background-radius: 28;
+                                       -fx-padding: 15 20;
+                                       -fx-cursor: hand;"
+                                prefHeight="56"/>
+                    </HBox>
+                </VBox>
+                
+                <!-- 注册按钮 -->
+                <Button fx:id="registerButton" text="注册" 
+                        maxWidth="Infinity"
+                        styleClass="rounded-button"
+                        style="-fx-background-color: #292929; 
+                               -fx-text-fill: white; 
+                               -fx-font-size: 16px;
+                               -fx-font-weight: 600;
+                               -fx-background-radius: 28;
+                               -fx-padding: 16;
+                               -fx-cursor: hand;"
+                        prefHeight="56"/>
+                
+                <!-- 注册错误信息 -->
+                <Label fx:id="registerErrorLabel" text="" 
+                       textFill="#ef4444" 
+                       visible="false" 
+                       wrapText="true"
+                       style="-fx-font-size: 14px;"/>
+                
+                <!-- 注册进度指示器 -->
+                <ProgressIndicator fx:id="registerProgressIndicator" 
+                                   visible="false" 
+                                   maxWidth="40" 
+                                   maxHeight="40"/>
+            </VBox>
+            
+            <!-- 切换账号表单（默认隐藏，占据全屏） -->
+            <VBox fx:id="switchAccountForm" spacing="16" visible="false" managed="false" VBox.vgrow="ALWAYS">
+                <!-- 账号列表标题 -->
+                <HBox alignment="CENTER_LEFT" spacing="10">
+                    <Label text="👤" style="-fx-font-size: 18px;"/>
+                    <Label text="选择账号" 
+                           style="-fx-font-size: 18px; -fx-font-weight: 600; -fx-text-fill: white;"/>
+                    <Region HBox.hgrow="ALWAYS"/>
+                    <!-- 刷新按钮 -->
+                    <Button fx:id="refreshAccountsBtn" text="🔄" 
+                            style="-fx-background-color: #292929; 
+                                   -fx-text-fill: #64748b;
+                                   -fx-border-color: #3a3a3a; 
+                                   -fx-border-width: 1; 
+                                   -fx-border-radius: 50%;
+                                   -fx-background-radius: 50%;
+                                   -fx-cursor: hand;
+                                   -fx-font-size: 14px;"
+                            prefWidth="40"
+                            prefHeight="40"/>
+                </HBox>
+                
+                <!-- 提示信息 -->
+                <Label fx:id="switchAccountHintLabel" 
+                       text="选择账号和设备，点击登录"
+                       style="-fx-font-size: 13px; -fx-text-fill: #64748b;"/>
+                
+                <!-- 账号+设备二级列表（ScrollPane）-->
+                <ScrollPane fx:id="accountScrollPane" fitToWidth="true" 
+                           styleClass="dark-scroll-pane"
+                           style="-fx-background-color: transparent; 
+                                  -fx-background: transparent;
+                                  -fx-padding: 0;"
+                           hbarPolicy="NEVER"
+                           vbarPolicy="AS_NEEDED"
+                           VBox.vgrow="ALWAYS">
+                    <!-- 账号列表容器（二级结构：控制端账号 -> 设备列表） -->
+                    <VBox fx:id="accountListContainer" spacing="12" 
+                          style="-fx-padding: 0;">
+                        <!-- 账号卡片将在代码中动态生成 -->
+                    </VBox>
+                </ScrollPane>
+                
+                <!-- 底部登录按钮 -->
+                <Button fx:id="switchLoginButton" text="登录选中账号" 
+                        maxWidth="Infinity"
+                        style="-fx-background-color: #292929; 
+                               -fx-text-fill: white; 
+                               -fx-font-size: 16px;
+                               -fx-font-weight: 600;
+                               -fx-background-radius: 28;
+                               -fx-padding: 16;
+                               -fx-cursor: hand;"
+                        prefHeight="56"/>
+            </VBox>
+        </VBox>
+    </VBox>
+    
+    <!-- 右上角关闭按钮 -->
+    <Button fx:id="closeButton" text="✕" 
+            StackPane.alignment="TOP_RIGHT"
+            style="-fx-background-color: transparent; 
+                   -fx-text-fill: #94a3b8; 
+                   -fx-font-size: 20px;
+                   -fx-font-weight: bold;
+                   -fx-padding: 12 16;
+                   -fx-cursor: hand;
+                   -fx-background-radius: 0;">
+        <StackPane.margin>
+            <Insets top="8" right="8"/>
+        </StackPane.margin>
+    </Button>
+</StackPane>
+

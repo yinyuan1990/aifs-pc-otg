@@ -1,0 +1,508 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GstPlayer v9.2 播放控制方案</title>
+    <style>
+        :root {
+            --bg-primary: #1a1a2e;
+            --bg-secondary: #16213e;
+            --bg-card: #0f3460;
+            --text-primary: #e8e8e8;
+            --text-secondary: #a8a8a8;
+            --accent-green: #4ade80;
+            --accent-yellow: #fbbf24;
+            --accent-red: #f87171;
+            --accent-blue: #60a5fa;
+            --accent-purple: #a78bfa;
+        }
+        
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif;
+            background: linear-gradient(135deg, var(--bg-primary) 0%, var(--bg-secondary) 100%);
+            color: var(--text-primary);
+            min-height: 100vh;
+            padding: 2rem;
+            line-height: 1.6;
+        }
+        
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+        
+        h1 {
+            font-size: 2.5rem;
+            margin-bottom: 0.5rem;
+            background: linear-gradient(90deg, var(--accent-blue), var(--accent-purple));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        
+        .subtitle {
+            color: var(--text-secondary);
+            margin-bottom: 2rem;
+            font-size: 1.1rem;
+        }
+        
+        .section {
+            background: var(--bg-card);
+            border-radius: 16px;
+            padding: 1.5rem 2rem;
+            margin-bottom: 1.5rem;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+        }
+        
+        h2 {
+            color: var(--accent-blue);
+            font-size: 1.5rem;
+            margin-bottom: 1rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        
+        h3 {
+            color: var(--accent-purple);
+            font-size: 1.2rem;
+            margin: 1rem 0 0.5rem;
+        }
+        
+        .formula-box {
+            background: rgba(0,0,0,0.3);
+            border-left: 4px solid var(--accent-blue);
+            padding: 1rem 1.5rem;
+            margin: 1rem 0;
+            border-radius: 0 8px 8px 0;
+            font-family: 'Consolas', 'Source Code Pro', monospace;
+        }
+        
+        .formula-box code {
+            color: var(--accent-green);
+        }
+        
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 1rem 0;
+        }
+        
+        th, td {
+            padding: 0.75rem 1rem;
+            text-align: left;
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+        }
+        
+        th {
+            background: rgba(0,0,0,0.3);
+            color: var(--accent-blue);
+            font-weight: 600;
+        }
+        
+        tr:hover {
+            background: rgba(255,255,255,0.05);
+        }
+        
+        .status-emergency { color: var(--accent-red); font-weight: bold; }
+        .status-warning { color: var(--accent-yellow); }
+        .status-normal { color: var(--accent-green); }
+        .status-catchup { color: var(--accent-purple); }
+        
+        .tag {
+            display: inline-block;
+            padding: 0.2rem 0.6rem;
+            border-radius: 4px;
+            font-size: 0.85rem;
+            font-weight: 500;
+        }
+        
+        .tag-immediate { background: var(--accent-red); color: white; }
+        .tag-fast { background: var(--accent-yellow); color: black; }
+        .tag-smooth { background: var(--accent-green); color: black; }
+        
+        .flowchart {
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+            margin: 1rem 0;
+        }
+        
+        .flow-item {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+        }
+        
+        .flow-condition {
+            background: rgba(96, 165, 250, 0.2);
+            border: 1px solid var(--accent-blue);
+            padding: 0.5rem 1rem;
+            border-radius: 8px;
+            min-width: 200px;
+        }
+        
+        .flow-arrow {
+            color: var(--accent-yellow);
+            font-size: 1.5rem;
+        }
+        
+        .flow-action {
+            background: rgba(74, 222, 128, 0.2);
+            border: 1px solid var(--accent-green);
+            padding: 0.5rem 1rem;
+            border-radius: 8px;
+        }
+        
+        .warning-box {
+            background: rgba(248, 113, 113, 0.2);
+            border: 1px solid var(--accent-red);
+            padding: 1rem;
+            border-radius: 8px;
+            margin: 1rem 0;
+        }
+        
+        .warning-box h4 {
+            color: var(--accent-red);
+            margin-bottom: 0.5rem;
+        }
+        
+        .grid-2 {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1.5rem;
+        }
+        
+        @media (max-width: 900px) {
+            .grid-2 {
+                grid-template-columns: 1fr;
+            }
+        }
+        
+        .highlight {
+            background: rgba(251, 191, 36, 0.2);
+            padding: 0.1rem 0.3rem;
+            border-radius: 4px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎬 GstPlayer v9.2 播放控制方案</h1>
+        <p class="subtitle">基于实际到达帧率EMA的自适应播放控制系统</p>
+        
+        <!-- 核心原理 -->
+        <div class="section">
+            <h2>📐 核心原理</h2>
+            <p>v9.2的核心改进是<span class="highlight">基于实际到达帧率（arrivalRateEMA）</span>而非配置帧率来计算所有阈值。</p>
+            
+            <div class="formula-box">
+                <strong>关键公式：</strong><br>
+                <code>arrivalFps = EMA(实际接收帧率, α=0.3)</code><br>
+                <code>queueOptimal = arrivalFps × 22% (≈220ms延迟)</code><br>
+                <code>queueMin = arrivalFps × 15% (≈150ms延迟)</code><br>
+                <code>queueMax = arrivalFps × 47% (≈470ms延迟)</code><br>
+                <code>实际延迟 = 队列帧数 × 1000 / arrivalFps + 350ms(GStreamer)</code>
+            </div>
+            
+            <h3>示例（30fps）</h3>
+            <table>
+                <tr>
+                    <th>参数</th>
+                    <th>计算</th>
+                    <th>结果</th>
+                </tr>
+                <tr>
+                    <td>最佳队列</td>
+                    <td>30 × 22%</td>
+                    <td>7帧 (≈233ms)</td>
+                </tr>
+                <tr>
+                    <td>最小队列</td>
+                    <td>30 × 15%</td>
+                    <td>5帧 (≈167ms)</td>
+                </tr>
+                <tr>
+                    <td>最大队列</td>
+                    <td>30 × 47%</td>
+                    <td>14帧 (≈467ms)</td>
+                </tr>
+            </table>
+        </div>
+        
+        <!-- 第一道防线 -->
+        <div class="section">
+            <h2>🛡️ 第一道防线：播放速度控制</h2>
+            <p>通过调整播放速度来控制队列深度，实现稳定的低延迟播放。</p>
+            
+            <h3>速度控制逻辑</h3>
+            <table>
+                <tr>
+                    <th>队列状态</th>
+                    <th>目标速度</th>
+                    <th>调整方式</th>
+                    <th>说明</th>
+                </tr>
+                <tr>
+                    <td class="status-emergency">队列 = 0</td>
+                    <td>70%</td>
+                    <td><span class="tag tag-immediate">立即</span></td>
+                    <td>队列空，紧急降速等待帧到达</td>
+                </tr>
+                <tr>
+                    <td class="status-warning">队列 ≤ 2帧</td>
+                    <td>85%</td>
+                    <td><span class="tag tag-immediate">立即</span></td>
+                    <td>队列危险，快速降速</td>
+                </tr>
+                <tr>
+                    <td class="status-warning">队列 &lt; 最小值</td>
+                    <td>92%</td>
+                    <td><span class="tag tag-smooth">平滑</span></td>
+                    <td>队列偏少，温和降速积累缓冲</td>
+                </tr>
+                <tr>
+                    <td class="status-normal">队列 在范围内</td>
+                    <td>100%</td>
+                    <td><span class="tag tag-smooth">平滑</span></td>
+                    <td>正常播放</td>
+                </tr>
+                <tr>
+                    <td class="status-catchup">队列 &gt; 最大值</td>
+                    <td>110%</td>
+                    <td><span class="tag tag-immediate">立即</span></td>
+                    <td>队列堆积，立即追帧</td>
+                </tr>
+            </table>
+            
+            <h3>v9.2 关键改进：快速恢复</h3>
+            <div class="flowchart">
+                <div class="flow-item">
+                    <div class="flow-condition">当前速度 &lt; 目标速度<br>且队列 ≥ 最佳值</div>
+                    <span class="flow-arrow">→</span>
+                    <div class="flow-action"><strong>立即恢复</strong>到目标速度</div>
+                </div>
+                <div class="flow-item">
+                    <div class="flow-condition">当前速度 &lt; 90%<br>且队列 &lt; 最佳值</div>
+                    <span class="flow-arrow">→</span>
+                    <div class="flow-action"><strong>快速恢复</strong>每次+15%</div>
+                </div>
+                <div class="flow-item">
+                    <div class="flow-condition">其他情况</div>
+                    <span class="flow-arrow">→</span>
+                    <div class="flow-action"><strong>平滑调整</strong>每次±5%</div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- 第二道防线 -->
+        <div class="section">
+            <h2>🔧 第二道防线：推流帧率控制（升降帧）</h2>
+            <p>当播放速度无法应对时，请求前端调整推流帧率。</p>
+            
+            <div class="grid-2">
+                <div>
+                    <h3>📉 降帧条件（满足任一）</h3>
+                    <table>
+                        <tr>
+                            <th>条件</th>
+                            <th>阈值</th>
+                            <th>持续</th>
+                        </tr>
+                        <tr>
+                            <td>水位触发</td>
+                            <td>&lt; 35%</td>
+                            <td>1秒</td>
+                        </tr>
+                        <tr>
+                            <td>延迟触发</td>
+                            <td>&gt; 500ms</td>
+                            <td>1秒</td>
+                        </tr>
+                    </table>
+                    
+                    <h4 style="margin-top:1rem;">降帧目标计算</h4>
+                    <div class="formula-box">
+                        <strong>水位触发：</strong><br>
+                        <code>ratio = (35% - 水位) / 30%</code><br>
+                        <code>目标fps = 60 - (60-20) × ratio</code><br><br>
+                        <strong>延迟触发：</strong><br>
+                        <code>ratio = (延迟 - 500) / 300</code><br>
+                        <code>目标fps = 60 - (60-15) × ratio</code>
+                    </div>
+                </div>
+                
+                <div>
+                    <h3>📈 升帧条件（全部满足）</h3>
+                    <table>
+                        <tr>
+                            <th>条件</th>
+                            <th>阈值</th>
+                        </tr>
+                        <tr>
+                            <td>已在降帧状态</td>
+                            <td>requestedFps &gt; 0</td>
+                        </tr>
+                        <tr>
+                            <td>延迟恢复</td>
+                            <td>200ms ~ 500ms</td>
+                        </tr>
+                        <tr>
+                            <td>水位稳定</td>
+                            <td>≥ 50%</td>
+                        </tr>
+                        <tr>
+                            <td>持续时间</td>
+                            <td>1秒</td>
+                        </tr>
+                    </table>
+                    
+                    <h4 style="margin-top:1rem;">升帧步长</h4>
+                    <div class="formula-box">
+                        <code>step = max(1, 当前fps × 10%)</code><br>
+                        <code>目标fps = min(当前fps + step, 原始fps, 到达fps)</code>
+                    </div>
+                </div>
+            </div>
+            
+            <div style="background: rgba(74, 222, 128, 0.2); border: 1px solid var(--accent-green); padding: 1rem; border-radius: 8px; margin: 1rem 0;">
+                <h4 style="color: var(--accent-green);">✅ v9.2 已修复</h4>
+                <p>延迟阈值已调整为与新缓冲策略匹配：</p>
+                <ul style="margin-left:1.5rem; margin-top:0.5rem;">
+                    <li>降帧触发：延迟 &gt; <strong>500ms</strong>（超过最大缓冲470ms）</li>
+                    <li>降到最低：延迟达到 <strong>800ms</strong></li>
+                    <li>升帧恢复：延迟在 <strong>200ms-500ms</strong> 之间</li>
+                </ul>
+            </div>
+        </div>
+        
+        <!-- 紧急保护 -->
+        <div class="section">
+            <h2>🚨 紧急保护机制</h2>
+            
+            <div class="grid-2">
+                <div>
+                    <h3>触发条件</h3>
+                    <div class="formula-box">
+                        <code>队列 == 0</code><br>
+                        <code>→ emergencyHold = true</code><br>
+                        <code>→ 停止消耗，使用最后有效帧</code>
+                    </div>
+                </div>
+                
+                <div>
+                    <h3>解除条件</h3>
+                    <div class="formula-box">
+                        <code>队列 > 0</code><br>
+                        <code>→ emergencyHold = false</code><br>
+                        <code>→ 立即恢复消耗</code>
+                    </div>
+                </div>
+            </div>
+            
+            <h3>网络严重恶化自救</h3>
+            <p>当 <code>到达帧率 &lt; 配置帧率 × 50%</code> 时：</p>
+            <ol style="margin-left:1.5rem; margin-top:0.5rem;">
+                <li>请求降帧到15fps</li>
+                <li>请求关键帧</li>
+            </ol>
+        </div>
+        
+        <!-- 状态流转图 -->
+        <div class="section">
+            <h2>🔄 状态流转</h2>
+            <div style="text-align:center; padding:1rem;">
+                <pre style="display:inline-block; text-align:left; font-family:monospace; color:var(--text-primary);">
+┌─────────────────────────────────────────────────────────────────┐
+│                                                                 │
+│    ┌──────────┐   队列>0   ┌──────────┐   队列≥最佳   ┌───────────┐
+│    │ 🛑 紧急  │ ─────────→ │ ⬆️ 恢复  │ ───────────→ │ ✅ 正常   │
+│    │ 速度70%  │            │ 速度92%  │              │ 速度100%  │
+│    └──────────┘            └──────────┘              └───────────┘
+│         ↑                       ↑                         │
+│         │ 队列=0                │ 队列<最小                │ 队列>最大
+│         │                       │                         ↓
+│    ┌──────────┐            ┌──────────┐              ┌───────────┐
+│    │ ⚠️ 危险  │ ←───────── │ ⚠️ 偏少  │ ←─────────── │ 🚀 追帧   │
+│    │ 速度85%  │  队列≤2    │ 速度92%  │   队列正常   │ 速度110%  │
+│    └──────────┘            └──────────┘              └───────────┘
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+                </pre>
+            </div>
+        </div>
+        
+        <!-- 常量配置 -->
+        <div class="section">
+            <h2>⚙️ 常量配置</h2>
+            <table>
+                <tr>
+                    <th>常量</th>
+                    <th>值</th>
+                    <th>说明</th>
+                </tr>
+                <tr>
+                    <td>BUFFER_RATIO_OPTIMAL</td>
+                    <td>22%</td>
+                    <td>最佳缓冲比例（220ms延迟）</td>
+                </tr>
+                <tr>
+                    <td>BUFFER_RATIO_MIN</td>
+                    <td>15%</td>
+                    <td>最小缓冲比例（150ms延迟）</td>
+                </tr>
+                <tr>
+                    <td>BUFFER_RATIO_MAX</td>
+                    <td>47%</td>
+                    <td>最大缓冲比例（470ms延迟）</td>
+                </tr>
+                <tr>
+                    <td>R_MIN</td>
+                    <td>70%</td>
+                    <td>最低播放速度</td>
+                </tr>
+                <tr>
+                    <td>R_MAX</td>
+                    <td>110%</td>
+                    <td>最高播放速度</td>
+                </tr>
+                <tr>
+                    <td>R_CHANGE_LIMIT</td>
+                    <td>5%</td>
+                    <td>每次平滑调整幅度</td>
+                </tr>
+                <tr>
+                    <td>GST_JITTER_LATENCY</td>
+                    <td>350ms</td>
+                    <td>GStreamer jitterbuffer延迟</td>
+                </tr>
+                <tr>
+                    <td>APP_DELAY_LOWER_START</td>
+                    <td class="status-normal">500ms ✅</td>
+                    <td>降帧触发延迟（v9.2已修复）</td>
+                </tr>
+                <tr>
+                    <td>APP_DELAY_LOWER_MAX</td>
+                    <td>800ms</td>
+                    <td>降到最低帧率的延迟</td>
+                </tr>
+                <tr>
+                    <td>APP_DELAY_RESTORE</td>
+                    <td>200ms</td>
+                    <td>升帧恢复延迟下限</td>
+                </tr>
+            </table>
+        </div>
+        
+        <div style="text-align:center; color:var(--text-secondary); margin-top:2rem;">
+            <p>GstPlayer v9.2 | 生成时间: 2026-01-31</p>
+        </div>
+    </div>
+</body>
+</html>

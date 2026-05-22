@@ -1,0 +1,144 @@
+# 恢复文件清理功能
+
+> 训练完成后，按照以下步骤恢复自动清理功能
+
+---
+
+## 📋 需要恢复的位置
+
+### 1. HelloApplication.java (第 93 行)
+
+**文件路径：** `src/main/java/com/acard/acard/HelloApplication.java`
+
+**当前（已注释）：**
+```java
+DirectoryUtils.clearDirectory("runtime/captures/scaleslow");
+DirectoryUtils.clearDirectory("runtime/captures/slow");
+// ⭐ 暂时注释：保留 ssl 图片用于 AI 训练
+// DirectoryUtils.clearDirectory("runtime/captures/ssl");
+DirectoryUtils.clearDirectory("runtime/captures/zp");
+```
+
+**恢复为：**
+```java
+DirectoryUtils.clearDirectory("runtime/captures/scaleslow");
+DirectoryUtils.clearDirectory("runtime/captures/slow");
+DirectoryUtils.clearDirectory("runtime/captures/ssl");
+DirectoryUtils.clearDirectory("runtime/captures/zp");
+```
+
+---
+
+### 2. CameraMainController.java (第 2497 行附近)
+
+**文件路径：** `src/main/java/com/acard/acard/ui/CameraMainController.java`
+
+**当前（已注释）：**
+```java
+new Thread(() -> {
+    try {
+        // 清空所有抓拍文件夹
+        DirectoryUtils.clearDirectory("runtime/captures/slow");
+        // ⭐ 暂时注释：保留 ssl 图片用于 AI 训练
+        // DirectoryUtils.clearDirectory("runtime/captures/ssl");
+
+    } catch (Throwable e) {
+
+    }
+}, "Clean").start();
+```
+
+**恢复为：**
+```java
+new Thread(() -> {
+    try {
+        // 清空所有抓拍文件夹
+        DirectoryUtils.clearDirectory("runtime/captures/slow");
+        DirectoryUtils.clearDirectory("runtime/captures/ssl");
+
+    } catch (Throwable e) {
+
+    }
+}, "Clean").start();
+```
+
+---
+
+### 3. Element2_3Controller.java (第 759 行附近)
+
+**文件路径：** `src/main/java/com/acard/acard/ui/Element2_3Controller.java`
+
+**当前（已注释）：**
+```java
+if( player!=null){
+    player.setJpegSaveEnabled(isOpen);
+}
+// ⭐ 暂时注释：保留 ssl 图片用于 AI 训练
+// DirectoryUtils.clearDirectory("runtime/captures/ssl");
+```
+
+**恢复为：**
+```java
+if( player!=null){
+    player.setJpegSaveEnabled(isOpen);
+}
+DirectoryUtils.clearDirectory("runtime/captures/ssl");
+```
+
+---
+
+### 4. JpegFileCleaner.java (自动清理开关)
+
+**文件路径：** `src/main/java/com/acard/acard/tools/JpegFileCleaner.java`
+
+**当前（清理暂停）：**
+```java
+// ⭐ 是否暂停文件清理（用于 AI 训练时保留图片）
+private static volatile boolean cleaningPaused = true;  // 默认暂停
+```
+
+**恢复为：**
+```java
+// ⭐ 是否暂停文件清理（用于 AI 训练时保留图片）
+private static volatile boolean cleaningPaused = false;  // 恢复清理
+```
+
+**或者在代码中调用：**
+```java
+JpegFileCleaner.setCleaningPaused(false);
+```
+
+---
+
+## ⚡ 快速恢复命令
+
+在项目根目录执行搜索替换：
+
+```
+搜索: // ⭐ 暂时注释：保留 ssl 图片用于 AI 训练
+替换: (删除这行)
+
+搜索: // DirectoryUtils.clearDirectory("runtime/captures/ssl");
+替换: DirectoryUtils.clearDirectory("runtime/captures/ssl");
+
+搜索: cleaningPaused = true
+替换: cleaningPaused = false
+```
+
+---
+
+## ✅ 恢复检查清单
+
+- [ ] HelloApplication.java - 启动时清理
+- [ ] CameraMainController.java - 关闭时清理
+- [ ] Element2_3Controller.java - 切换时清理
+- [ ] JpegFileCleaner.java - 自动清理开关
+
+---
+
+## 📅 修改日期
+
+- **注释日期：** 2025-12-02
+- **目的：** 保留 ssl 图片用于 AI 扑克牌模型训练
+- **恢复时机：** AI 模型训练完成后
+

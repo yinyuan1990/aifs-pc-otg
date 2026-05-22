@@ -1,0 +1,846 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>PC端 C++ 自适应帧率控制实现 v2.0 - 预测式 + WebSocket</title>
+    <style>
+        body { font-family: "Microsoft YaHei", Arial, sans-serif; padding: 20px; background: #f5f5f5; line-height: 1.7; }
+        h1 { color: #333; border-bottom: 3px solid #007AFF; padding-bottom: 10px; }
+        h2 { color: #007AFF; margin-top: 35px; border-left: 4px solid #007AFF; padding-left: 12px; }
+        h3 { color: #555; margin-top: 20px; }
+        h4 { color: #666; margin-top: 15px; }
+        table { border-collapse: collapse; width: 100%; margin: 15px 0; background: white; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+        th, td { border: 1px solid #ddd; padding: 12px 15px; text-align: left; }
+        th { background: #007AFF; color: white; font-weight: bold; }
+        tr:nth-child(even) { background: #f9f9f9; }
+        .note { background: #fff3cd; border-left: 4px solid #ffc107; padding: 12px 15px; margin: 15px 0; border-radius: 4px; }
+        .success { background: #d4edda; border-left: 4px solid #28a745; padding: 12px 15px; margin: 15px 0; border-radius: 4px; }
+        .warning { background: #f8d7da; border-left: 4px solid #dc3545; padding: 12px 15px; margin: 15px 0; border-radius: 4px; }
+        .info { background: #e3f2fd; border-left: 4px solid #2196F3; padding: 12px 15px; margin: 15px 0; border-radius: 4px; }
+        .code { background: #1e1e1e; color: #d4d4d4; padding: 15px; border-radius: 6px; font-family: "Consolas", "Monaco", monospace; margin: 12px 0; overflow-x: auto; font-size: 13px; }
+        .code pre { margin: 0; white-space: pre-wrap; }
+        .code .keyword { color: #569cd6; }
+        .code .type { color: #4ec9b0; }
+        .code .string { color: #ce9178; }
+        .code .number { color: #b5cea8; }
+        .code .comment { color: #6a9955; }
+        .code .function { color: #dcdcaa; }
+        .section { margin-bottom: 40px; }
+        .tag { display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 12px; margin-right: 5px; }
+        .tag-new { background: #4CAF50; color: white; }
+        .tag-core { background: #f44336; color: white; }
+    </style>
+</head>
+<body>
+
+<h1>🖥️ PC端 C++ 自适应帧率控制实现 v2.0</h1>
+<p><strong>版本：</strong>v2.0 &nbsp;&nbsp; <strong>更新日期：</strong>2025-01-31 &nbsp;&nbsp; <strong>特性：</strong>预测式 + 快降慢升 + WebSocket</p>
+
+<!-- ==================== 架构概览 ==================== -->
+<div class="section">
+    <h2>1. 架构概览</h2>
+    
+    <div class="info">
+        <strong>核心特性：</strong>
+        <ul>
+            <li><strong>预测式降帧</strong>：通过趋势分析，提前 1-2 秒预警</li>
+            <li><strong>快降慢升</strong>：降帧大幅度（四档跳），升帧小幅度（5-10fps）</li>
+            <li><strong>WebSocket 信令</strong>：复用现有 SRS 连接</li>
+        </ul>
+    </div>
+
+    <h3>1.1 模块划分</h3>
+    <table>
+        <tr>
+            <th>模块</th>
+            <th>职责</th>
+            <th>文件</th>
+        </tr>
+        <tr>
+            <td>AdaptiveFpsTypes</td>
+            <td>数据结构定义</td>
+            <td>adaptive_fps_types.h</td>
+        </tr>
+        <tr>
+            <td>NetworkMetricsCollector</td>
+            <td>采集网络指标</td>
+            <td>network_metrics.h/.cpp</td>
+        </tr>
+        <tr>
+            <td><span class="tag tag-new">NetworkTrendPredictor</span></td>
+            <td><strong>趋势预测（新增）</strong></td>
+            <td>network_trend_predictor.h/.cpp</td>
+        </tr>
+        <tr>
+            <td>AdaptiveFpsDecider</td>
+            <td>决策算法</td>
+            <td>adaptive_fps_decider.h/.cpp</td>
+        </tr>
+        <tr>
+            <td>AdaptiveFpsController</td>
+            <td>总控制器</td>
+            <td>adaptive_fps_controller.h/.cpp</td>
+        </tr>
+    </table>
+</div>
+
+<!-- ==================== 数据结构 ==================== -->
+<div class="section">
+    <h2>2. 数据结构定义</h2>
+    
+    <div class="code">
+<pre>
+<span class="comment">// adaptive_fps_types.h</span>
+<span class="keyword">#pragma once</span>
+
+<span class="keyword">#include</span> <span class="string">&lt;cstdint&gt;</span>
+<span class="keyword">#include</span> <span class="string">&lt;string&gt;</span>
+
+<span class="keyword">namespace</span> adaptive {
+
+<span class="comment">// ==================== 帧率四档 ====================</span>
+<span class="keyword">constexpr int</span> FPS_LEVELS[] = {15, 30, 45, 60};
+<span class="keyword">constexpr int</span> FPS_LEVEL_COUNT = 4;
+
+<span class="comment">// ==================== 紧急度 ====================</span>
+<span class="keyword">enum class</span> <span class="type">Urgency</span> {
+    Critical,   <span class="comment">// 紧急：立即执行，≤50ms</span>
+    High,       <span class="comment">// 高优先级：立即执行，≤200ms</span>
+    Normal,     <span class="comment">// 正常：可短暂过渡</span>
+    Low         <span class="comment">// 低优先级：升帧，平滑过渡</span>
+};
+
+<span class="comment">// ==================== 触发原因 ====================</span>
+<span class="keyword">enum class</span> <span class="type">Reason</span> {
+    PredictWarning,    <span class="comment">// 预测预警</span>
+    PredictCritical,   <span class="comment">// 预测紧急</span>
+    ArrivalLow,        <span class="comment">// 到达率不足</span>
+    JitterHigh,        <span class="comment">// 抖动过高</span>
+    QueueLow,          <span class="comment">// 队列不足</span>
+    RttHigh,           <span class="comment">// RTT过高</span>
+    NetworkRecover     <span class="comment">// 网络恢复</span>
+};
+
+<span class="comment">// ==================== 网络指标 ====================</span>
+<span class="keyword">struct</span> <span class="type">NetworkMetrics</span> {
+    <span class="type">double</span> arrivalRate;      <span class="comment">// 到达率 (0.0 ~ 1.0)</span>
+    <span class="type">double</span> jitterRatio;      <span class="comment">// 抖动比例</span>
+    <span class="type">double</span> jitterEma;        <span class="comment">// 抖动 EMA (ms)</span>
+    <span class="type">int</span>    arrivalFps;       <span class="comment">// 实际到达帧率</span>
+    <span class="type">int</span>    queueDepth;       <span class="comment">// 队列帧数</span>
+    <span class="type">int</span>    rttMs;            <span class="comment">// RTT 毫秒</span>
+    <span class="type">double</span> lossRate;         <span class="comment">// 丢包率</span>
+    <span class="type">int64_t</span> timestamp;       <span class="comment">// 时间戳</span>
+};
+
+<span class="comment">// ==================== 趋势指标（新增）====================</span>
+<span class="keyword">struct</span> <span class="type">TrendMetrics</span> {
+    <span class="type">double</span> jitterTrend;      <span class="comment">// 抖动变化率 (ms/s)</span>
+    <span class="type">double</span> arrivalSlope;     <span class="comment">// 到达率斜率 (%/s)</span>
+    <span class="type">int</span>    queueDropSpeed;   <span class="comment">// 队列下降速度 (帧/s)</span>
+    <span class="type">double</span> rttTrend;         <span class="comment">// RTT 变化率 (ms/s)</span>
+    <span class="type">double</span> riskScore;        <span class="comment">// 综合风险分 (0~1)</span>
+    <span class="type">bool</span>   isPredictDrop;    <span class="comment">// 是否预测需要降帧</span>
+};
+
+<span class="comment">// ==================== set_fps 指令 ====================</span>
+<span class="keyword">struct</span> <span class="type">SetFpsCommand</span> {
+    <span class="type">int</span>     fps;
+    <span class="type">Urgency</span> urgency;
+    <span class="type">Reason</span>  reason;
+    <span class="type">int</span>     bitrate;         <span class="comment">// bps，0 表示不指定</span>
+    <span class="type">int64_t</span> timestamp;
+};
+
+<span class="comment">// ==================== 阈值配置 ====================</span>
+<span class="keyword">struct</span> <span class="type">AdaptiveConfig</span> {
+    <span class="comment">// 降帧阈值</span>
+    <span class="type">double</span> arrivalRateDropThreshold  = 0.85;
+    <span class="type">double</span> jitterRatioDropThreshold  = 0.30;
+    <span class="type">int</span>    queueDepthDropThreshold   = 3;
+    <span class="type">int</span>    rttDropThresholdMs        = 300;
+    
+    <span class="comment">// 趋势预测阈值</span>
+    <span class="type">double</span> jitterTrendThreshold      = 2.0;    <span class="comment">// ms/s</span>
+    <span class="type">double</span> arrivalSlopeThreshold     = -0.05;  <span class="comment">// -5%/s</span>
+    <span class="type">int</span>    queueDropSpeedThreshold   = 3;      <span class="comment">// 帧/s</span>
+    <span class="type">double</span> riskScoreThreshold        = 0.5;
+    
+    <span class="comment">// 升帧阈值</span>
+    <span class="type">double</span> arrivalRateUpThreshold    = 0.90;
+    <span class="type">double</span> jitterRatioUpThreshold    = 0.20;
+    <span class="type">int</span>    queueDepthUpThreshold     = 5;
+    <span class="type">int</span>    stableTimeMs              = 1000;
+    
+    <span class="comment">// 升帧幅度</span>
+    <span class="type">int</span>    upgradeStep               = 5;      <span class="comment">// 每次升 5fps</span>
+};
+
+} <span class="comment">// namespace adaptive</span>
+</pre>
+    </div>
+</div>
+
+<!-- ==================== 趋势预测器 ==================== -->
+<div class="section">
+    <h2>3. 趋势预测器（核心新增）</h2>
+    <p><span class="tag tag-core">核心</span> <span class="tag tag-new">新增</span></p>
+    
+    <div class="code">
+<pre>
+<span class="comment">// network_trend_predictor.h</span>
+<span class="keyword">#pragma once</span>
+
+<span class="keyword">#include</span> <span class="string">"adaptive_fps_types.h"</span>
+<span class="keyword">#include</span> <span class="string">&lt;deque&gt;</span>
+<span class="keyword">#include</span> <span class="string">&lt;mutex&gt;</span>
+
+<span class="keyword">namespace</span> adaptive {
+
+<span class="keyword">class</span> <span class="type">NetworkTrendPredictor</span> {
+<span class="keyword">public:</span>
+    <span class="function">NetworkTrendPredictor</span>(<span class="keyword">const</span> <span class="type">AdaptiveConfig</span>& config = {});
+    
+    <span class="comment">// 更新历史数据（每秒调用一次）</span>
+    <span class="keyword">void</span> <span class="function">update</span>(<span class="keyword">const</span> <span class="type">NetworkMetrics</span>& metrics);
+    
+    <span class="comment">// 获取趋势分析结果</span>
+    <span class="type">TrendMetrics</span> <span class="function">analyze</span>() <span class="keyword">const</span>;
+    
+    <span class="comment">// 是否需要预警降帧</span>
+    <span class="type">bool</span> <span class="function">shouldPreemptiveDrop</span>() <span class="keyword">const</span>;
+
+<span class="keyword">private:</span>
+    <span class="keyword">struct</span> <span class="type">Sample</span> {
+        <span class="type">int64_t</span> timestamp;
+        <span class="type">double</span> jitterEma;
+        <span class="type">double</span> arrivalRate;
+        <span class="type">int</span> queueDepth;
+        <span class="type">int</span> rttMs;
+    };
+    
+    std::deque&lt;<span class="type">Sample</span>&gt; m_history;
+    <span class="type">AdaptiveConfig</span> m_config;
+    <span class="keyword">mutable</span> std::mutex m_mutex;
+    
+    <span class="keyword">static constexpr</span> <span class="type">size_t</span> HISTORY_SIZE = 5;
+};
+
+} <span class="comment">// namespace adaptive</span>
+</pre>
+    </div>
+
+    <div class="code">
+<pre>
+<span class="comment">// network_trend_predictor.cpp</span>
+<span class="keyword">#include</span> <span class="string">"network_trend_predictor.h"</span>
+<span class="keyword">#include</span> <span class="string">&lt;algorithm&gt;</span>
+<span class="keyword">#include</span> <span class="string">&lt;cmath&gt;</span>
+
+<span class="keyword">namespace</span> adaptive {
+
+<span class="type">NetworkTrendPredictor</span>::<span class="function">NetworkTrendPredictor</span>(<span class="keyword">const</span> <span class="type">AdaptiveConfig</span>& config)
+    : m_config(config)
+{}
+
+<span class="keyword">void</span> <span class="type">NetworkTrendPredictor</span>::<span class="function">update</span>(<span class="keyword">const</span> <span class="type">NetworkMetrics</span>& metrics) {
+    std::lock_guard&lt;std::mutex&gt; lock(m_mutex);
+    
+    m_history.push_back({
+        metrics.timestamp,
+        metrics.jitterEma,
+        metrics.arrivalRate,
+        metrics.queueDepth,
+        metrics.rttMs
+    });
+    
+    <span class="keyword">while</span> (m_history.size() > HISTORY_SIZE) {
+        m_history.pop_front();
+    }
+}
+
+<span class="type">TrendMetrics</span> <span class="type">NetworkTrendPredictor</span>::<span class="function">analyze</span>() <span class="keyword">const</span> {
+    std::lock_guard&lt;std::mutex&gt; lock(m_mutex);
+    
+    <span class="type">TrendMetrics</span> trend = {0, 0, 0, 0, 0, <span class="keyword">false</span>};
+    
+    <span class="keyword">if</span> (m_history.size() < 2) {
+        <span class="keyword">return</span> trend;
+    }
+    
+    <span class="keyword">const auto</span>& current = m_history.back();
+    <span class="keyword">const auto</span>& previous = m_history.front();
+    
+    <span class="type">double</span> timeDelta = (current.timestamp - previous.timestamp) / 1000.0;
+    <span class="keyword">if</span> (timeDelta <= 0) <span class="keyword">return</span> trend;
+    
+    <span class="comment">// ===== 计算各项趋势 =====</span>
+    trend.jitterTrend = (current.jitterEma - previous.jitterEma) / timeDelta;
+    trend.arrivalSlope = (current.arrivalRate - previous.arrivalRate) / timeDelta;
+    trend.queueDropSpeed = (<span class="type">int</span>)((previous.queueDepth - current.queueDepth) / timeDelta);
+    trend.rttTrend = (current.rttMs - previous.rttMs) / timeDelta;
+    
+    <span class="comment">// ===== 计算风险分 =====</span>
+    <span class="type">double</span> jitterScore = std::max(0.0, trend.jitterTrend / 10.0);
+    <span class="type">double</span> arrivalScore = std::max(0.0, -trend.arrivalSlope / 0.2);
+    <span class="type">double</span> queueScore = std::max(0.0, trend.queueDropSpeed / 6.0);
+    <span class="type">double</span> rttScore = std::max(0.0, trend.rttTrend / 200.0);
+    
+    trend.riskScore = 0.30 * jitterScore + 0.25 * arrivalScore + 
+                      0.25 * queueScore + 0.20 * rttScore;
+    trend.riskScore = std::min(1.0, trend.riskScore);
+    
+    <span class="comment">// ===== 判断是否预警 =====</span>
+    <span class="type">int</span> warningCount = 0;
+    <span class="keyword">if</span> (trend.jitterTrend > m_config.jitterTrendThreshold) warningCount++;
+    <span class="keyword">if</span> (trend.arrivalSlope < m_config.arrivalSlopeThreshold) warningCount++;
+    <span class="keyword">if</span> (trend.queueDropSpeed >= m_config.queueDropSpeedThreshold) warningCount++;
+    
+    <span class="comment">// 满足 2 个条件或风险分 > 阈值</span>
+    trend.isPredictDrop = (warningCount >= 2) || (trend.riskScore > m_config.riskScoreThreshold);
+    
+    <span class="keyword">return</span> trend;
+}
+
+<span class="type">bool</span> <span class="type">NetworkTrendPredictor</span>::<span class="function">shouldPreemptiveDrop</span>() <span class="keyword">const</span> {
+    <span class="keyword">return</span> <span class="function">analyze</span>().isPredictDrop;
+}
+
+} <span class="comment">// namespace adaptive</span>
+</pre>
+    </div>
+</div>
+
+<!-- ==================== 决策器 ==================== -->
+<div class="section">
+    <h2>4. 决策器（核心逻辑）</h2>
+    <p><span class="tag tag-core">核心</span></p>
+    
+    <div class="code">
+<pre>
+<span class="comment">// adaptive_fps_decider.h</span>
+<span class="keyword">#pragma once</span>
+
+<span class="keyword">#include</span> <span class="string">"adaptive_fps_types.h"</span>
+<span class="keyword">#include</span> <span class="string">&lt;optional&gt;</span>
+
+<span class="keyword">namespace</span> adaptive {
+
+<span class="keyword">class</span> <span class="type">AdaptiveFpsDecider</span> {
+<span class="keyword">public:</span>
+    <span class="function">AdaptiveFpsDecider</span>(<span class="keyword">const</span> <span class="type">AdaptiveConfig</span>& config = {});
+    
+    <span class="comment">// 决策：是否需要发送 set_fps 指令</span>
+    std::optional&lt;<span class="type">SetFpsCommand</span>&gt; <span class="function">decide</span>(
+        <span class="keyword">const</span> <span class="type">NetworkMetrics</span>& metrics,
+        <span class="keyword">const</span> <span class="type">TrendMetrics</span>& trend,
+        <span class="type">int</span> currentFps,
+        <span class="type">int</span> originFps
+    );
+    
+    <span class="keyword">void</span> <span class="function">reset</span>();
+
+<span class="keyword">private:</span>
+    std::optional&lt;<span class="type">SetFpsCommand</span>&gt; <span class="function">decideDropFps</span>(
+        <span class="keyword">const</span> <span class="type">NetworkMetrics</span>& metrics, 
+        <span class="keyword">const</span> <span class="type">TrendMetrics</span>& trend,
+        <span class="type">int</span> currentFps);
+    
+    std::optional&lt;<span class="type">SetFpsCommand</span>&gt; <span class="function">decideUpgradeFps</span>(
+        <span class="keyword">const</span> <span class="type">NetworkMetrics</span>& metrics, 
+        <span class="keyword">const</span> <span class="type">TrendMetrics</span>& trend,
+        <span class="type">int</span> currentFps, 
+        <span class="type">int</span> originFps);
+    
+    <span class="type">int</span> <span class="function">getLowerFpsLevel</span>(<span class="type">int</span> fps);
+    <span class="type">int</span> <span class="function">calculateBitrate</span>(<span class="type">int</span> fps);
+    
+    <span class="type">AdaptiveConfig</span> m_config;
+    <span class="type">bool</span> m_isStable = <span class="keyword">false</span>;
+    <span class="type">int64_t</span> m_stableStartTime = 0;
+};
+
+} <span class="comment">// namespace adaptive</span>
+</pre>
+    </div>
+
+    <div class="code">
+<pre>
+<span class="comment">// adaptive_fps_decider.cpp</span>
+<span class="keyword">#include</span> <span class="string">"adaptive_fps_decider.h"</span>
+<span class="keyword">#include</span> <span class="string">&lt;algorithm&gt;</span>
+<span class="keyword">#include</span> <span class="string">&lt;chrono&gt;</span>
+
+<span class="keyword">namespace</span> adaptive {
+
+<span class="type">AdaptiveFpsDecider</span>::<span class="function">AdaptiveFpsDecider</span>(<span class="keyword">const</span> <span class="type">AdaptiveConfig</span>& config)
+    : m_config(config)
+{}
+
+std::optional&lt;<span class="type">SetFpsCommand</span>&gt; <span class="type">AdaptiveFpsDecider</span>::<span class="function">decide</span>(
+    <span class="keyword">const</span> <span class="type">NetworkMetrics</span>& metrics,
+    <span class="keyword">const</span> <span class="type">TrendMetrics</span>& trend,
+    <span class="type">int</span> currentFps,
+    <span class="type">int</span> originFps)
+{
+    <span class="comment">// 优先检查降帧</span>
+    <span class="keyword">auto</span> dropCmd = <span class="function">decideDropFps</span>(metrics, trend, currentFps);
+    <span class="keyword">if</span> (dropCmd) {
+        m_isStable = <span class="keyword">false</span>;
+        <span class="keyword">return</span> dropCmd;
+    }
+    
+    <span class="comment">// 检查升帧</span>
+    <span class="keyword">return</span> <span class="function">decideUpgradeFps</span>(metrics, trend, currentFps, originFps);
+}
+
+std::optional&lt;<span class="type">SetFpsCommand</span>&gt; <span class="type">AdaptiveFpsDecider</span>::<span class="function">decideDropFps</span>(
+    <span class="keyword">const</span> <span class="type">NetworkMetrics</span>& metrics, 
+    <span class="keyword">const</span> <span class="type">TrendMetrics</span>& trend,
+    <span class="type">int</span> currentFps)
+{
+    <span class="type">int</span> targetFps = currentFps;
+    <span class="type">Urgency</span> urgency = <span class="type">Urgency</span>::Normal;
+    <span class="type">Reason</span> reason = <span class="type">Reason</span>::ArrivalLow;
+    <span class="type">bool</span> shouldDrop = <span class="keyword">false</span>;
+    
+    <span class="comment">// ========================================</span>
+    <span class="comment">// ⭐ 条件0：队列即将见底（最高优先级）</span>
+    <span class="comment">// ========================================</span>
+    <span class="keyword">if</span> (metrics.queueDepth <= 1) {
+        targetFps = 15;  <span class="comment">// 直接降到最低</span>
+        urgency = <span class="type">Urgency</span>::Critical;
+        reason = <span class="type">Reason</span>::QueueLow;
+        shouldDrop = <span class="keyword">true</span>;
+    }
+    <span class="comment">// ========================================</span>
+    <span class="comment">// ⭐ 条件1：预测式降帧（趋势分析）</span>
+    <span class="comment">// ========================================</span>
+    <span class="keyword">else if</span> (trend.isPredictDrop) {
+        <span class="keyword">if</span> (trend.riskScore > 0.7) {
+            <span class="comment">// 风险很高，降两档</span>
+            targetFps = <span class="function">getLowerFpsLevel</span>(<span class="function">getLowerFpsLevel</span>(currentFps));
+            urgency = <span class="type">Urgency</span>::High;
+            reason = <span class="type">Reason</span>::PredictCritical;
+        } <span class="keyword">else</span> {
+            <span class="comment">// 风险中等，降一档</span>
+            targetFps = <span class="function">getLowerFpsLevel</span>(currentFps);
+            urgency = <span class="type">Urgency</span>::High;
+            reason = <span class="type">Reason</span>::PredictWarning;
+        }
+        shouldDrop = <span class="keyword">true</span>;
+    }
+    <span class="comment">// ========================================</span>
+    <span class="comment">// 条件2：到达率不足</span>
+    <span class="comment">// ========================================</span>
+    <span class="keyword">else if</span> (metrics.arrivalRate < m_config.arrivalRateDropThreshold) {
+        targetFps = std::max(15, metrics.arrivalFps);
+        urgency = <span class="type">Urgency</span>::Normal;
+        reason = <span class="type">Reason</span>::ArrivalLow;
+        shouldDrop = <span class="keyword">true</span>;
+    }
+    <span class="comment">// ========================================</span>
+    <span class="comment">// 条件3：抖动过高</span>
+    <span class="comment">// ========================================</span>
+    <span class="keyword">else if</span> (metrics.jitterRatio > m_config.jitterRatioDropThreshold) {
+        targetFps = <span class="function">getLowerFpsLevel</span>(currentFps);
+        urgency = <span class="type">Urgency</span>::Normal;
+        reason = <span class="type">Reason</span>::JitterHigh;
+        shouldDrop = <span class="keyword">true</span>;
+    }
+    <span class="comment">// ========================================</span>
+    <span class="comment">// 条件4：队列不足</span>
+    <span class="comment">// ========================================</span>
+    <span class="keyword">else if</span> (metrics.queueDepth < m_config.queueDepthDropThreshold) {
+        targetFps = <span class="function">getLowerFpsLevel</span>(currentFps);
+        urgency = <span class="type">Urgency</span>::Normal;
+        reason = <span class="type">Reason</span>::QueueLow;
+        shouldDrop = <span class="keyword">true</span>;
+    }
+    <span class="comment">// ========================================</span>
+    <span class="comment">// 条件5：RTT过高</span>
+    <span class="comment">// ========================================</span>
+    <span class="keyword">else if</span> (metrics.rttMs > m_config.rttDropThresholdMs) {
+        targetFps = <span class="function">getLowerFpsLevel</span>(currentFps);
+        urgency = <span class="type">Urgency</span>::Normal;
+        reason = <span class="type">Reason</span>::RttHigh;
+        shouldDrop = <span class="keyword">true</span>;
+    }
+    
+    <span class="comment">// 如果需要降帧且目标帧率低于当前</span>
+    <span class="keyword">if</span> (shouldDrop && targetFps < currentFps) {
+        <span class="type">SetFpsCommand</span> cmd;
+        cmd.fps = targetFps;
+        cmd.urgency = urgency;
+        cmd.reason = reason;
+        cmd.bitrate = <span class="function">calculateBitrate</span>(targetFps);
+        cmd.timestamp = metrics.timestamp;
+        <span class="keyword">return</span> cmd;
+    }
+    
+    <span class="keyword">return</span> std::nullopt;
+}
+
+std::optional&lt;<span class="type">SetFpsCommand</span>&gt; <span class="type">AdaptiveFpsDecider</span>::<span class="function">decideUpgradeFps</span>(
+    <span class="keyword">const</span> <span class="type">NetworkMetrics</span>& metrics, 
+    <span class="keyword">const</span> <span class="type">TrendMetrics</span>& trend,
+    <span class="type">int</span> currentFps, 
+    <span class="type">int</span> originFps)
+{
+    <span class="comment">// 已经是最高帧率</span>
+    <span class="keyword">if</span> (currentFps >= originFps) {
+        <span class="keyword">return</span> std::nullopt;
+    }
+    
+    <span class="comment">// ===== 升帧条件（全部满足）=====</span>
+    <span class="type">bool</span> canUpgrade = 
+        (metrics.jitterRatio < m_config.jitterRatioUpThreshold) &&
+        (trend.jitterTrend <= 0) &&  <span class="comment">// 抖动趋势稳定或下降</span>
+        (metrics.arrivalRate >= m_config.arrivalRateUpThreshold) &&
+        (metrics.queueDepth >= m_config.queueDepthUpThreshold);
+    
+    <span class="keyword">if</span> (!canUpgrade) {
+        m_isStable = <span class="keyword">false</span>;
+        <span class="keyword">return</span> std::nullopt;
+    }
+    
+    <span class="comment">// 检查稳定持续时间</span>
+    <span class="keyword">if</span> (!m_isStable) {
+        m_isStable = <span class="keyword">true</span>;
+        m_stableStartTime = metrics.timestamp;
+        <span class="keyword">return</span> std::nullopt;
+    }
+    
+    <span class="keyword">if</span> (metrics.timestamp - m_stableStartTime < m_config.stableTimeMs) {
+        <span class="keyword">return</span> std::nullopt;  <span class="comment">// 稳定时间不够</span>
+    }
+    
+    <span class="comment">// ===== 升帧：每次升 5-10fps =====</span>
+    <span class="type">int</span> targetFps = currentFps + m_config.upgradeStep;
+    targetFps = std::min(targetFps, metrics.arrivalFps);  <span class="comment">// 不超过到达帧率</span>
+    targetFps = std::min(targetFps, originFps);           <span class="comment">// 不超过原始帧率</span>
+    
+    <span class="keyword">if</span> (targetFps <= currentFps) {
+        <span class="keyword">return</span> std::nullopt;
+    }
+    
+    <span class="comment">// 重置稳定计时</span>
+    m_isStable = <span class="keyword">false</span>;
+    
+    <span class="type">SetFpsCommand</span> cmd;
+    cmd.fps = targetFps;
+    cmd.urgency = <span class="type">Urgency</span>::Low;  <span class="comment">// 升帧用低优先级</span>
+    cmd.reason = <span class="type">Reason</span>::NetworkRecover;
+    cmd.bitrate = <span class="function">calculateBitrate</span>(targetFps);
+    cmd.timestamp = metrics.timestamp;
+    
+    <span class="keyword">return</span> cmd;
+}
+
+<span class="type">int</span> <span class="type">AdaptiveFpsDecider</span>::<span class="function">getLowerFpsLevel</span>(<span class="type">int</span> fps) {
+    <span class="keyword">for</span> (<span class="type">int</span> i = FPS_LEVEL_COUNT - 1; i >= 0; i--) {
+        <span class="keyword">if</span> (FPS_LEVELS[i] < fps) {
+            <span class="keyword">return</span> FPS_LEVELS[i];
+        }
+    }
+    <span class="keyword">return</span> FPS_LEVELS[0];  <span class="comment">// 15fps</span>
+}
+
+<span class="type">int</span> <span class="type">AdaptiveFpsDecider</span>::<span class="function">calculateBitrate</span>(<span class="type">int</span> fps) {
+    <span class="keyword">if</span> (fps >= 60) <span class="keyword">return</span> 10000000;
+    <span class="keyword">if</span> (fps >= 45) <span class="keyword">return</span> 7000000;
+    <span class="keyword">if</span> (fps >= 30) <span class="keyword">return</span> 5000000;
+    <span class="keyword">return</span> 2500000;
+}
+
+<span class="keyword">void</span> <span class="type">AdaptiveFpsDecider</span>::<span class="function">reset</span>() {
+    m_isStable = <span class="keyword">false</span>;
+    m_stableStartTime = 0;
+}
+
+} <span class="comment">// namespace adaptive</span>
+</pre>
+    </div>
+</div>
+
+<!-- ==================== 总控制器 ==================== -->
+<div class="section">
+    <h2>5. 总控制器</h2>
+    
+    <div class="code">
+<pre>
+<span class="comment">// adaptive_fps_controller.h</span>
+<span class="keyword">#pragma once</span>
+
+<span class="keyword">#include</span> <span class="string">"adaptive_fps_types.h"</span>
+<span class="keyword">#include</span> <span class="string">"network_metrics.h"</span>
+<span class="keyword">#include</span> <span class="string">"network_trend_predictor.h"</span>
+<span class="keyword">#include</span> <span class="string">"adaptive_fps_decider.h"</span>
+<span class="keyword">#include</span> <span class="string">&lt;memory&gt;</span>
+<span class="keyword">#include</span> <span class="string">&lt;functional&gt;</span>
+<span class="keyword">#include</span> <span class="string">&lt;thread&gt;</span>
+<span class="keyword">#include</span> <span class="string">&lt;atomic&gt;</span>
+
+<span class="keyword">namespace</span> adaptive {
+
+<span class="comment">// WebSocket 发送回调</span>
+<span class="keyword">using</span> <span class="type">WsSendCallback</span> = std::function&lt;<span class="type">bool</span>(<span class="keyword">const</span> std::string&)&gt;;
+
+<span class="keyword">class</span> <span class="type">AdaptiveFpsController</span> {
+<span class="keyword">public:</span>
+    <span class="function">AdaptiveFpsController</span>(<span class="type">int</span> originFps, <span class="type">WsSendCallback</span> sendCallback);
+    ~<span class="function">AdaptiveFpsController</span>();
+    
+    <span class="keyword">void</span> <span class="function">start</span>();
+    <span class="keyword">void</span> <span class="function">stop</span>();
+    
+    <span class="comment">// 外部接口</span>
+    <span class="keyword">void</span> <span class="function">onFrameArrived</span>(<span class="type">int64_t</span> timestampMs);
+    <span class="keyword">void</span> <span class="function">updateQueueDepth</span>(<span class="type">int</span> depth);
+    <span class="keyword">void</span> <span class="function">updateRtcpStats</span>(<span class="type">int</span> packetsLost, <span class="type">int</span> packetsReceived, <span class="type">int</span> rttMs);
+    
+    <span class="type">int</span> <span class="function">getCurrentFps</span>() <span class="keyword">const</span> { <span class="keyword">return</span> m_currentFps; }
+
+<span class="keyword">private:</span>
+    <span class="keyword">void</span> <span class="function">runLoop</span>();
+    std::string <span class="function">buildSetFpsJson</span>(<span class="keyword">const</span> <span class="type">SetFpsCommand</span>& cmd);
+    std::string <span class="function">urgencyToString</span>(<span class="type">Urgency</span> u);
+    std::string <span class="function">reasonToString</span>(<span class="type">Reason</span> r);
+    
+    <span class="type">int</span> m_originFps;
+    std::atomic&lt;<span class="type">int</span>&gt; m_currentFps;
+    
+    std::unique_ptr&lt;<span class="type">NetworkMetricsCollector</span>&gt; m_metrics;
+    std::unique_ptr&lt;<span class="type">NetworkTrendPredictor</span>&gt; m_predictor;
+    std::unique_ptr&lt;<span class="type">AdaptiveFpsDecider</span>&gt; m_decider;
+    
+    <span class="type">WsSendCallback</span> m_sendCallback;
+    
+    std::atomic&lt;<span class="type">bool</span>&gt; m_running{<span class="keyword">false</span>};
+    std::thread m_loopThread;
+};
+
+} <span class="comment">// namespace adaptive</span>
+</pre>
+    </div>
+
+    <div class="code">
+<pre>
+<span class="comment">// adaptive_fps_controller.cpp</span>
+<span class="keyword">#include</span> <span class="string">"adaptive_fps_controller.h"</span>
+<span class="keyword">#include</span> <span class="string">&lt;sstream&gt;</span>
+<span class="keyword">#include</span> <span class="string">&lt;chrono&gt;</span>
+
+<span class="keyword">namespace</span> adaptive {
+
+<span class="type">AdaptiveFpsController</span>::<span class="function">AdaptiveFpsController</span>(<span class="type">int</span> originFps, <span class="type">WsSendCallback</span> sendCallback)
+    : m_originFps(originFps)
+    , m_currentFps(originFps)
+    , m_metrics(std::make_unique&lt;<span class="type">NetworkMetricsCollector</span>&gt;(originFps))
+    , m_predictor(std::make_unique&lt;<span class="type">NetworkTrendPredictor</span>&gt;())
+    , m_decider(std::make_unique&lt;<span class="type">AdaptiveFpsDecider</span>&gt;())
+    , m_sendCallback(std::move(sendCallback))
+{}
+
+<span class="type">AdaptiveFpsController</span>::~<span class="function">AdaptiveFpsController</span>() {
+    <span class="function">stop</span>();
+}
+
+<span class="keyword">void</span> <span class="type">AdaptiveFpsController</span>::<span class="function">start</span>() {
+    <span class="keyword">if</span> (m_running) <span class="keyword">return</span>;
+    m_running = <span class="keyword">true</span>;
+    m_loopThread = std::thread(&<span class="type">AdaptiveFpsController</span>::<span class="function">runLoop</span>, <span class="keyword">this</span>);
+}
+
+<span class="keyword">void</span> <span class="type">AdaptiveFpsController</span>::<span class="function">stop</span>() {
+    m_running = <span class="keyword">false</span>;
+    <span class="keyword">if</span> (m_loopThread.joinable()) {
+        m_loopThread.join();
+    }
+}
+
+<span class="keyword">void</span> <span class="type">AdaptiveFpsController</span>::<span class="function">runLoop</span>() {
+    <span class="keyword">while</span> (m_running) {
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+        
+        <span class="keyword">if</span> (!m_running) <span class="keyword">break</span>;
+        
+        <span class="comment">// 1. 获取当前指标</span>
+        <span class="type">NetworkMetrics</span> metrics = m_metrics->getMetrics();
+        
+        <span class="comment">// 2. 更新趋势预测器</span>
+        m_predictor->update(metrics);
+        <span class="type">TrendMetrics</span> trend = m_predictor->analyze();
+        
+        <span class="comment">// 3. 决策</span>
+        <span class="keyword">auto</span> cmdOpt = m_decider->decide(metrics, trend, m_currentFps, m_originFps);
+        
+        <span class="comment">// 4. 发送指令</span>
+        <span class="keyword">if</span> (cmdOpt && m_sendCallback) {
+            std::string json = <span class="function">buildSetFpsJson</span>(*cmdOpt);
+            <span class="keyword">if</span> (m_sendCallback(json)) {
+                m_currentFps = cmdOpt->fps;
+                m_metrics->setTargetFps(cmdOpt->fps);
+            }
+        }
+    }
+}
+
+std::string <span class="type">AdaptiveFpsController</span>::<span class="function">buildSetFpsJson</span>(<span class="keyword">const</span> <span class="type">SetFpsCommand</span>& cmd) {
+    std::ostringstream oss;
+    oss << <span class="string">"{"</span>
+        << <span class="string">"\"cmd\":\"set_fps\","</span>
+        << <span class="string">"\"fps\":"</span> << cmd.fps << <span class="string">","</span>
+        << <span class="string">"\"urgency\":\""</span> << <span class="function">urgencyToString</span>(cmd.urgency) << <span class="string">"\","</span>
+        << <span class="string">"\"reason\":\""</span> << <span class="function">reasonToString</span>(cmd.reason) << <span class="string">"\","</span>
+        << <span class="string">"\"bitrate\":"</span> << cmd.bitrate << <span class="string">","</span>
+        << <span class="string">"\"timestamp\":"</span> << cmd.timestamp
+        << <span class="string">"}"</span>;
+    <span class="keyword">return</span> oss.str();
+}
+
+std::string <span class="type">AdaptiveFpsController</span>::<span class="function">urgencyToString</span>(<span class="type">Urgency</span> u) {
+    <span class="keyword">switch</span> (u) {
+        <span class="keyword">case</span> <span class="type">Urgency</span>::Critical: <span class="keyword">return</span> <span class="string">"critical"</span>;
+        <span class="keyword">case</span> <span class="type">Urgency</span>::High: <span class="keyword">return</span> <span class="string">"high"</span>;
+        <span class="keyword">case</span> <span class="type">Urgency</span>::Normal: <span class="keyword">return</span> <span class="string">"normal"</span>;
+        <span class="keyword">case</span> <span class="type">Urgency</span>::Low: <span class="keyword">return</span> <span class="string">"low"</span>;
+        <span class="keyword">default</span>: <span class="keyword">return</span> <span class="string">"normal"</span>;
+    }
+}
+
+std::string <span class="type">AdaptiveFpsController</span>::<span class="function">reasonToString</span>(<span class="type">Reason</span> r) {
+    <span class="keyword">switch</span> (r) {
+        <span class="keyword">case</span> <span class="type">Reason</span>::PredictWarning: <span class="keyword">return</span> <span class="string">"predict_warning"</span>;
+        <span class="keyword">case</span> <span class="type">Reason</span>::PredictCritical: <span class="keyword">return</span> <span class="string">"predict_critical"</span>;
+        <span class="keyword">case</span> <span class="type">Reason</span>::ArrivalLow: <span class="keyword">return</span> <span class="string">"arrival_low"</span>;
+        <span class="keyword">case</span> <span class="type">Reason</span>::JitterHigh: <span class="keyword">return</span> <span class="string">"jitter_high"</span>;
+        <span class="keyword">case</span> <span class="type">Reason</span>::QueueLow: <span class="keyword">return</span> <span class="string">"queue_low"</span>;
+        <span class="keyword">case</span> <span class="type">Reason</span>::RttHigh: <span class="keyword">return</span> <span class="string">"rtt_high"</span>;
+        <span class="keyword">case</span> <span class="type">Reason</span>::NetworkRecover: <span class="keyword">return</span> <span class="string">"network_recover"</span>;
+        <span class="keyword">default</span>: <span class="keyword">return</span> <span class="string">"unknown"</span>;
+    }
+}
+
+<span class="comment">// 外部接口实现</span>
+<span class="keyword">void</span> <span class="type">AdaptiveFpsController</span>::<span class="function">onFrameArrived</span>(<span class="type">int64_t</span> timestampMs) {
+    m_metrics->onFrameArrived(timestampMs);
+}
+
+<span class="keyword">void</span> <span class="type">AdaptiveFpsController</span>::<span class="function">updateQueueDepth</span>(<span class="type">int</span> depth) {
+    m_metrics->updateQueueDepth(depth);
+}
+
+<span class="keyword">void</span> <span class="type">AdaptiveFpsController</span>::<span class="function">updateRtcpStats</span>(<span class="type">int</span> packetsLost, <span class="type">int</span> packetsReceived, <span class="type">int</span> rttMs) {
+    m_metrics->updateRtcpStats(packetsLost, packetsReceived, rttMs);
+}
+
+} <span class="comment">// namespace adaptive</span>
+</pre>
+    </div>
+</div>
+
+<!-- ==================== 集成示例 ==================== -->
+<div class="section">
+    <h2>6. 集成示例</h2>
+    
+    <div class="code">
+<pre>
+<span class="comment">// 在你的播放器中集成</span>
+
+<span class="keyword">class</span> <span class="type">VideoPlayer</span> {
+<span class="keyword">public:</span>
+    <span class="keyword">void</span> <span class="function">init</span>(<span class="type">WebSocketClient</span>* ws) {
+        <span class="comment">// 创建控制器，传入 WebSocket 发送回调</span>
+        m_fpsController = std::make_unique&lt;adaptive::<span class="type">AdaptiveFpsController</span>&gt;(
+            60,  <span class="comment">// 原始帧率</span>
+            [ws](<span class="keyword">const</span> std::string& json) {
+                <span class="keyword">return</span> ws->send(json);  <span class="comment">// 通过 WebSocket 发送</span>
+            }
+        );
+        
+        m_fpsController->start();
+    }
+    
+    <span class="comment">// 每收到一帧</span>
+    <span class="keyword">void</span> <span class="function">onVideoFrame</span>(<span class="type">int64_t</span> timestampMs) {
+        m_fpsController->onFrameArrived(timestampMs);
+    }
+    
+    <span class="comment">// 队列更新</span>
+    <span class="keyword">void</span> <span class="function">onQueueUpdate</span>(<span class="type">int</span> depth) {
+        m_fpsController->updateQueueDepth(depth);
+    }
+    
+    <span class="comment">// RTCP 统计（如果有）</span>
+    <span class="keyword">void</span> <span class="function">onRtcpStats</span>(<span class="type">int</span> lost, <span class="type">int</span> received, <span class="type">int</span> rtt) {
+        m_fpsController->updateRtcpStats(lost, received, rtt);
+    }
+
+<span class="keyword">private:</span>
+    std::unique_ptr&lt;adaptive::<span class="type">AdaptiveFpsController</span>&gt; m_fpsController;
+};
+</pre>
+    </div>
+</div>
+
+<!-- ==================== 接入点汇总 ==================== -->
+<div class="section">
+    <h2>7. 接入点汇总</h2>
+    
+    <table>
+        <tr>
+            <th>接入点</th>
+            <th>调用位置</th>
+            <th>方法</th>
+            <th>频率</th>
+        </tr>
+        <tr>
+            <td>帧到达</td>
+            <td>解码后/渲染前</td>
+            <td><code>onFrameArrived(ts)</code></td>
+            <td>每帧</td>
+        </tr>
+        <tr>
+            <td>队列更新</td>
+            <td>缓冲队列变化时</td>
+            <td><code>updateQueueDepth(depth)</code></td>
+            <td>每帧或定期</td>
+        </tr>
+        <tr>
+            <td>RTCP统计</td>
+            <td>WebRTC stats回调</td>
+            <td><code>updateRtcpStats(...)</code></td>
+            <td>1-5秒</td>
+        </tr>
+        <tr>
+            <td>WebSocket发送</td>
+            <td>构造函数回调</td>
+            <td>WsSendCallback</td>
+            <td>-</td>
+        </tr>
+    </table>
+</div>
+
+<!-- ==================== 总结 ==================== -->
+<div class="section">
+    <h2>8. 总结</h2>
+    
+    <div class="success">
+        <strong>PC 端核心逻辑：</strong>
+        <ol>
+            <li><strong>采集指标</strong>：帧到达时间、队列深度、RTCP统计</li>
+            <li><strong>趋势预测</strong>：计算抖动趋势、到达率斜率、队列下降速度</li>
+            <li><strong>决策</strong>：预测式 + 被动式，取最低帧率</li>
+            <li><strong>发送指令</strong>：通过 WebSocket 发送 <code>set_fps</code></li>
+        </ol>
+    </div>
+
+    <div class="info">
+        <strong>降帧策略</strong>：快降、大幅度（四档跳）<br>
+        <strong>升帧策略</strong>：慢升、小幅度（5fps/次，间隔≥1秒）
+    </div>
+</div>
+
+</body>
+</html>

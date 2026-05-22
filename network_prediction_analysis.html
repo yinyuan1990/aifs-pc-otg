@@ -1,0 +1,693 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>网络波动预测方案 - 如何提前知道网络恶化</title>
+    <style>
+        body { font-family: "Microsoft YaHei", Arial, sans-serif; padding: 20px; background: #f5f5f5; line-height: 1.7; }
+        h1 { color: #333; border-bottom: 3px solid #FF5722; padding-bottom: 10px; }
+        h2 { color: #FF5722; margin-top: 35px; border-left: 4px solid #FF5722; padding-left: 12px; }
+        h3 { color: #555; margin-top: 20px; }
+        h4 { color: #666; margin-top: 15px; }
+        table { border-collapse: collapse; width: 100%; margin: 15px 0; background: white; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+        th, td { border: 1px solid #ddd; padding: 12px 15px; text-align: left; }
+        th { background: #FF5722; color: white; font-weight: bold; }
+        tr:nth-child(even) { background: #f9f9f9; }
+        tr:hover { background: #fff3e0; }
+        .note { background: #fff3cd; border-left: 4px solid #ffc107; padding: 12px 15px; margin: 15px 0; border-radius: 4px; }
+        .success { background: #d4edda; border-left: 4px solid #28a745; padding: 12px 15px; margin: 15px 0; border-radius: 4px; }
+        .warning { background: #f8d7da; border-left: 4px solid #dc3545; padding: 12px 15px; margin: 15px 0; border-radius: 4px; }
+        .info { background: #e3f2fd; border-left: 4px solid #2196F3; padding: 12px 15px; margin: 15px 0; border-radius: 4px; }
+        .critical { background: #ffebee; border-left: 4px solid #f44336; padding: 12px 15px; margin: 15px 0; border-radius: 4px; }
+        .code { background: #1e1e1e; color: #d4d4d4; padding: 15px; border-radius: 6px; font-family: "Consolas", "Monaco", monospace; margin: 12px 0; overflow-x: auto; font-size: 13px; }
+        .code pre { margin: 0; white-space: pre-wrap; }
+        .formula { background: #f3e5f5; border-left: 4px solid #9c27b0; padding: 15px; margin: 15px 0; border-radius: 4px; font-family: monospace; }
+        .section { margin-bottom: 40px; }
+        .tag { display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 12px; margin-right: 5px; }
+        .tag-predict { background: #FF5722; color: white; }
+        .tag-reactive { background: #9E9E9E; color: white; }
+        .timeline { background: white; padding: 20px; border-radius: 8px; margin: 15px 0; }
+        .timeline-item { display: flex; margin: 15px 0; }
+        .timeline-marker { width: 40px; height: 40px; border-radius: 50%; display: flex; align-items: center; justify-content: center; color: white; font-weight: bold; margin-right: 15px; flex-shrink: 0; }
+        .timeline-content { flex: 1; }
+        .chart { background: white; padding: 20px; border-radius: 8px; margin: 15px 0; }
+    </style>
+</head>
+<body>
+
+<h1>🔮 网络波动预测方案 - 如何提前知道网络恶化</h1>
+<p><strong>核心问题：</strong>能否在网络真正恶化前 <strong>提前感知并预降帧</strong>？</p>
+
+<!-- ==================== 结论 ==================== -->
+<div class="section">
+    <h2>✅ 结论先行</h2>
+    
+    <div class="success">
+        <strong>答案是：可以！</strong> 通过以下方法可以提前 <strong>500ms ~ 2s</strong> 预测网络恶化：
+        <ul>
+            <li><strong>抖动趋势分析</strong>：抖动在上升 → 网络正在恶化</li>
+            <li><strong>到达率斜率</strong>：到达率快速下降 → 网络即将恶化</li>
+            <li><strong>队列下降速度</strong>：队列每秒下降 ≥ 3帧 → 提前降帧</li>
+            <li><strong>RTT 趋势</strong>：RTT 持续上升 → 拥塞正在加剧</li>
+        </ul>
+    </div>
+
+    <div class="warning">
+        <strong>传统"被动式"方案的问题：</strong>
+        <ul>
+            <li>等到队列 < 3帧才降帧 → 已经来不及，用户已经卡了</li>
+            <li>等到丢包 > 5% 才反应 → 已经丢了很多帧</li>
+            <li>等到延迟 > 200ms 才处理 → 体验已经差了</li>
+        </ul>
+    </div>
+</div>
+
+<!-- ==================== 预测 vs 被动 ==================== -->
+<div class="section">
+    <h2>📊 预测式 vs 被动式 对比</h2>
+    
+    <table>
+        <tr>
+            <th>方式</th>
+            <th>触发时机</th>
+            <th>用户体验</th>
+            <th>示例</th>
+        </tr>
+        <tr>
+            <td><span class="tag tag-reactive">被动式</span></td>
+            <td>等指标超过阈值</td>
+            <td>已经卡顿后才反应</td>
+            <td>队列 < 3帧 → 降帧</td>
+        </tr>
+        <tr style="background: #fff3e0;">
+            <td><span class="tag tag-predict">预测式 ⭐</span></td>
+            <td>检测到趋势变化</td>
+            <td><strong>在卡顿前就降帧</strong></td>
+            <td>队列下降速度 > 3帧/秒 → 提前降帧</td>
+        </tr>
+    </table>
+
+    <div class="timeline">
+        <h4>网络恶化时间线</h4>
+        <div class="timeline-item">
+            <div class="timeline-marker" style="background: #4CAF50;">T0</div>
+            <div class="timeline-content">
+                <strong>网络正常</strong><br>
+                队列 9帧，抖动 5%，到达率 100%
+            </div>
+        </div>
+        <div class="timeline-item">
+            <div class="timeline-marker" style="background: #FF9800;">T1</div>
+            <div class="timeline-content">
+                <strong>⚡ 预测式在这里触发！</strong><br>
+                队列 7帧（下降 2帧/秒），抖动 15%（上升中），到达率 95%（下降中）<br>
+                <span style="color: #FF5722;"><strong>→ 提前 1-2 秒预警，开始平滑降帧</strong></span>
+            </div>
+        </div>
+        <div class="timeline-item">
+            <div class="timeline-marker" style="background: #f44336;">T2</div>
+            <div class="timeline-content">
+                <strong>被动式在这里才触发</strong><br>
+                队列 2帧，抖动 40%，到达率 70%<br>
+                <span style="color: #f44336;">→ 用户已经卡顿了！</span>
+            </div>
+        </div>
+        <div class="timeline-item">
+            <div class="timeline-marker" style="background: #9E9E9E;">T3</div>
+            <div class="timeline-content">
+                <strong>如果不处理</strong><br>
+                队列 0帧，断流卡死
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ==================== 五大预测指标 ==================== -->
+<div class="section">
+    <h2>🎯 五大预测指标（核心）</h2>
+    
+    <h3>1️⃣ 抖动趋势（Jitter Trend）⭐最敏感</h3>
+    <div class="info">
+        <strong>原理：</strong>网络恶化时，最先表现为帧间隔不稳定（抖动上升），比丢包/队列变化更早。
+    </div>
+    
+    <div class="formula">
+        <strong>抖动变化率 = (当前抖动EMA - 1秒前抖动EMA) / 1秒</strong><br><br>
+        示例（60fps，期望间隔 16.7ms）：<br>
+        - 1秒前抖动EMA = 2ms（抖动比例 12%）<br>
+        - 当前抖动EMA = 5ms（抖动比例 30%）<br>
+        - 抖动变化率 = (5 - 2) / 1 = <strong>+3ms/秒</strong> → 网络正在恶化！
+    </div>
+    
+    <table>
+        <tr>
+            <th>抖动变化率</th>
+            <th>含义</th>
+            <th>动作</th>
+        </tr>
+        <tr>
+            <td>≤ 0</td>
+            <td>抖动稳定或下降</td>
+            <td>✅ 可升帧</td>
+        </tr>
+        <tr>
+            <td>0 ~ 2ms/秒</td>
+            <td>轻微上升</td>
+            <td>📊 观察</td>
+        </tr>
+        <tr style="background: #fff3e0;">
+            <td><strong>> 2ms/秒</strong></td>
+            <td><strong>快速上升</strong></td>
+            <td><strong>⚠️ 预警降帧</strong></td>
+        </tr>
+        <tr style="background: #ffebee;">
+            <td>> 5ms/秒</td>
+            <td>急剧上升</td>
+            <td>🛑 立即降帧</td>
+        </tr>
+    </table>
+
+    <h3>2️⃣ 到达率斜率（Arrival Rate Slope）⭐实用</h3>
+    <div class="info">
+        <strong>原理：</strong>不只看当前到达率是多少，还要看它下降多快。
+    </div>
+    
+    <div class="formula">
+        <strong>到达率斜率 = (当前到达率 - 1秒前到达率) / 1秒</strong><br><br>
+        示例：<br>
+        - 1秒前到达率 = 98%<br>
+        - 当前到达率 = 85%<br>
+        - 斜率 = (0.85 - 0.98) / 1 = <strong>-13%/秒</strong> → 网络快速恶化！
+    </div>
+    
+    <table>
+        <tr>
+            <th>到达率斜率</th>
+            <th>含义</th>
+            <th>动作</th>
+        </tr>
+        <tr>
+            <td>≥ 0</td>
+            <td>到达率稳定或上升</td>
+            <td>✅ 可升帧</td>
+        </tr>
+        <tr>
+            <td>-5% ~ 0</td>
+            <td>轻微下降</td>
+            <td>📊 观察</td>
+        </tr>
+        <tr style="background: #fff3e0;">
+            <td><strong>-10% ~ -5%</strong></td>
+            <td><strong>明显下降</strong></td>
+            <td><strong>⚠️ 预警降帧</strong></td>
+        </tr>
+        <tr style="background: #ffebee;">
+            <td>< -10%</td>
+            <td>急剧下降</td>
+            <td>🛑 立即降帧</td>
+        </tr>
+    </table>
+
+    <h3>3️⃣ 队列下降速度（Queue Drop Speed）⭐你们已有</h3>
+    <div class="info">
+        <strong>原理：</strong>队列快速下降意味着"入不敷出"，即将见底。
+    </div>
+    
+    <div class="formula">
+        <strong>队列下降速度 = 1秒前队列 - 当前队列</strong><br><br>
+        示例（60fps）：<br>
+        - 1秒前队列 = 9帧<br>
+        - 当前队列 = 5帧<br>
+        - 下降速度 = 9 - 5 = <strong>4帧/秒</strong> → 预计 1.25秒后见底！
+    </div>
+    
+    <table>
+        <tr>
+            <th>下降速度</th>
+            <th>预计见底时间</th>
+            <th>动作</th>
+        </tr>
+        <tr>
+            <td>≤ 0（队列在增加）</td>
+            <td>-</td>
+            <td>✅ 可升帧</td>
+        </tr>
+        <tr>
+            <td>1-2帧/秒</td>
+            <td>3-5秒</td>
+            <td>📊 观察</td>
+        </tr>
+        <tr style="background: #fff3e0;">
+            <td><strong>≥ 3帧/秒</strong></td>
+            <td><strong>1-2秒</strong></td>
+            <td><strong>⚠️ 预警降帧</strong></td>
+        </tr>
+        <tr style="background: #ffebee;">
+            <td>≥ 5帧/秒</td>
+            <td>< 1秒</td>
+            <td>🛑 立即降帧</td>
+        </tr>
+    </table>
+
+    <h3>4️⃣ RTT 趋势（RTT Trend）</h3>
+    <div class="info">
+        <strong>原理：</strong>RTT 持续上升表示网络拥塞正在加剧。
+    </div>
+    
+    <div class="formula">
+        <strong>RTT 变化率 = (当前RTT - 1秒前RTT) / 1秒</strong><br><br>
+        示例：<br>
+        - 1秒前 RTT = 50ms<br>
+        - 当前 RTT = 120ms<br>
+        - 变化率 = (120 - 50) / 1 = <strong>+70ms/秒</strong> → 拥塞加剧！
+    </div>
+    
+    <table>
+        <tr>
+            <th>RTT 变化率</th>
+            <th>含义</th>
+            <th>动作</th>
+        </tr>
+        <tr>
+            <td>≤ 0</td>
+            <td>RTT 稳定或下降</td>
+            <td>✅ 网络恢复</td>
+        </tr>
+        <tr>
+            <td>0 ~ 30ms/秒</td>
+            <td>轻微上升</td>
+            <td>📊 观察</td>
+        </tr>
+        <tr style="background: #fff3e0;">
+            <td><strong>> 50ms/秒</strong></td>
+            <td><strong>快速上升</strong></td>
+            <td><strong>⚠️ 预警降帧</strong></td>
+        </tr>
+        <tr style="background: #ffebee;">
+            <td>> 100ms/秒</td>
+            <td>急剧上升</td>
+            <td>🛑 立即降帧</td>
+        </tr>
+    </table>
+
+    <h3>5️⃣ 丢包突增检测（Loss Spike）</h3>
+    <div class="info">
+        <strong>原理：</strong>连续多个采样周期丢包率上升，说明网络正在恶化。
+    </div>
+    
+    <div class="formula">
+        <strong>丢包趋势 = 连续 N 次丢包率都在上升</strong><br><br>
+        示例：<br>
+        - T-2: 丢包率 1%<br>
+        - T-1: 丢包率 3%<br>
+        - T-0: 丢包率 5%<br>
+        - 连续 3 次上升 → <strong>网络恶化趋势确认！</strong>
+    </div>
+</div>
+
+<!-- ==================== 综合预测公式 ==================== -->
+<div class="section">
+    <h2>📐 综合预测公式</h2>
+    
+    <div class="formula">
+        <strong>网络恶化风险分 = W1×抖动变化率 + W2×到达率斜率 + W3×队列下降速度 + W4×RTT变化率</strong><br><br>
+        
+        建议权重：<br>
+        - W1 = 0.30（抖动变化率，最敏感）<br>
+        - W2 = 0.25（到达率斜率）<br>
+        - W3 = 0.25（队列下降速度）<br>
+        - W4 = 0.20（RTT变化率）<br><br>
+        
+        <strong>风险分阈值：</strong><br>
+        - < 0.3：正常<br>
+        - 0.3 ~ 0.5：预警，准备降帧<br>
+        - 0.5 ~ 0.7：降一档<br>
+        - > 0.7：紧急降到最低档
+    </div>
+
+    <div class="note">
+        <strong>简化版（推荐先用这个）：</strong><br>
+        满足以下<strong>任意两个</strong>即触发预警降帧：
+        <ul>
+            <li>抖动变化率 > 2ms/秒</li>
+            <li>到达率斜率 < -5%/秒</li>
+            <li>队列下降速度 ≥ 3帧/秒</li>
+            <li>RTT 变化率 > 50ms/秒</li>
+        </ul>
+    </div>
+</div>
+
+<!-- ==================== C++ 实现 ==================== -->
+<div class="section">
+    <h2>💻 C++ 实现：网络趋势预测器</h2>
+    
+    <div class="code">
+<pre>
+// network_trend_predictor.h
+#pragma once
+
+#include &lt;deque&gt;
+#include &lt;chrono&gt;
+
+namespace adaptive {
+
+struct TrendMetrics {
+    double jitterTrend;      // 抖动变化率 (ms/s)
+    double arrivalSlope;     // 到达率斜率 (%/s)
+    int    queueDropSpeed;   // 队列下降速度 (帧/s)
+    double rttTrend;         // RTT变化率 (ms/s)
+    double riskScore;        // 综合风险分 (0~1)
+    bool   isPredictDrop;    // 是否预测需要降帧
+};
+
+class NetworkTrendPredictor {
+public:
+    NetworkTrendPredictor();
+    
+    // 更新指标历史
+    void update(double jitterEma, double arrivalRate, int queueDepth, int rttMs);
+    
+    // 获取趋势预测结果
+    TrendMetrics getTrend() const;
+    
+    // 是否需要预警降帧
+    bool shouldPreemptiveDrop() const;
+
+private:
+    struct Sample {
+        int64_t timestamp;
+        double jitterEma;
+        double arrivalRate;
+        int queueDepth;
+        int rttMs;
+    };
+    
+    std::deque&lt;Sample&gt; m_history;
+    static constexpr size_t HISTORY_SIZE = 5;  // 保留5秒历史
+    
+    // 阈值
+    static constexpr double JITTER_TREND_THRESHOLD = 2.0;   // ms/s
+    static constexpr double ARRIVAL_SLOPE_THRESHOLD = -0.05; // -5%/s
+    static constexpr int    QUEUE_DROP_THRESHOLD = 3;        // 帧/s
+    static constexpr double RTT_TREND_THRESHOLD = 50.0;      // ms/s
+};
+
+} // namespace adaptive
+</pre>
+    </div>
+
+    <div class="code">
+<pre>
+// network_trend_predictor.cpp
+#include "network_trend_predictor.h"
+#include &lt;algorithm&gt;
+#include &lt;cmath&gt;
+
+namespace adaptive {
+
+NetworkTrendPredictor::NetworkTrendPredictor() {}
+
+void NetworkTrendPredictor::update(double jitterEma, double arrivalRate, int queueDepth, int rttMs) {
+    auto now = std::chrono::duration_cast&lt;std::chrono::milliseconds&gt;(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    
+    m_history.push_back({now, jitterEma, arrivalRate, queueDepth, rttMs});
+    
+    // 只保留最近 HISTORY_SIZE 秒
+    while (m_history.size() > HISTORY_SIZE) {
+        m_history.pop_front();
+    }
+}
+
+TrendMetrics NetworkTrendPredictor::getTrend() const {
+    TrendMetrics trend = {0, 0, 0, 0, 0, false};
+    
+    if (m_history.size() < 2) {
+        return trend;
+    }
+    
+    // 取最新和 1 秒前的样本比较
+    const auto& current = m_history.back();
+    const auto& previous = m_history.front();
+    
+    double timeDelta = (current.timestamp - previous.timestamp) / 1000.0;  // 秒
+    if (timeDelta <= 0) {
+        return trend;
+    }
+    
+    // ===== 计算各项趋势 =====
+    
+    // 1. 抖动趋势
+    trend.jitterTrend = (current.jitterEma - previous.jitterEma) / timeDelta;
+    
+    // 2. 到达率斜率
+    trend.arrivalSlope = (current.arrivalRate - previous.arrivalRate) / timeDelta;
+    
+    // 3. 队列下降速度
+    trend.queueDropSpeed = (int)((previous.queueDepth - current.queueDepth) / timeDelta);
+    
+    // 4. RTT 趋势
+    trend.rttTrend = (current.rttMs - previous.rttMs) / timeDelta;
+    
+    // ===== 计算风险分 =====
+    double jitterScore = std::max(0.0, trend.jitterTrend / 10.0);           // 10ms/s → 1.0
+    double arrivalScore = std::max(0.0, -trend.arrivalSlope / 0.2);         // -20%/s → 1.0
+    double queueScore = std::max(0.0, trend.queueDropSpeed / 6.0);          // 6帧/s → 1.0
+    double rttScore = std::max(0.0, trend.rttTrend / 200.0);                // 200ms/s → 1.0
+    
+    trend.riskScore = 0.30 * jitterScore + 0.25 * arrivalScore + 
+                      0.25 * queueScore + 0.20 * rttScore;
+    trend.riskScore = std::min(1.0, trend.riskScore);
+    
+    // ===== 判断是否预警 =====
+    int warningCount = 0;
+    if (trend.jitterTrend > JITTER_TREND_THRESHOLD) warningCount++;
+    if (trend.arrivalSlope < ARRIVAL_SLOPE_THRESHOLD) warningCount++;
+    if (trend.queueDropSpeed >= QUEUE_DROP_THRESHOLD) warningCount++;
+    if (trend.rttTrend > RTT_TREND_THRESHOLD) warningCount++;
+    
+    // 满足 2 个或以上条件，或风险分 > 0.5
+    trend.isPredictDrop = (warningCount >= 2) || (trend.riskScore > 0.5);
+    
+    return trend;
+}
+
+bool NetworkTrendPredictor::shouldPreemptiveDrop() const {
+    return getTrend().isPredictDrop;
+}
+
+} // namespace adaptive
+</pre>
+    </div>
+</div>
+
+<!-- ==================== 集成到决策器 ==================== -->
+<div class="section">
+    <h2>🔧 集成到决策器</h2>
+    
+    <div class="code">
+<pre>
+// 修改 AdaptiveFpsDecider::decideDropFps，加入预测式降帧
+
+std::optional&lt;FpsControlCommand&gt; AdaptiveFpsDecider::decideDropFps(
+    const NetworkMetrics& metrics, 
+    const TrendMetrics& trend,    // ⭐ 新增趋势参数
+    int currentFps)
+{
+    int targetFps = currentFps;
+    TriggerReason reason = TriggerReason::ArrivalLow;
+    bool shouldDrop = false;
+    
+    // ===== ⭐ 新增：预测式降帧（最先检查）=====
+    if (trend.isPredictDrop) {
+        // 根据风险分决定降帧力度
+        if (trend.riskScore > 0.7) {
+            targetFps = 15;  // 紧急
+            reason = TriggerReason::PredictCritical;
+        } else if (trend.riskScore > 0.5) {
+            targetFps = getLowerFpsLevel(currentFps);  // 降一档
+            reason = TriggerReason::PredictWarning;
+        } else {
+            targetFps = getLowerFpsLevel(currentFps);  // 降一档
+            reason = TriggerReason::PredictWarning;
+        }
+        shouldDrop = true;
+    }
+    
+    // ===== 原有的被动式条件 =====
+    // 条件1：到达率不足 ...
+    // 条件2：抖动过高 ...
+    // 条件3：丢包过高 ...
+    // 条件4：RTT过高 ...
+    // 条件5：队列不足 ...
+    
+    // ...
+}
+</pre>
+    </div>
+</div>
+
+<!-- ==================== WebSocket 信令适配 ==================== -->
+<div class="section">
+    <h2>📡 WebSocket 信令适配（SRS 服务器）</h2>
+    
+    <div class="info">
+        <strong>你们用 SRS + WebSocket</strong>，信令协议不变，只是传输通道改成 WebSocket。
+    </div>
+    
+    <table>
+        <tr>
+            <th>对比项</th>
+            <th>DataChannel</th>
+            <th>WebSocket</th>
+        </tr>
+        <tr>
+            <td>延迟</td>
+            <td>10-50ms</td>
+            <td>50-150ms</td>
+        </tr>
+        <tr>
+            <td>可靠性</td>
+            <td>可配置</td>
+            <td>可靠（TCP）</td>
+        </tr>
+        <tr>
+            <td>SRS 支持</td>
+            <td>需要额外配置</td>
+            <td><strong>原生支持</strong></td>
+        </tr>
+        <tr>
+            <td>适合场景</td>
+            <td>P2P / WHIP</td>
+            <td><strong>SRS / 信令服务器</strong></td>
+        </tr>
+    </table>
+
+    <h3>WebSocket 信令路径</h3>
+    <div class="code">
+<pre>
+PC 端                          SRS 服务器                      iOS 端
+  │                               │                              │
+  │── adaptive_fps_control ──────>│                              │
+  │   (WebSocket)                 │── 转发 ─────────────────────>│
+  │                               │                              │
+  │                               │<── adaptive_fps_ack ─────────│
+  │<────── 转发 ──────────────────│                              │
+  │                               │                              │
+</pre>
+    </div>
+
+    <h3>C++ WebSocket 发送示例</h3>
+    <div class="code">
+<pre>
+// 使用你们现有的 WebSocket 客户端
+class FpsSignalSenderWs {
+public:
+    FpsSignalSenderWs(WebSocketClient* wsClient) : m_ws(wsClient) {}
+    
+    bool sendCommand(const FpsControlCommand& cmd) {
+        std::string json = toJson(cmd);
+        
+        // 通过 WebSocket 发送
+        return m_ws->send(json);
+    }
+    
+    void onMessage(const std::string& msg) {
+        if (msg.find("adaptive_fps_ack") != std::string::npos) {
+            // 处理 iOS 确认
+            FpsAckResponse ack = parseAck(msg);
+            handleAck(ack);
+        }
+    }
+
+private:
+    WebSocketClient* m_ws;
+};
+</pre>
+    </div>
+
+    <div class="note">
+        <strong>注意事项：</strong>
+        <ul>
+            <li>WebSocket 延迟比 DataChannel 稍高，但对于帧率控制信令（每秒 1 次）完全够用</li>
+            <li>SRS 的 WebSocket 通道可以复用你们现有的信令连接</li>
+            <li>信令格式（JSON）和 iOS 对接协议保持不变</li>
+        </ul>
+    </div>
+</div>
+
+<!-- ==================== 完整时序 ==================== -->
+<div class="section">
+    <h2>⏱️ 完整预测降帧时序</h2>
+    
+    <table>
+        <tr>
+            <th>时间</th>
+            <th>网络状态</th>
+            <th>预测指标</th>
+            <th>PC 端动作</th>
+        </tr>
+        <tr>
+            <td>T+0s</td>
+            <td>正常</td>
+            <td>风险分 0.1</td>
+            <td>-</td>
+        </tr>
+        <tr style="background: #fff3e0;">
+            <td><strong>T+1s</strong></td>
+            <td>开始恶化</td>
+            <td><strong>风险分 0.4</strong><br>抖动趋势 +3ms/s<br>到达率斜率 -8%/s</td>
+            <td><strong>⚡ 预警！发送降帧指令（60→45）</strong></td>
+        </tr>
+        <tr>
+            <td>T+1.1s</td>
+            <td>继续恶化</td>
+            <td>-</td>
+            <td>iOS 执行 45fps</td>
+        </tr>
+        <tr>
+            <td>T+2s</td>
+            <td>恶化加剧</td>
+            <td>风险分 0.6</td>
+            <td>发送降帧指令（45→30）</td>
+        </tr>
+        <tr style="background: #ffebee;">
+            <td>T+3s</td>
+            <td><strong>被动式才在这里触发</strong></td>
+            <td>队列 < 3帧</td>
+            <td>（预测式已提前处理完成）</td>
+        </tr>
+    </table>
+
+    <div class="success">
+        <strong>效果：</strong>预测式比被动式<strong>提前 2 秒</strong>响应，用户几乎无感知！
+    </div>
+</div>
+
+<!-- ==================== 总结 ==================== -->
+<div class="section">
+    <h2>✅ 总结</h2>
+    
+    <div class="critical">
+        <strong>核心答案：能否提前知道网络波动？</strong><br><br>
+        <strong>能！</strong>通过监测以下<strong>趋势指标</strong>，可以提前 500ms ~ 2s 预测：
+        <ol>
+            <li><strong>抖动趋势</strong>：抖动上升 > 2ms/秒 → 网络正在恶化</li>
+            <li><strong>到达率斜率</strong>：到达率下降 > 5%/秒 → 网络即将恶化</li>
+            <li><strong>队列下降速度</strong>：≥ 3帧/秒 → 1-2秒后见底</li>
+            <li><strong>RTT趋势</strong>：RTT 上升 > 50ms/秒 → 拥塞加剧</li>
+        </ol>
+    </div>
+
+    <div class="info">
+        <strong>WebSocket 适配：</strong>
+        <ul>
+            <li>信令协议不变，传输通道从 DataChannel 改为 WebSocket</li>
+            <li>复用 SRS 现有的 WebSocket 连接</li>
+            <li>延迟略高（50-150ms），但对帧率控制完全够用</li>
+        </ul>
+    </div>
+</div>
+
+</body>
+</html>

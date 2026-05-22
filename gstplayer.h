@@ -1,0 +1,544 @@
+#ifndef GSTPLAYER_H
+#define GSTPLAYER_H
+
+#include <QObject>
+#include <QVideoSink>
+#include <QVideoFrame>
+#include <QMutex>
+#include <QThread>
+#include <QMap>
+#include <QPair>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
+#include <QProcess>
+#include <QTimer>
+#include <atomic>
+#include <gst/gst.h>
+#include <gst/app/gstappsrc.h>
+#include <gst/app/gstappsink.h>
+// WebRTC 头文件使用 #warning 指令，MSVC 不支持
+// 移到 .cpp 文件中包含，这里使用前向声明
+// #include <gst/sdp/sdp.h>
+// #include <gst/webrtc/webrtc.h>
+typedef struct _GstWebRTCSessionDescription GstWebRTCSessionDescription;
+
+/**
+ * GStreamer 实时流播放器（WebRTCBin 版本）
+ * 
+ * Pipeline: webrtcbin → rtph264depay → h264parse → d3d11h264dec → d3d11download → videoconvert → appsink
+ * 
+ * 特点：
+ * 1. 使用 GStreamer 内置 WebRTCBin，无需 libdatachannel
+ * 2. 与 Java 版本使用相同的 WebRTC 实现
+ * 3. d3d11h264dec: Windows 通用硬解
+ * 4. 输出 BGRA 格式到 Qt QVideoSink
+ */
+class GstPlayer : public QObject
+{
+    Q_OBJECT
+    Q_PROPERTY(QVideoSink* videoSink READ videoSink WRITE setVideoSink NOTIFY videoSinkChanged)
+    Q_PROPERTY(bool playing READ isPlaying NOTIFY playingChanged)
+    Q_PROPERTY(int videoWidth READ videoWidth NOTIFY videoSizeChanged)
+    Q_PROPERTY(int videoHeight READ videoHeight NOTIFY videoSizeChanged)
+    Q_PROPERTY(QString decoderName READ decoderName NOTIFY decoderChanged)
+    Q_PROPERTY(bool jpegEnabled READ isJpegEnabled WRITE setJpegEnabled NOTIFY jpegEnabledChanged)
+    Q_PROPERTY(QString jpegDirectory READ jpegDirectory WRITE setJpegDirectory NOTIFY jpegDirectoryChanged)
+    Q_PROPERTY(qint64 jpegFrameIndex READ jpegFrameIndex NOTIFY jpegFrameIndexChanged)
+    Q_PROPERTY(int receiveFps READ receiveFps NOTIFY receiveFpsChanged)
+    Q_PROPERTY(int bufferSize READ bufferSize NOTIFY bufferSizeChanged)
+    Q_PROPERTY(int bufferTarget READ bufferTarget NOTIFY bufferTargetChanged)
+    
+public:
+    explicit GstPlayer(QObject *parent = nullptr);
+    ~GstPlayer();
+    
+    // QML 属性
+    QVideoSink* videoSink() const { return m_videoSink; }
+    void setVideoSink(QVideoSink *sink);
+    
+    bool isPlaying() const { return m_playing; }
+    int videoWidth() const { return m_videoWidth; }
+    int videoHeight() const { return m_videoHeight; }
+    QString decoderName() const { return m_decoderName; }
+    
+    // JPEG 属性
+    bool isJpegEnabled() const { return m_jpegEnabled; }
+    void setJpegEnabled(bool enabled);
+    QString jpegDirectory() const { return m_jpegDirectory; }
+    void setJpegDirectory(const QString &dir);
+    qint64 jpegFrameIndex() const { return m_jpegFrameIndex; }
+    
+    // FPS 统计（EMA 平滑后的帧率，已 x4）
+    int receiveFps() const { return m_receiveFps; }
+    
+    // ⭐ 缓冲队列信息（供 QML 显示）
+    int bufferSize() const { return m_bufferSize; }
+    int bufferTarget() const { return m_bufferTarget; }
+    
+    // 推送 H.264 NALU 数据（保留用于兼容，WebRTCBin 模式下不使用）
+    Q_INVOKABLE void pushNalu(const QByteArray &nalu);
+    
+    // 控制
+    Q_INVOKABLE void start();
+    Q_INVOKABLE void stop();
+    Q_INVOKABLE void reset();
+    
+    // ⭐ WebRTC 连接（使用 GStreamer WebRTCBin）
+    Q_INVOKABLE void connectWebRTC(const QString &host, const QString &app, const QString &stream);
+    Q_INVOKABLE void disconnectWebRTC();
+    Q_INVOKABLE bool isWebRTCConnected() const { return m_webrtcConnected; }
+    Q_INVOKABLE QString webrtcStatus() const { return m_webrtcStatus; }
+    Q_INVOKABLE void requestKeyFrame();  // 请求关键帧（发送 PLI）
+    Q_INVOKABLE void startAutoKeyFrameRequest(int intervalMs = 1000);  // 周期性请求关键帧
+    Q_INVOKABLE void stopAutoKeyFrameRequest();  // 停止周期性请求
+    Q_INVOKABLE bool isAutoKeyFrameEnabled() const { return m_autoKeyFrameEnabled; }
+    Q_INVOKABLE void flushDecoder();  // 清空解码器缓冲（档位切换防绿幕）
+    
+    // P2P 直连模式（不经过 SRS）
+    Q_INVOKABLE void connectP2P(const QString &pairedIosDeviceId, const QJsonArray &iceServers);
+    Q_INVOKABLE void disconnectP2P();
+    Q_INVOKABLE void handleWebRTCSignaling(const QJsonObject &message);
+    Q_INVOKABLE bool isP2PMode() const { return m_useP2P; }
+    
+    // JPEG 控制
+    Q_INVOKABLE void startJpegCapture();
+    Q_INVOKABLE void stopJpegCapture();
+    Q_INVOKABLE void clearJpegFiles();
+    
+    // 有效范围保护（防止抓拍帧被清理）
+    Q_INVOKABLE int registerValidRange(qint64 startIndex, qint64 endIndex);
+    Q_INVOKABLE void unregisterValidRange(int rangeId);
+    Q_INVOKABLE void clearAllValidRanges();
+    
+    // JPEG 读取（给 CaptureManager/SlowMotionPlayer 用）
+    Q_INVOKABLE QByteArray getJpeg(qint64 frameIndex) const;
+    Q_INVOKABLE QByteArray getJpegWithPrefix(qint64 frameIndex, const QString &sessionPrefix) const;  // ⭐ 使用指定前缀
+    Q_INVOKABLE bool hasJpeg(qint64 frameIndex) const;
+    Q_INVOKABLE qint64 newestFrame() const;
+    Q_INVOKABLE qint64 oldestFrame() const;
+    Q_INVOKABLE QString framesDir() const { return m_jpegDirectory; }
+    Q_INVOKABLE QString sessionPrefix() const { return m_sessionPrefix; }  // ⭐ 获取当前会话前缀
+    QString frameFilePath(qint64 frameIndex) const;
+    QString frameFilePathWithPrefix(qint64 frameIndex, const QString &sessionPrefix) const;  // ⭐ 使用指定前缀
+    
+    // 图像调节方法（使用 GStreamer videobalance 和 gamma）
+    Q_INVOKABLE void setBrightness(double value);   // -1.0 ~ 1.0
+    Q_INVOKABLE void setContrast(double value);     // 0.0 ~ 2.0
+    Q_INVOKABLE void setSaturation(double value);   // 0.0 ~ 2.0
+    Q_INVOKABLE void setHue(double value);          // -1.0 ~ 1.0
+    Q_INVOKABLE void setGamma(double value);        // 0.01 ~ 10.0
+    Q_INVOKABLE void setAllImageParams(double brightness, double contrast, double saturation, double hue, double gamma);
+    
+    // JPEG 质量动态调节（不影响拉流）
+    Q_INVOKABLE void setJpegQuality(int quality);  // 1-100
+    
+    // ⭐ 配置fps（PC手动设置时调用，用于延迟计算）
+    Q_INVOKABLE void setConfigFps(double fps);
+    Q_INVOKABLE double configFps() const { return m_configFps; }
+
+    // ⭐ P2: 240fps 高速模式切换
+    Q_INVOKABLE void setHighSpeedMode(bool enabled);
+    Q_INVOKABLE bool isHighSpeedMode() const { return m_highSpeedMode; }
+    
+signals:
+    void videoSinkChanged();
+    void playingChanged();
+    void videoSizeChanged();
+    void decoderChanged();
+    void error(const QString &message);
+    void firstFrameReceived();
+    
+    // JPEG 信号
+    void jpegEnabledChanged();
+    void jpegDirectoryChanged();
+    void jpegFrameIndexChanged();
+    void frameEncoded(qint64 frameIndex);  // 每帧保存后发出
+    
+    // FPS 统计信号
+    void receiveFpsChanged();
+    
+    // 缓冲队列信号
+    void bufferSizeChanged();
+    void bufferTargetChanged();
+    
+    // ⭐⭐⭐ 第二道防线：请求前端调整推流帧率
+    // targetFps: 建议的目标帧率（0表示恢复原始帧率）
+    // urgency: 紧急度 "critical"/"high"/"normal"/"low"
+    // reason: 触发原因（调试用）
+    void requestFpsChange(int targetFps, const QString &urgency, const QString &reason);
+    
+    // 帧回调（用于 JPEG 编码）
+    void frameReady(const QByteArray &bgraData, int width, int height, qint64 pts);
+    
+    // ⭐ WebRTC 信号
+    void webrtcConnected();
+    void webrtcDisconnected();
+    void webrtcStatusChanged(const QString &status);
+    void naluReady(const QByteArray &nalu, bool isKeyFrame);  // 兼容旧接口
+    
+    // P2P 信令信号（发给 WebSocket 中转）
+    void sendSdpAnswer(const QString &sdp, const QString &toDevice);
+    void sendIceCandidate(const QString &candidate, const QString &sdpMid, int sdpMLineIndex, const QString &toDevice);
+    void sendHangup(const QString &reason, const QString &toDevice);
+    void sendViewRequest(const QString &toDevice);
+
+public slots:
+    void createWebRTCOffer();  // ⭐ 需要作为 slot 以便跨线程调用
+    
+private:
+    bool createPipeline();
+    void destroyPipeline();
+    QString detectGpuType();  // ⭐ GPU 类型检测（与 Java 一致）
+    
+    // ⭐ WebRTC 相关方法
+    void setupWebRTCSignals();
+    void onOfferCreated(GstWebRTCSessionDescription *offer);
+    void sendOfferToSRS(const QString &sdp);
+    void onAnswerReceived(const QString &sdp);
+    void sendPLIRequest();
+    
+    // P2P 相关方法
+    void handleP2POffer(const QString &sdp);
+    void handleP2PIce(const QString &candidate, const QString &sdpMid, int sdpMLineIndex);
+    void handleP2PHangup();
+    void onP2PAnswerCreated(GstWebRTCSessionDescription *answer);
+    void addP2PIceServers(const QJsonArray &iceServers);
+    void scheduleP2PViewRequestRetry();
+    void stopP2PViewRequestRetry(const QString &reason = QString());
+    
+    // GStreamer 回调
+    static GstFlowReturn onNewSample(GstAppSink *sink, gpointer userData);
+    static void onPadAdded(GstElement *element, GstPad *pad, gpointer userData);
+    static GstBusSyncReply onBusSyncMessage(GstBus *bus, GstMessage *message, gpointer userData);
+    
+    // ⭐ WebRTCBin 回调（静态）
+    static void onNegotiationNeeded(GstElement *webrtcbin, gpointer userData);
+    static void onIceCandidate(GstElement *webrtcbin, guint mlineindex, gchar *candidate, gpointer userData);
+    static void onWebRTCPadAdded(GstElement *webrtcbin, GstPad *pad, gpointer userData);
+    static void onConnectionStateChanged(GstElement *webrtcbin, GParamSpec *pspec, gpointer userData);
+    static void onIceGatheringStateChanged(GstElement *webrtcbin, GParamSpec *pspec, gpointer userData);
+    static void onIceConnectionStateChanged(GstElement *webrtcbin, GParamSpec *pspec, gpointer userData);
+    
+    // Pipeline 元素
+    GstElement *m_pipeline = nullptr;
+    GstElement *m_appsrc = nullptr;       // 保留用于兼容模式
+    GstElement *m_webrtcbin = nullptr;    // ⭐ WebRTCBin 元素
+    GstElement *m_rtph264depay = nullptr; // ⭐ RTP H264 解包
+    GstElement *m_h264parse = nullptr;
+    GstElement *m_queueDepay = nullptr;   // ⭐ 解码前缓冲队列（防马赛克关键）
+    GstElement *m_decoder = nullptr;
+    GstElement *m_queueDecode = nullptr;  // ⭐ 解码后缓冲队列（防马赛克关键）
+    GstElement *m_download = nullptr;    // d3d11download（硬解时使用）
+    bool m_useHardwareDecoder = false;    // 是否使用硬件解码
+    GstElement *m_videoScale = nullptr;   // ⭐ videoscale（处理动态分辨率变化，防绿幕）
+    GstElement *m_videoBalance = nullptr;  // videobalance（亮度、对比度、饱和度、色调）
+    GstElement *m_gamma = nullptr;         // gamma（伽马值）
+    GstElement *m_convert = nullptr;     // videoconvert
+    GstElement *m_appsink = nullptr;
+    
+    // JPEG 分支元素 (tee → queue → valve → convert1 → capsfilter → convert2 → jpegenc → multifilesink)
+    // ⭐ 双重 videoconvert 方案：确保 JPEG 色彩与显示一致
+    GstElement *m_tee = nullptr;           // 分流器
+    GstElement *m_displayQueue = nullptr;  // 显示队列
+    GstElement *m_clockSync = nullptr;     // ⭐ clocksync（修正时间戳为系统时钟，让 appsink sync=TRUE 正确工作）
+    GstElement *m_jpegQueue = nullptr;     // JPEG 队列
+    GstElement *m_jpegValve = nullptr;     // 阀门控制开关
+    GstElement *m_jpegRate = nullptr;      // 已废弃（WebRTC 流无有效时长）
+    GstElement *m_jpegConvert = nullptr;   // 格式转换：→ I420
+    GstElement *m_jpegCapsFilter = nullptr; // 强制 I420 格式
+    GstElement *m_jpegEnc = nullptr;       // JPEG 编码器
+    GstElement *m_jpegSink = nullptr;      // multifilesink
+    
+    // Qt 显示
+    QVideoSink *m_videoSink = nullptr;
+    
+    // 状态
+    std::atomic<bool> m_playing{false};
+    std::atomic<bool> m_firstFrame{false};
+    int m_videoWidth = 0;
+    int m_videoHeight = 0;
+    QString m_decoderName;
+    qint64 m_frameIndex = 0;
+    
+    // 🔥 v10超低延迟：PTS 时间戳控帧
+    qint64 m_startPts = -1;              // 首帧 PTS（用于时序基准）
+    qint64 m_startSystemTime = 0;        // 首帧系统时间（毫秒）
+    static constexpr int PTS_OFFSET_MS = 80; // 🔥 固定偏移量（80ms目标延迟）
+    
+    // ⭐ WebRTC 状态
+    QNetworkAccessManager *m_networkManager = nullptr;
+    QString m_webrtcHost;
+    QString m_webrtcApp;
+    QString m_webrtcStream;
+    std::atomic<bool> m_webrtcConnected{false};
+    QString m_webrtcStatus = "Ready";
+    bool m_transceiverAdded = false;  // 防止重复添加 transceiver
+    bool m_useWebRTC = false;  // 是否使用 WebRTC 模式
+    bool m_useP2P = false;     // P2P 直连模式
+    QString m_pairedIosDeviceId;  // 配对的 iOS 设备 ID
+    bool m_p2pConnected = false;  // P2P ICE 连接是否已建立
+    int m_iceRetryCount = 0;      // ICE 失败重试计数
+    std::atomic<bool> m_waitingForP2POffer{false};  // 等待 iOS Offer
+    std::atomic<int> m_p2pViewRequestRetryCount{0}; // WEBRTC_REQUEST 重发次数
+    static constexpr int P2P_VIEW_REQUEST_RETRY_MAX = 5;
+    static constexpr int P2P_VIEW_REQUEST_RETRY_INTERVAL_MS = 1500;
+    std::atomic<bool> m_offerInProgress{false};  // 防止重复创建 Offer
+    std::atomic<bool> m_offerSentForSession{false};  // 🔥 本次连接已发送过 Offer（防止 timer 和 on-negotiation-needed 双重触发）
+    std::atomic<bool> m_reconnectScheduled{false}; // 防止重复重连
+    std::atomic<bool> m_srsError{false};  // 🔥 SRS错误标志（防止无效重连）
+    std::atomic<int> m_srsRetryCount{0};  // 🔥 SRS 400错误重试计数
+    QString m_pendingOfferSdp;  // 🔥 待重试的 Offer SDP
+    std::atomic<int> m_noFpsSeconds{0};   // 🔥 连续0fps秒数（5秒自动断开）
+    qint64 m_fpsAdjustCooldownMs{0};      // 🔥 手动调帧冷却期结束时间（防止误触发降帧）
+    static constexpr int FPS_ADJUST_COOLDOWN_SEC = 5;   // 冷却5秒（配合送达率判断，不需要太长）
+    
+    // ⭐ 周期性关键帧请求
+    QTimer *m_keyFrameTimer = nullptr;
+    bool m_autoKeyFrameEnabled = false;
+    
+    // JPEG 状态
+    std::atomic<bool> m_jpegEnabled{false};
+    QString m_jpegDirectory;
+    QString m_sessionPrefix;  // ⭐ 会话前缀（连接时间戳），如 "s_1737012345"
+    std::atomic<qint64> m_jpegFrameIndex{0};
+    std::atomic<qint64> m_oldestFrame{0};
+    int m_maxJpegFiles = 5000;  // 最大保留帧数
+    
+    // ⭐ 生成新的会话前缀（连接成功时调用）
+    void generateSessionPrefix();
+    
+    // FPS 统计（EMA 指数移动平均，极度平滑）
+    std::atomic<int> m_fpsFrameCounter{0};       // 当前秒帧计数
+    qint64 m_fpsLastSecondMs = 0;                // 上次统计时间
+    double m_fpsEma = 0.0;                       // EMA 值
+    bool m_fpsEmaInitialized = false;            // EMA 是否已初始化
+    std::atomic<int> m_receiveFps{0};            // 最终帧率值（已 x4）
+    static constexpr double FPS_EMA_ALPHA = 0.2; // 平滑系数（越小越平滑）
+    
+    // ⭐ 缓冲队列状态（供 QML 显示）
+    std::atomic<int> m_bufferSize{0};            // 当前队列大小
+    std::atomic<int> m_bufferTarget{0};          // 目标队列大小
+    
+    // ⭐⭐⭐ 应用层 Jitter Buffer + 极致平滑方案
+    // 核心：速率匹配 + EMA多重平滑 + 微调补偿 + 渐进式延迟调整
+    QList<GstSample*> m_frameQueue;              // 帧队列（FIFO）
+    QMutex m_queueMutex;                         // 保护队列
+    QTimer *m_renderTimer = nullptr;             // 自适应渲染定时器
+    std::atomic<int> m_renderFrameCounter{0};    // 渲染帧计数（用于日志）
+    std::atomic<bool> m_bufferingStarted{false}; // 是否已开始缓冲
+    
+    // ========== 常量参数 ==========
+    static constexpr double ALPHA_RATE = 0.3;    // 到达速率EMA系数（α）
+    static constexpr double BETA_DEPTH = 0.2;    // 深度EMA系数（β）
+    static constexpr double GAMMA_INTERVAL = 0.3;// 间隔EMA系数（γ）
+    static constexpr double MAX_SPEEDUP = 1.3;   // 最大加速倍率（温和追赶）
+    
+    // 🔥🔥🔥 v11.3 动态队列配置
+    // QUEUE_ABSOLUTE_MAX: 队列硬限制（仅用于异常保护，正常靠追帧消耗）
+    // 公式：500ms最大延迟 × 60fps = 30帧
+    // 正常情况下由 getQueueSizeByFps() 动态控制，不会触发硬限制
+    static constexpr int QUEUE_ABSOLUTE_MAX = 30; // 🔥 v11.3: 提高到30帧（500ms@60fps）
+    
+    // ⭐⭐⭐ 双缓冲策略配置 ⭐⭐⭐
+    // 核心原则：延迟按时间（ms）恒定，队列帧数根据 FPS 自动调整
+    // ⭐⭐⭐ 动态延迟公式（FPS越低延迟越低）：
+    // ⭐⭐⭐ 2025-01-26 优化：增加缓冲深度，减少极端网络卡顿
+    // 应用层延迟(ms) = FPS × 10（范围100~600ms）
+    // 队列帧数 = FPS × 应用层延迟 / 1000
+    // 总延迟 = GStreamer(100ms) + 应用层延迟
+    //
+    // ⭐⭐⭐ v8客户方案：以当前帧率为中心计算所有参数
+    // 🔥🔥🔥 v10超低延迟：80-400ms延迟，微队列控帧
+    // 🔥🔥🔥 v11 动态队列策略：根据帧率分段设置队列大小
+    // | 帧率        | 最小 | 最佳 | 最大 | 说明           |
+    // |-------------|------|------|------|----------------|
+    // ⭐⭐⭐ 延迟阈值（用于第二道保险：控制推流帧率）
+    // v9.2调整：基于新缓冲策略（最佳220ms，最大470ms），延迟阈值需要相应调高
+    // 降帧触发：延迟>500ms（超过最大缓冲）说明网络持续恶化
+    // 升帧恢复：延迟在200-500ms之间说明网络恢复正常
+    static constexpr int APP_DELAY_LOWER_START = 500;  // 应用层延迟>500ms开始降帧⭐v9.2调整
+    static constexpr int APP_DELAY_LOWER_MAX = 800;    // 应用层延迟达到800ms时降到最低帧率⭐v9.2调整
+    static constexpr int APP_DELAY_RESTORE = 200;      // 应用层延迟≥200ms可以考虑升帧⭐v9.2调整
+    static constexpr int DELAY_MIN = 150;              // 最小延迟150ms⭐v9.2调整
+    
+    // 队列绝对下限（防止帧率极低时队列为0）
+    // 🔥🔥🔥 v9.3双缓冲：恢复基于fps比例的队列计算（不依赖损坏率）
+    // 核心公式：optimal = fps × 22%（约220ms延迟）
+    static constexpr double BUFFER_RATIO_MIN = 0.15;     // 最低缓冲比例（150ms延迟）
+    static constexpr double BUFFER_RATIO_OPTIMAL = 0.22; // 最佳缓冲比例（220ms延迟）
+    static constexpr double BUFFER_RATIO_MAX = 0.47;     // 最大缓冲比例（470ms延迟）
+    static constexpr int QUEUE_ABS_MIN = 1;              // 绝对最小1帧
+    
+    // (旧常量已移至分段函数阈值 W_EXPAND=0.35, W_NORMAL_HIGH=0.8)
+    static constexpr int QUEUE_EXPAND_STEP = 3;        // 每次扩容3帧（快速响应）
+    static constexpr int QUEUE_SHRINK_STEP = 1;        // 每次收缩1帧（平滑）
+    static constexpr int SHRINK_STABLE_FRAMES = 90;    // ⭐ 60→90：稳定3秒才收缩（更保守）
+    static constexpr int FAST_ADJUST_THRESHOLD = 6;    // ⭐ 新增：快速调整阈值（差距>6帧才触发）
+    static constexpr int EXPAND_COOLDOWN_SEC = 3;      // ⭐ 新增：扩容后冷却3秒内禁止快速收缩
+    
+    // 🔥🔥🔥 v9.3双缓冲：基于fps比例计算队列参数（copygstream版本）
+    // SRS模式：30fps → optimal=7帧(220ms), min=5帧(150ms), max=14帧(470ms)
+    // P2P模式：30fps → optimal=3帧(100ms), min=2帧(67ms), max=6帧(200ms)
+    static inline void getQueueSizeByFps(double fps, int &outMin, int &outOptimal, int &outMax, double /*corruptRatio*/ = 0.0, bool isP2P = false) {
+        if (isP2P) {
+            // P2P 直连：抖动小，用更浅的缓冲，延迟更低
+            outOptimal = qMax(2, static_cast<int>(fps * 0.10 + 0.5));  // 10%，约100ms
+            outMin = qMax(2, static_cast<int>(fps * 0.07 + 0.5));      // 7%，约70ms
+            outMax = qMax(3, static_cast<int>(fps * 0.20 + 0.5));      // 20%，约200ms
+        } else {
+            // SRS 中转：网络路径长，需要更深缓冲
+            outOptimal = qMax(QUEUE_ABS_MIN, static_cast<int>(fps * BUFFER_RATIO_OPTIMAL + 0.5));
+            outMin = qMax(QUEUE_ABS_MIN, static_cast<int>(fps * BUFFER_RATIO_MIN + 0.5));
+            outMax = qMax(QUEUE_ABS_MIN, static_cast<int>(fps * BUFFER_RATIO_MAX + 0.5));
+        }
+    }
+    
+    // (旧常量已移至速率范围 R_MIN=0.7, R_MAX=1.2)
+    
+    // ⭐ 分段函数阈值（数学模型关键参数）
+    static constexpr double W_EMERGENCY = 0.15;       // 紧急水位（停止消耗）
+    static constexpr double W_EXPAND = 0.35;          // 扩容水位
+    static constexpr double W_NORMAL_LOW = 0.5;       // 正常低水位（恢复消耗）
+    static constexpr double W_NORMAL_HIGH = 0.8;      // 正常高水位（触发收缩）
+    static constexpr double W_CATCHUP = 1.05;         // 追帧水位
+    static constexpr double W_CATCHUP_MAX = 1.5;      // 最大追帧水位
+    static constexpr double W_DROP_THRESHOLD = 1.5;   // ⭐ 队列>150%时丢帧
+    static constexpr double W_DROP_TARGET = 1.2;      // ⭐ 丢帧后目标120%
+    
+    // ⭐ 速率范围（🔥 v11.3 调整：追帧更快，避免跳帧）
+    static constexpr double R_MIN = 0.85;             // 🔥 v11: 最低85%（之前70%跳动太大）
+    static constexpr double R_MAX = 1.15;             // 🔥 v11.3: 最高115%（追帧更快，避免丢帧）
+    static constexpr double R_CHANGE_LIMIT = 0.05;    // 🔥 v11.3: 每帧最大变化±5%（更快响应）
+    
+    // ⭐⭐⭐ 第二道防线：推流帧率控制（边缘化触发）
+    // 2025-01-27 优化：更早触发（30%+1秒），快速响应网络恶化
+    // 2025-01-27 优化：恢复阈值降低（50%+5秒），解决降帧后无法恢复问题
+    // ⭐⭐⭐ 客户优化：动态阈值 + 预测式降帧
+    static constexpr int FPS_PUSH_MAX = 60;               // 推流帧率上限60fps（实际）
+    static constexpr int FPS_DELAY_MIN = 15;              // 延迟触发降帧的最低帧率15fps
+    static constexpr int FPS_QUEUE_MIN = 20;              // 队列触发降帧的最低帧率20fps
+    
+    // 动态阈值比例（基于最佳缓冲）
+    static constexpr double QUEUE_LOWER_RATIO = 0.35;     // 降帧阈值 = 最佳缓冲 × 35%
+    static constexpr double QUEUE_UPPER_RATIO = 0.70;     // 升帧阈值 = 最佳缓冲 × 70%
+    
+    // 预测式降帧：队列下降速度阈值
+    static constexpr int DROP_SPEED_WARNING = 3;          // 下降≥3帧/秒：预警
+    static constexpr int DROP_SPEED_CRITICAL = 5;         // 下降≥5帧/秒：立即降帧
+    static constexpr int FPS_LOWER_HOLD_SEC = 1;          // 持续1秒触发降帧
+    static constexpr int FPS_RESTORE_HOLD_SEC = 1;        // ⭐ 3→1秒：升帧等待时间
+    
+    // ⭐ FPS变化检测配置
+    static constexpr double FPS_CHANGE_THRESHOLD = 0.3;  // FPS变化阈值30%
+    static constexpr int FPS_CHANGE_STABLE_SEC = 3;      // FPS变化持续3秒才触发
+    
+    // GStreamer 固定配置
+    // P2P 直连：150ms（RTT低，抖动小）
+    // SRS 中转：600ms（网络路径长，需要更大缓冲）
+    static constexpr int GST_JITTER_LATENCY_P2P = 150;
+    static constexpr int GST_JITTER_LATENCY_SRS = 600;
+    static constexpr int GST_JITTER_LATENCY = 600;  // 兼容旧引用（SRS默认值）
+    int getJitterLatency() const { return m_useP2P ? GST_JITTER_LATENCY_P2P : GST_JITTER_LATENCY_SRS; }
+    
+    // ========== 自适应状态变量 ==========
+    double m_configFps = 30.0;                   // 配置fps（PC手动设置/iOS设备fps）
+    bool m_highSpeedMode = false;                // P2: 240fps 高速模式标志
+    // P2: 240fps 验证日志（100ms窗口计数）
+    qint64 m_hsWindowStartMs = 0;
+    int m_hsWindowFrameCount = 0;
+    int m_hsWindowJpegCount = 0;
+    double m_arrivalRateEma = 30.0;              // 实测帧到达速率EMA（用于检测网络质量）
+    double m_depthEma = 6.0;                     // 队列深度EMA D(t)
+    double m_intervalEma = 33.0;                 // 消费间隔EMA I(t)
+    int m_queueTarget = 9;                       // 当前目标缓冲帧数（动态，初始按30fps×300ms=9帧）
+    double m_queueTargetSmooth = 9.0;            // 平滑目标缓冲（渐变过渡）
+    double m_playbackRate = 1.0;                 // 播放速率（1.0=正常，<1.0=慢放）
+    double m_targetRate = 1.0;                   // 目标速率（分段函数输出）
+    bool m_slowdownActive = false;               // 极端网络状态标志
+    bool m_emergencyHold = false;                // 紧急保护模式（停止消耗，保留最后帧）
+    GstSample *m_lastValidSample = nullptr;      // 最后一个有效帧（用于紧急时重复显示）
+    
+    // 🔥🔥🔥 v10.3 等待关键帧模式（防花屏核心）
+    std::atomic<bool> m_waitingForKeyframe{false}; // 等待关键帧模式
+    std::atomic<bool> m_preDecodeDiscont{false};   // 🔥 解码前检测到 DISCONT（关键！）
+    std::atomic<bool> m_preDecodeIdr{false};       // 🔥 解码前检测到 IDR 关键帧
+    std::atomic<int> m_consecutiveGoodFrames{0};   // 🔥 连续正常帧计数（必须 >=5 才退出等待）
+    qint64 m_lastKeyframeRequestMs = 0;            // 上次请求关键帧时间
+    int m_pliRequestCount = 0;                     // PLI 请求计数
+    gulong m_depayProbeId = 0;                     // 🔥 解码前 probe ID
+    gulong m_parseProbeId = 0;                     // 🔥 h264parse probe ID（IDR检测）
+    static constexpr int PLI_INTERVAL_WEAK_MS = 200;  // 弱网 PLI 间隔 200ms
+    static constexpr int PLI_INTERVAL_NORMAL_MS = 500; // 正常 PLI 间隔 500ms
+    static constexpr int GOOD_FRAMES_TO_EXIT = 5;  // 🔥 连续 5 帧正常才退出等待模式
+    int m_stableCounter = 0;                     // 稳定计数器（用于收缩/恢复判断）
+    qint64 m_lastQualityCheckMs = 0;             // 上次质量检测时间
+    
+    // ⭐⭐⭐ FPS变化检测（自动唤醒机制）
+    int m_fpsChangeCounter = 0;                  // FPS变化计数器（连续秒数）
+    double m_lastSecondFps = 0.0;                // 上一秒实际到达帧数
+    int m_currentSecondFrames = 0;               // 当前秒帧计数
+    qint64 m_fpsSecondStartMs = 0;               // 当前秒起始时间
+    
+    // ⭐⭐⭐ 第二道防线：推流帧率控制状态
+    int m_lowWaterHoldSec = 0;                   // 低水位持续秒数
+    int m_highWaterHoldSec = 0;                  // 高水位持续秒数
+    int m_requestedFps = 0;                      // 已请求的目标帧率（0=未请求）
+    int m_lastQueueDepth = 0;                    // ⭐ 上一秒队列深度（用于计算下降速度）
+    double m_queueDepthEma = 0;                  // ⭐ v8.4: 队列深度EMA（用于平滑速度调整）
+    static constexpr double QUEUE_EMA_ALPHA = 0.2; // 队列深度EMA系数（更平滑）
+    int m_originalFps = 0;                       // 原始帧率（降帧前的帧率）
+    
+    // ⭐⭐⭐ v8.3 帧间隔抖动检测（预测式降帧）
+    qint64 m_lastFrameArrivalMs = 0;             // 上一帧到达时间戳
+    double m_jitterEma = 0.0;                    // 抖动EMA（ms）
+    static constexpr double JITTER_ALPHA = 0.3;  // 抖动EMA系数
+    static constexpr double JITTER_LOWER_RATIO = 0.30;  // 抖动比例>30%开始降帧
+    static constexpr double JITTER_UPPER_RATIO = 1.00;  // 抖动比例100%降到最低帧率
+    static constexpr double JITTER_RESTORE_RATIO = 0.20; // 抖动比例<20%可升帧
+    
+    // ⭐⭐⭐ v9.3 趋势预测（提前 1-2 秒预知网络恶化）
+    double m_lastJitterEma = 0.0;                // 上一秒抖动EMA（用于计算趋势）
+    double m_lastArrivalRate = 1.0;              // 上一秒到达率（用于计算趋势）
+    double m_jitterTrend = 0.0;                  // 抖动变化率 (ms/s)，正值表示恶化
+    double m_arrivalSlope = 0.0;                 // 到达率斜率 (%/s)，负值表示恶化
+    int m_queueDropSpeed = 0;                    // 队列下降速度 (帧/s)
+    double m_riskScore = 0.0;                    // 综合风险分 (0~1)
+    static constexpr double JITTER_TREND_THRESHOLD = 2.0;    // 抖动趋势 > 2ms/s 预警
+    static constexpr double ARRIVAL_SLOPE_THRESHOLD = -0.05; // 到达率斜率 < -5%/s 预警
+    static constexpr double RISK_SCORE_THRESHOLD = 0.5;      // 风险分 > 0.5 触发预警
+    
+    // ⭐⭐⭐ 队列为空紧急应对
+    int m_emptyQueueCount = 0;                   // 队列见底次数（统计）
+    qint64 m_emptyQueueStartMs = 0;              // 队列见底开始时间
+    bool m_emergencyFpsLowered = false;          // 是否已紧急降帧
+    static constexpr double R_EMERGENCY_MIN = 0.50; // 紧急时最低播放速度50%
+    
+    // 🔥🔥🔥 v10.5 网络质量核心指标：损坏帧统计
+    std::atomic<int> m_corruptFrameCount{0};     // 当前秒损坏帧数
+    std::atomic<int> m_totalFrameCount{0};       // 当前秒总帧数
+    int m_lastSecondCorruptFrames = 0;           // 上一秒损坏帧数
+    int m_lastSecondTotalFrames = 0;             // 上一秒总帧数
+    double m_corruptRatioEma = 0.0;              // 损坏帧比例EMA（0~1）
+    static constexpr double CORRUPT_RATIO_WEAK = 0.10;    // 损坏率 > 10% = 弱网
+    static constexpr double CORRUPT_RATIO_CRITICAL = 0.30; // 损坏率 > 30% = 极弱网
+    
+    // ========== 核心算法函数 ==========
+    void onRenderTick();                         // 定时器回调
+    double calcSmoothInterval(int queueDepth);   // 计算消费间隔
+    void adjustQueueTarget(int queueDepth);      // 第一道防线：调整队列目标
+    void adjustPlaybackRate(int queueDepth);     // 第二道防线：调整播放速度
+    double piecewiseRate(double waterLevel);     // ⭐ 分段函数：水位→目标速率
+    void detectFpsChange();                      // ⭐ FPS变化检测（自动唤醒）
+    void checkPushFpsControl(double waterLevel); // ⭐⭐⭐ 第二道防线：推流帧率控制
+    
+    // 有效范围保护（key: rangeId, value: {start, end}）
+    QMap<int, QPair<qint64, qint64>> m_validRanges;
+    int m_nextRangeId = 0;
+    mutable QMutex m_rangesMutex;
+    mutable QMutex m_indexMutex;  // 保护帧索引操作（清理 vs 抓拍）
+    bool isIndexProtected(qint64 frameIndex) const;
+    
+    QMutex m_mutex;
+};
+
+#endif // GSTPLAYER_H

@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>自适应网络与平滑降帧方案 v9 - PC端 & iOS端</title>
+    <style>
+        body { font-family: "Microsoft YaHei", Arial, sans-serif; padding: 20px; background: #f5f5f5; }
+        h1 { color: #333; border-bottom: 2px solid #4CAF50; padding-bottom: 10px; }
+        h2 { color: #4CAF50; margin-top: 30px; }
+        h3 { color: #666; margin-top: 20px; }
+        table { border-collapse: collapse; width: 100%; margin: 15px 0; background: white; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+        th, td { border: 1px solid #ddd; padding: 10px 12px; text-align: center; }
+        th { background: #4CAF50; color: white; font-weight: bold; }
+        tr:nth-child(even) { background: #f9f9f9; }
+        .note { background: #fff3cd; border-left: 4px solid #ffc107; padding: 10px 15px; margin: 12px 0; }
+        .success { color: #28a745; font-weight: bold; }
+        .warning { color: #dc3545; font-weight: bold; }
+        .formula { background: #e9ecef; padding: 12px; border-radius: 5px; font-family: monospace; margin: 10px 0; }
+        .section { margin-bottom: 35px; }
+        .pill { display: inline-block; padding: 2px 8px; border-radius: 12px; background: #e3f2fd; color: #1976d2; font-size: 12px; }
+    </style>
+</head>
+<body>
+
+<h1>自适应网络与平滑降帧方案 v9（PC端 & iOS端）</h1>
+
+<div class="section">
+    <h2>✅ 目标</h2>
+    <ul>
+        <li>极端弱网（1格信号）下仍能平滑降帧，避免卡顿和断流</li>
+        <li>升降帧有滞后与平滑，避免频繁抖动</li>
+        <li>控制闭环：接收端统计 → 发送端执行</li>
+    </ul>
+    <div class="note">
+        <strong>核心结论：</strong>降帧/升帧必须由 <strong>iOS发送端</strong>执行，PC端提供反馈与决策建议。
+    </div>
+</div>
+
+<div class="section">
+    <h2>📌 双端职责划分</h2>
+    <table>
+        <tr>
+            <th>模块</th>
+            <th>PC端（接收端）</th>
+            <th>iOS端（发送端）</th>
+        </tr>
+        <tr>
+            <td>统计采样</td>
+            <td>到达率 / 抖动 / 丢包 / RTT / 队列帧数</td>
+            <td>编码队列 / 发送速率 / CPU负载</td>
+        </tr>
+        <tr>
+            <td>控制策略</td>
+            <td>计算目标帧率/码率建议</td>
+            <td>执行帧率/码率/分辨率调整</td>
+        </tr>
+        <tr>
+            <td>执行动作</td>
+            <td>仅反馈，不直接改码流</td>
+            <td>动态调参：fps/bitrate/scale</td>
+        </tr>
+        <tr>
+            <td>闭环链路</td>
+            <td>WebRTC stats + DataChannel/信令上报</td>
+            <td>接收反馈并落地执行</td>
+        </tr>
+    </table>
+</div>
+
+<div class="section">
+    <h2>📊 关键指标（PC端采集）</h2>
+    <table>
+        <tr>
+            <th>指标</th>
+            <th>定义</th>
+            <th>计算方式</th>
+            <th>用途</th>
+        </tr>
+        <tr>
+            <td>到达率</td>
+            <td>实际到达 fps / 配置 fps</td>
+            <td>arrivalFps / targetFps</td>
+            <td>稳定慢速识别</td>
+        </tr>
+        <tr>
+            <td>抖动比例</td>
+            <td>帧间隔抖动 / 期望间隔</td>
+            <td>J_ema / I_exp</td>
+            <td>预测式降帧</td>
+        </tr>
+        <tr>
+            <td>丢包率</td>
+            <td>lost / (lost + received)</td>
+            <td>RTCP统计</td>
+            <td>拥塞判定</td>
+        </tr>
+        <tr>
+            <td>RTT</td>
+            <td>往返时延</td>
+            <td>RTCP统计</td>
+            <td>网络恶化判定</td>
+        </tr>
+        <tr>
+            <td>队列帧数</td>
+            <td>缓冲队列帧深</td>
+            <td>app queue depth</td>
+            <td>播放平滑控制</td>
+        </tr>
+    </table>
+</div>
+
+<div class="section">
+    <h2>⚙️ 控制规则（PC端决策）</h2>
+    <h3>1) 降帧触发（满足任一即降）</h3>
+    <table>
+        <tr>
+            <th>条件</th>
+            <th>阈值</th>
+            <th>目标帧率</th>
+            <th>说明</th>
+        </tr>
+        <tr>
+            <td>到达率不足</td>
+            <td>&lt; 85%</td>
+            <td>降到 arrivalFps</td>
+            <td>稳定慢速识别</td>
+        </tr>
+        <tr>
+            <td>抖动过高</td>
+            <td>J_ema / I_exp &gt; 30%</td>
+            <td>线性降到 15fps</td>
+            <td>提前预测式</td>
+        </tr>
+        <tr>
+            <td>丢包偏高</td>
+            <td>&gt; 5%</td>
+            <td>降 20%-40%</td>
+            <td>带宽拥塞</td>
+        </tr>
+        <tr>
+            <td>RTT过高</td>
+            <td>&gt; 300ms</td>
+            <td>降 20%-40%</td>
+            <td>链路不稳定</td>
+        </tr>
+        <tr>
+            <td>队列下探</td>
+            <td>&lt; 3帧</td>
+            <td>降到 20fps</td>
+            <td>播放保护</td>
+        </tr>
+    </table>
+
+    <h3>2) 升帧触发（需全部满足）</h3>
+    <table>
+        <tr>
+            <th>条件</th>
+            <th>阈值</th>
+            <th>说明</th>
+        </tr>
+        <tr>
+            <td>抖动稳定</td>
+            <td>J_ema / I_exp &lt; 20%</td>
+            <td>网络恢复稳定</td>
+        </tr>
+        <tr>
+            <td>到达率充足</td>
+            <td>≥ 90%</td>
+            <td>有余量</td>
+        </tr>
+        <tr>
+            <td>队列充足</td>
+            <td>≥ 5帧</td>
+            <td>缓冲安全</td>
+        </tr>
+        <tr>
+            <td>持续时间</td>
+            <td>持续 ≥ 1s</td>
+            <td>防止抖动</td>
+        </tr>
+    </table>
+    <div class="note">
+        <strong>升帧幅度：</strong>每次 +10% 当前帧率，且 <strong>不超过到达帧率与原始帧率</strong>。
+    </div>
+</div>
+
+<div class="section">
+    <h2>🎯 iOS端执行策略（仅帧率，四档）</h2>
+    <table>
+        <tr>
+            <th>参数</th>
+            <th>调节优先级</th>
+            <th>建议范围</th>
+        </tr>
+        <tr>
+            <td>帧率 (fps)</td>
+            <td>最高</td>
+            <td>四档：60 → 45 → 30 → 15</td>
+        </tr>
+        <tr>
+            <td>码率 (bitrate)</td>
+            <td>次高</td>
+            <td>同步降 20%-50%</td>
+        </tr>
+    </table>
+    <div class="note">
+        <strong>原则：</strong>不改变分辨率，只通过四档帧率平滑升降；码率随帧率同步微调。
+    </div>
+</div>
+
+<div class="section">
+    <h2>🔁 闭环流程（推荐实现）</h2>
+    <div class="formula">
+        1) PC端每 1s 统计指标（到达率/抖动/丢包/RTT/队列）<br>
+        2) PC端计算 targetFps / targetBitrate / targetScale<br>
+        3) 通过 DataChannel/信令发送给 iOS 端<br>
+        4) iOS端执行编码参数更新（即时生效）<br>
+        5) PC端继续采样，进入下一轮闭环
+    </div>
+</div>
+
+<div class="section">
+    <h2>🧠 关键公式（PC端）</h2>
+    <div class="formula">
+        期望间隔 I_exp = 1000 / fps<br>
+        实际间隔 I_act = T_now - T_prev<br>
+        瞬时抖动 J = |I_act - I_exp|<br>
+        抖动EMA J_ema = 0.3 * J + 0.7 * J_ema<br>
+        抖动比例 R = J_ema / I_exp
+    </div>
+    <div class="formula">
+        targetFps = min( fps_by_jitter, fps_by_arrival, fps_by_loss, fps_by_rtt, fps_by_queue )
+    </div>
+</div>
+
+<div class="section">
+    <h2>💻 伪代码（PC端决策 + iOS端执行）</h2>
+    <div class="formula">
+<pre>
+// ===== PC端：每1秒决策 =====
+stats = collectStats(); // arrivalFps, jitter, loss, rtt, queueDepth
+
+fps_by_arrival = (arrivalRate < 0.85) ? arrivalFps : currentFps;
+fps_by_jitter  = (jitterRatio > 0.30) ? mapTo15fps(jitterRatio) : currentFps;
+fps_by_loss    = (lossRate > 0.05) ? currentFps * 0.7 : currentFps;
+fps_by_rtt     = (rttMs > 300) ? currentFps * 0.7 : currentFps;
+fps_by_queue   = (queueDepth < 3) ? 20 : currentFps;
+
+targetFps = min(fps_by_arrival, fps_by_jitter, fps_by_loss, fps_by_rtt, fps_by_queue);
+
+if (canUpgrade(stats)) {
+    targetFps = min(currentFps * 1.10, arrivalFps, originFps);
+}
+
+sendToIOS({ targetFps, targetBitrate, targetScale });
+
+// ===== iOS端：执行 =====
+applyEncoderParams(targetFps, targetBitrate, targetScale);
+</pre>
+    </div>
+</div>
+
+<div class="section">
+    <h2>✅ 结果预期</h2>
+    <ul>
+        <li>弱网下提前降帧，避免“卡死后才反应”</li>
+        <li>升帧有条件与滞后，避免频繁抖动</li>
+        <li>PC端可控，iOS端执行，结构清晰稳定</li>
+    </ul>
+    <div class="note">
+        你可以直接基于此版本做调整，或告知你们实际帧率档位/分辨率档位，我可以再细化。
+    </div>
+</div>
+
+</body>
+</html>

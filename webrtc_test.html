@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>WebRTC Test</title>
+    <style>
+        body { margin:0; background:#000; font-family:Arial; color:#fff; }
+        video { width:100vw; height:calc(100vh - 80px); background:#111; object-fit:contain; }
+        #controls { padding:10px; background:#222; display:flex; gap:10px; align-items:center; }
+        input { padding:8px; background:#333; color:#fff; border:1px solid #555; border-radius:4px; }
+        #stream { width:350px; }
+        #host { width:120px; }
+        button { padding:8px 16px; color:#fff; border:none; cursor:pointer; border-radius:4px; }
+        .play { background:#4CAF50; }
+        .stop { background:#f44336; }
+        #status { padding:10px; color:#0f0; font-family:monospace; font-size:12px; }
+        .error { color:#f55; }
+    </style>
+</head>
+<body>
+    <div id="controls">
+        <input id="stream" placeholder="流名称" value="VID_B82BE803071D4D78527C1293372D_1767021040">
+        <input id="host" placeholder="服务器" value="8.148.6.253">
+        <button class="play" onclick="play()">▶ 播放</button>
+        <button class="stop" onclick="stop()">■ 停止</button>
+    </div>
+    <div id="status">等待播放...</div>
+    <video id="v" autoplay muted playsinline></video>
+    
+    <script>
+        let pc = null;
+        const video = document.getElementById('v');
+        const status = document.getElementById('status');
+        
+        function log(msg, isError) {
+            const time = new Date().toLocaleTimeString();
+            status.innerHTML = '<span class="' + (isError ? 'error' : '') + '">[' + time + '] ' + msg + '</span>';
+            console.log(msg);
+        }
+        
+        function stop() {
+            if (pc) { 
+                pc.close(); 
+                pc = null; 
+            }
+            video.srcObject = null;
+            log('已停止');
+        }
+        
+        async function play() {
+            const streamName = document.getElementById('stream').value.trim();
+            const host = document.getElementById('host').value.trim();
+            
+            if (!streamName) {
+                log('请输入流名称', true);
+                return;
+            }
+            
+            stop();
+            
+            try {
+                log('正在连接 ' + host + '...');
+                
+                pc = new RTCPeerConnection({
+                    iceServers: []
+                });
+                
+                // ✅ 关键修复：只添加 video transceiver，不添加 audio
+                // SRS 只返回 video，如果请求 audio 会导致 m-line 不匹配
+                pc.addTransceiver('video', { direction: 'recvonly' });
+                
+                pc.ontrack = function(event) {
+                    log('✅ 收到轨道: kind=' + event.track.kind + ', id=' + event.track.id);
+                    console.log('Track event:', event);
+                    console.log('Track:', event.track);
+                    console.log('Streams:', event.streams);
+                    
+                    if (event.streams && event.streams[0]) {
+                        video.srcObject = event.streams[0];
+                        log('已设置 video.srcObject');
+                        
+                        // 监听视频元素状态
+                        video.onloadedmetadata = function() {
+                            log('视频元数据已加载: ' + video.videoWidth + 'x' + video.videoHeight);
+                        };
+                        video.onplaying = function() {
+                            log('✅ 视频正在播放！');
+                        };
+                        video.onerror = function(e) {
+                            log('❌ 视频错误: ' + (video.error ? video.error.message : e), true);
+                        };
+                    } else if (event.track) {
+                        // 如果没有 streams，直接用 track
+                        const stream = new MediaStream([event.track]);
+                        video.srcObject = stream;
+                        log('使用单独 track 创建 stream');
+                    }
+                };
+                
+                pc.oniceconnectionstatechange = function() {
+                    log('ICE 状态: ' + pc.iceConnectionState);
+                    if (pc.iceConnectionState === 'connected') {
+                        log('✅ WebRTC 连接成功！');
+                    } else if (pc.iceConnectionState === 'failed') {
+                        log('❌ ICE 连接失败', true);
+                    }
+                };
+                
+                pc.onconnectionstatechange = function() {
+                    log('连接状态: ' + pc.connectionState);
+                };
+                
+                // 创建 offer
+                const offer = await pc.createOffer();
+                await pc.setLocalDescription(offer);
+                log('Offer 已创建');
+                
+                // 发送到 SRS
+                const apiUrl = 'http://' + host + ':1985/rtc/v1/play/';
+                const streamUrl = 'webrtc://' + host + '/tenantA/' + streamName;
+                
+                log('请求 API: ' + apiUrl);
+                
+                const response = await fetch(apiUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        api: apiUrl,
+                        streamurl: streamUrl,
+                        sdp: offer.sdp
+                    })
+                });
+                
+                const data = await response.json();
+                console.log('SRS 响应:', data);
+                
+                if (data.code !== 0) {
+                    throw new Error('SRS 错误 [' + data.code + ']: ' + (data.msg || '未知错误'));
+                }
+                
+                log('收到 Answer，正在设置...');
+                
+                // 设置远程描述
+                await pc.setRemoteDescription({
+                    type: 'answer',
+                    sdp: data.sdp
+                });
+                
+                log('✅ SDP 协商完成，等待视频...');
+                
+                // 尝试播放
+                video.play().catch(function(e) {
+                    log('播放警告: ' + e.message);
+                });
+                
+            } catch (error) {
+                log('❌ 错误: ' + error.message, true);
+                console.error('完整错误:', error);
+            }
+        }
+        
+        // 回车键播放
+        document.getElementById('stream').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') play();
+        });
+    </script>
+</body>
+</html>

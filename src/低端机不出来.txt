@@ -1,0 +1,205 @@
+[16:39:04.983098300] ? 独立窗口模式：跳过 setOverlayTarget
+[16:39:04.986087900] ? setFrameCallback: 回调已设置=true, 当前线程=JavaFX Application Thread
+[16:39:04.987085600] ? setFrameCallback: 管道尚未创建，暂存回调待后续应用
+[16:39:05.013018100] ? enableCaptureBuffer() 被调用
+[16:39:05.013018100]    lightweightBuffer: null
+[16:39:05.013018100]    timelineCapture: null
+[16:39:05.013018100]    captureTee: null
+[16:39:05.013018100]    captureQueue: null
+[16:39:05.014015700]    captureSink: null
+[16:39:05.014015700] ?? 抓拍功能未初始化（capture.enabled=false）
+[16:39:06.018794900] ? setGlobalFrameListener() 被调用
+[16:39:06.018794900]   - lightweightBuffer: null
+[16:39:06.019793200]   - lightweightBuffer.isEnabled(): N/A
+[16:39:06.485459800] ========== ? 开始启动 WebRTC 播放器 ==========
+[16:39:06.485459800] ? 服务器: 171.80.4.72:1985
+[16:39:06.485459800] ? 流ID: tenantA/VID_1A191D98F454E3E4BAE32DBF50C7_1763282340784
+[16:39:06.486456600] 当前状态 - overlayChildHandle: 0x0, overlayWindowHandle: 0x0
+[16:39:06.486456600] 开始创建 GStreamer Pipeline...
+[16:39:06.524354100] ? 系统物理内存: 7GB
+[16:39:06.525352600] ? 处理器核心数: 6
+[16:39:06.525352600] ? CPU 核心数: 6 (低端CPU)
+[16:39:06.525352600]    ? 极低端机超激进优化：超小缓冲(5/2帧) + 超快丢弃(100ms) → i5-9400F 专用
+[16:39:06.525352600]    ? 策略：流畅优先（牺牲部分容错性换取流畅度）
+[16:39:06.525352600] ?? 当前缓冲模式: 超稳定 (延迟:1800ms, 缓冲:200/150)
+[16:39:06.525352600] ? 机型自适应配置 [极低端机(≤8GB+≤6核), 7GB内存]:
+[16:39:06.525352600]    - jitter=100ms, retry=2x20ms (重传窗口=40ms)
+[16:39:06.525352600]    - queueDepay=5帧/150ms, queueDecode=2帧
+[16:39:06.526349900]    - 策略：防马赛克（3×jitter容忍+大缓冲+长重传），leaky=2防延迟累积
+[16:39:06.554274800] ?? webrtcbin latency 设置为 800ms
+[16:39:06.564248700] rtph264depay error Unknown property: request-keyframe-on-discont
+[16:39:06.567240400] ? 用户指定解码器: d3d11h264dec
+[16:39:06.726813200] ?? h264parse配置失败: Unknown property: output-format
+[16:39:06.727810800] ? 极低端机检测：自动禁用抓拍功能以保证流畅
+[16:39:06.740775600] ? displayQueue: buffers=1, leaky=2 (低端机轻量级)
+[16:39:06.755736300] ? distributionAppSink 已创建（max-buffers=5）
+[16:39:06.763714800] mkv--->1
+[16:39:06.775683100] ? x264enc 超快速配置完成
+[16:39:06.777679300] ? identity 元素已创建
+[16:39:06.801613700] ? 缩放元素初始化完成: 0x0
+[16:39:06.807598100] ? queueDepay（低端机轻量）: buffers=5, time=150ms, leaky=2, drop-on-latency=ON
+[16:39:06.810589600] ? queueDecode（?iOS快速挥动加强）: buffers=2, leaky=2 ?大缓冲防马赛克, memory=7GB
+[16:39:06.834525000] ? 录制分支已配置色彩信息: bt709 full-range
+[16:39:06.834525000] ? 创建 h264parse
+[16:39:06.851479100] ? Pipeline 创建完成
+[16:39:06.851479100] ===== 保存/缓存队列状态 =====
+[16:39:06.851479100] ===== 结束 =====
+[16:39:06.892371900] ?? start: 发现预设的 frameCallback，重放 setFrameCallback 以激活回调支路
+[16:39:06.898355200] ? WebRTC信号处理器设置中...
+[16:39:06.900349000] ? 磁盘缓存目录: C:\Users\Administrator\AppData\Local\Temp\webrtc_frame_cache
+[16:39:06.900349000] ? 开始WebRTC信令...
+[16:39:06.900349000] ? 验证服务器连接...
+[16:39:06.996092600] ? vhost/eip 参数: vhost=vid-7gg4748, eip=171.80.4.72 (可通过系统属性 srs.vhost / srs.eip / srs.appendVhostEip 控制)
+[16:39:06.996092600] ? 流URL: webrtc://171.80.4.72/tenantA/VID_1A191D98F454E3E4BAE32DBF50C7_1763282340784?vhost=vid-7gg4748&eip=171.80.4.72
+[16:39:06.996092600] STEP1: ? 保存流URL
+[16:39:07.000081900] STEP1b: ? 已添加 recvonly H264 视频 transceiver: GstObject: [webrtctransceiver0]
+[16:39:07.001080100] ? 准备启动 Pipeline...
+[16:39:07.001080100]    当前 overlayChildHandle: 0x0
+[16:39:07.001080100]    当前 overlayWindowHandle: 0x0
+[16:39:07.002077600] STEP2: ? ON_NEGOTIATION_NEEDED 触发，开始创建 offer
+[16:39:07.002077600] ? 开始创建WebRTC SDP offer...
+[16:39:07.048953100] ?? Pipeline 非 PLAYING 状态，判定为无帧推送
+[16:39:07.050946600] ? Pipeline.play() 返回: SUCCESS
+[16:39:07.051947300] ? 管道启动结果: SUCCESS
+[16:39:07.053943700] ? 系统物理内存: 7GB
+[16:39:07.055934400] ?? Pipeline 非 PLAYING 状态，判定为无帧推送
+[16:39:07.055934400]   -> 新时钟
+[16:39:07.057928800] ? 处理器核心数: 6
+[16:39:07.057928800] ? 极低端机模式，关键帧间隔: 8秒（平衡流畅度与稳定性）
+[16:39:07.059923500] ? 定期关键帧请求已启动（间隔: 8秒，使用GStreamer PLI，不通过socket）
+[16:39:07.060920300] ? 综合诊断监控已启动（间隔: 10秒）
+[16:39:07.061917100] ? CPU占用监控已启动
+[16:39:07.067902600] ? SDP offer创建成功
+[16:39:07.071892000] ===== LOCAL OFFER SDP BEGIN =====
+[16:39:07.071892000] v=0
+o=- 7438928403509342347 0 IN IP4 0.0.0.0
+s=-
+t=0 0
+a=ice-options:trickle
+a=group:BUNDLE video0
+m=video 9 UDP/TLS/RTP/SAVPF 109
+c=IN IP4 0.0.0.0
+a=setup:actpass
+a=ice-ufrag:MZT+7+lGKn/sHgsjQUUVZvKk/RsVM3vx
+a=ice-pwd:bGQKE3CPW0YsHBEwqDIXXMmh4s9/pLRO
+a=rtcp-mux
+a=rtcp-rsize
+a=recvonly
+a=rtpmap:109 H264/90000
+a=rtcp-fb:109 nack pli
+a=rtcp-fb:109 ccm fir
+a=rtcp-fb:109 transport-cc
+a=fmtp:109 profile-level-id=42e01f
+a=mid:video0
+a=fingerprint:sha-256 3F:82:13:7F:B2:73:24:C3:67:F5:83:89:04:61:4F:B4:C7:8D:AB:B3:24:54:B0:64:AF:B3:B1:64:1C:49:FF:A1
+a=rtcp-mux-only
+
+[16:39:07.071892000] ===== LOCAL OFFER SDP END   =====
+[16:39:07.173617500] ? 发送SDP offer到服务器...
+[16:39:07.173617500] ? 发送信令请求到: http://171.80.4.72:1985/rtc/v1/play/
+[16:39:07.174615300] ? 请求体长度: 810 字符
+[16:39:07.174615300] ? 请求体预览: {"api":"http://171.80.4.72:1985/rtc/v1/play/","streamurl":"webrtc://171.80.4.72/tenantA/VID_1A191D98F454E3E4BAE32DBF50C7_1763282340784?vhost=vid-7gg4748&eip=171.80.4.72","sdp":"v=0\r\no=- 7438928403509342347 0 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\na=ice-options:trickle\r\na=group:BUNDLE video0\r\nm=video 9 UDP/TLS/RTP/SAVPF 109\r\nc=IN IP4 0.0.0.0\r\na=setup:actpass\r\na=ice-ufrag:MZT+7+lGKn/sHgsjQUUVZvKk/RsVM3vx\r\na=ice-pwd:bGQKE3CPW0YsHBEwqDIXXMmh4s9/pLRO\r\na=rtcp-mux\r\na=rtcp-rsize\r\na=recvon
+[16:39:07.175612300] ? 请求体前128字节HEX: 7B 22 61 70 69 22 3A 22 68 74 74 70 3A 2F 2F 31 37 31 2E 38 30 2E 34 2E 37 32 3A 31 39 38 35 2F 72 74 63 2F 76 31 2F 70 6C 61 79 2F 22 2C 22 73 74 72 65 61 6D 75 72 6C 22 3A 22 77 65 62 72 74 63 3A 2F 2F 31 37 31 2E 38 30 2E 34 2E 37 32 2F 74 65 6E 61 6E 74 41 2F 56 49 44 5F 31 41 31 39 31 44 39 38 46 34 35 34 45 33 45 34 42 41 45 33 32 44 42 46 35 30 43 37 5F 31 37 36 33 32 38 32 
+[16:39:07.176611100] ? SDP Offer检查: hasAudio=false, hasVideo=true
+[16:39:07.257393000] ? 服务器连接正常
+[16:39:07.257393000] ? 服务器信息: {"code":0,"server":"vid-d681w9b","service":"987wn8r5","pid":"482013","data":{"major":6,"minor":0,"revision":134,"version":"6.0.134"}}
+[16:39:07.381069100] ? 收到信令响应: 200
+[16:39:07.381069100] ? 响应头: {connection=[Close], content-length=[1066], content-type=[application/json], server=[SRS/6.0.134(Hang)]}
+[16:39:07.381069100] ? 响应内容: {"code":0,"server":"vid-d681w9b","service":"987wn8r5","pid":"482013","sdp":"v=0\r\no=SRS/6.0.134(Hang) 140057691677168 2 IN IP4 0.0.0.0\r\ns=SRSPlaySession\r\nt=0 0\r\na=ice-lite\r\na=group:BUNDLE video0\r\na=msid-semantic: WMS tenantA/VID_1A191D98F454E3E4BAE32DBF50C7_1763282340784\r\nm=video 9 UDP/TLS/RTP/SAVPF 109 107\r\nc=IN IP4 0.0.0.0\r\na=ice-ufrag:u9o6ok0b\r\na=ice-pwd:679m15we64eued8973h8753jzda997kl\r\na=fingerprint:sha-256 7C:26:2D:7E:A3:38:A9:DC:71:18:EC:A5:7F:C7:F4:B3:EF:69:D8:3B:CF:7B:3F:F5:2A:CE:C0:47:4E:37:C4:12\r\na=setup:passive\r\na=mid:video0\r\na=sendonly\r\na=rtcp-mux\r\na=rtcp-rsize\r\na=rtpmap:109 H264/90000\r\na=rtcp-fb:109 nack pli\r\na=fmtp:109 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=640c34\r\na=rtpmap:107 red/90000\r\na=ssrc:573846518 cname:44p8197fc00r4575\r\na=ssrc:573846518 msid:s0 local_preview\r\na=ssrc:573846518 mslabel:s0\r\na=ssrc:573846518 label:local_preview\r\na=candidate:0 1 udp 2130706431 171.80.4.72 7999 typ host generation 0\r\n","sessionid":"u9o6ok0b:MZT+7+lGKn/sHgsjQUUVZvKk/RsVM3vx"}
+[16:39:07.382059700] ? 处理信令响应...
+[16:39:07.382059700] ? 收到远程SDP，长度: 880
+[16:39:07.382059700] ? 设置远程SDP描述...
+[16:39:07.383057200] ? 远程SDP描述设置成功
+[16:39:07.383057200] ? 从SDP中提取ICE候选者...
+[16:39:07.384054500] ? 发现ICE候选者: candidate:0 1 udp 2130706431 171.80.4.72 7999 typ host generation 0
+[16:39:07.384054500] ? ICE候选者已添加: candidate:0 1 udp 2130706431 171.80.4.72 7999 typ ...
+[16:39:07.384054500] ? 总共处理了 1 个ICE候选者
+[16:39:07.384054500] ? 从Answer SDP(m=video)提取到SSRC: 573846518
+[16:39:07.384054500] ? 从Answer SDP提取到SSRC: 573846518（仅用于调试）
+[16:39:07.385051700] ? 远程SDP设置完成，开始ICE连接过程
+[16:39:07.422950000] ? ICE收集状态变化: GATHERING
+[16:39:07.424944700] ? ICE连接状态变化: 1
+[16:39:07.424944700] ? ICE连接状态: CHECKING - 正在检查连接
+[16:39:07.425942200] ? WebRTC连接状态变化: CONNECTING
+[16:39:07.425942200]    → 正在连接（ICE 协商中）
+[16:39:07.425942200] ? 本地ICE候选者生成: mline=0, candidate=candidate:1 1 UDP 2015363327 192.168.0.7 63218 typ host
+[16:39:07.425942200] ? 本地ICE候选者生成: mline=0, candidate=candidate:2 1 TCP 1015021823 192.168.0.7 9 typ host tcptype active
+[16:39:07.426939900] ? 本地ICE候选者生成: mline=0, candidate=candidate:3 1 TCP 1010827519 192.168.0.7 61636 typ host tcptype passive
+[16:39:07.426939900] ? 本地ICE候选者生成: mline=0, candidate=candidate:4 1 UDP 2015363583 fe80::6e3c:ef41:7abb:7bf4 63219 typ host
+[16:39:07.426939900] ? 本地ICE候选者生成: mline=0, candidate=candidate:5 1 TCP 1015022079 fe80::6e3c:ef41:7abb:7bf4 9 typ host tcptype active
+[16:39:07.426939900] ? 本地ICE候选者生成: mline=0, candidate=candidate:6 1 TCP 1010827775 fe80::6e3c:ef41:7abb:7bf4 61637 typ host tcptype passive
+[16:39:07.426939900] ? 本地ICE候选者生成: mline=0, candidate=candidate:7 1 UDP 2015363839 2408:8220:614:8f01:3162:83a0:3f4c:852e 63220 typ host
+[16:39:07.426939900] ? 本地ICE候选者生成: mline=0, candidate=candidate:8 1 TCP 1015022335 2408:8220:614:8f01:3162:83a0:3f4c:852e 9 typ host tcptype active
+[16:39:07.426939900] ? 本地ICE候选者生成: mline=0, candidate=candidate:9 1 TCP 1010828031 2408:8220:614:8f01:3162:83a0:3f4c:852e 61638 typ host tcptype passive
+[16:39:07.426939900] ? 本地ICE候选者生成: mline=0, candidate=candidate:10 1 UDP 2015364095 2408:8220:614:8f01:2503:b782:25c6:4885 63221 typ host
+[16:39:07.426939900] ? 本地ICE候选者生成: mline=0, candidate=candidate:11 1 TCP 1015022591 2408:8220:614:8f01:2503:b782:25c6:4885 9 typ host tcptype active
+[16:39:07.426939900] ? 本地ICE候选者生成: mline=0, candidate=candidate:12 1 TCP 1010828287 2408:8220:614:8f01:2503:b782:25c6:4885 61639 typ host tcptype passive
+[16:39:07.426939900] ? 本地ICE候选者生成: mline=0, candidate=candidate:13 1 UDP 2015364351 2408:8220:614:8f01::1002 63222 typ host
+[16:39:07.427937900] ? 本地ICE候选者生成: mline=0, candidate=candidate:14 1 TCP 1015022847 2408:8220:614:8f01::1002 9 typ host tcptype active
+[16:39:07.427937900] ? 本地ICE候选者生成: mline=0, candidate=candidate:15 1 TCP 1010828543 2408:8220:614:8f01::1002 61640 typ host tcptype passive
+[16:39:07.427937900] ? 本地ICE候选者生成: mline=0, candidate=
+[16:39:07.427937900] ? 本地ICE候选者收集完成
+[16:39:07.428934100] ? ICE收集状态变化: COMPLETE
+[16:39:07.429934800] ? ICE收集完成，连接应该可以建立
+[16:39:07.584518100] ? 远程SDP设置完成，已请求首个关键帧（延迟200ms）
+[16:39:07.610449100] ? ICE连接状态变化: 3
+[16:39:07.610449100] ? ICE连接状态: COMPLETED - 连接完成！
+[16:39:08.718483100] ? WebRTC连接状态变化: CONNECTED
+[16:39:08.719480400] ? WebRTC连接已建立！应该开始接收数据
+[16:39:08.719480400]    → ? 连接成功！
+[16:39:09.540285600] ? 记录 webrtcbin 视频RTP src pad: src_0
+[16:39:09.541282900] ? WebRTC H264视频RTP pad已连接到 rtph264depay.sink
+[16:39:09.541282900] ? 视频流已连接，立即请求首个关键帧...
+[16:39:12.059510600] ? 5秒内未收到数据，发送关键帧请求...
+[16:39:12.060503700] ? 当前连接状态: CONNECTED
+[16:39:12.060503700] ? WebRTC 连接已建立，发送关键帧请求
+[16:39:15.062415600] ? [定期维护] 关键帧请求完成（间隔8秒）
+[16:39:17.062362000] ========== ? 马赛克诊断报告 ==========
+[16:39:17.063246100] ? [queueDepay] 0/5帧 (0.0%), 0ms ?正常
+[16:39:17.064267200] ? [queueDecode] 1/2帧 (50.0%), 15ms ?正常
+[16:39:17.068232300] ? [WebRTC] 连接状态: CONNECTED
+[16:39:17.068232300] =========================================
+[16:39:23.061694100] ? [定期维护] 关键帧请求完成（间隔8秒）
+[16:39:27.062464300] ========== ? 马赛克诊断报告 ==========
+[16:39:27.064431700] ? [queueDepay] 0/5帧 (0.0%), 0ms ?正常
+[16:39:27.065407600] ? [queueDecode] 1/2帧 (50.0%), 15ms ?正常
+[16:39:27.068398700] ? [WebRTC] 连接状态: CONNECTED
+[16:39:27.068398700] =========================================
+[16:39:31.060841900] ? [定期维护] 关键帧请求完成（间隔8秒）
+[16:39:37.062712400] ========== ? 马赛克诊断报告 ==========
+[16:39:37.063612400] ? [queueDepay] 0/5帧 (0.0%), 0ms ?正常
+[16:39:37.063612400] ? [queueDecode] 1/2帧 (50.0%), 15ms ?正常
+[16:39:37.064609600] ? [WebRTC] 连接状态: CONNECTED
+[16:39:37.065607100] =========================================
+[16:39:39.059890200] ? [定期维护] 关键帧请求完成（间隔8秒）
+[16:39:47.060934300] ? [定期维护] 关键帧请求完成（间隔8秒）
+[16:39:47.062851400] ========== ? 马赛克诊断报告 ==========
+[16:39:47.062851400] ? [queueDepay] 0/5帧 (0.0%), 0ms ?正常
+[16:39:47.063832600] ? [queueDecode] 1/2帧 (50.0%), 15ms ?正常
+[16:39:47.063832600] ? [WebRTC] 连接状态: CONNECTED
+[16:39:47.064805000] =========================================
+[16:39:55.060542100] ? [定期维护] 关键帧请求完成（间隔8秒）
+[16:39:57.061465100] ========== ? 马赛克诊断报告 ==========
+[16:39:57.061465100] ? [queueDepay] 0/5帧 (0.0%), 0ms ?正常
+[16:39:57.062368900] ? [queueDecode] 1/2帧 (50.0%), 15ms ?正常
+[16:39:57.063341300] ? [WebRTC] 连接状态: CONNECTED
+[16:39:57.063341300] =========================================
+[16:40:03.061161300] ? [定期维护] 关键帧请求完成（间隔8秒）
+[16:40:07.063183600] ========== ? 马赛克诊断报告 ==========
+[16:40:07.064180600] ? [queueDepay] 0/5帧 (0.0%), 0ms ?正常
+[16:40:07.065205000] ? [queueDecode] 1/2帧 (50.0%), 15ms ?正常
+[16:40:07.066175100] ? [WebRTC] 连接状态: CONNECTED
+[16:40:07.066175100] =========================================
+[16:40:11.060559200] ? [定期维护] 关键帧请求完成（间隔8秒）
+[16:40:17.062710000] ========== ? 马赛克诊断报告 ==========
+[16:40:17.062710000] ? [queueDepay] 0/5帧 (0.0%), 0ms ?正常
+[16:40:17.063589900] ? [queueDecode] 1/2帧 (50.0%), 15ms ?正常
+[16:40:17.063589900] ? [WebRTC] 连接状态: CONNECTED
+[16:40:17.064611100] =========================================
+[16:40:19.061013900] ? [定期维护] 关键帧请求完成（间隔8秒）
+[16:40:27.060138900] ? [定期维护] 关键帧请求完成（间隔8秒）
+[16:40:27.063131400] ========== ? 马赛克诊断报告 ==========
+[16:40:27.063131400] ? [queueDepay] 0/5帧 (0.0%), 0ms ?正常
+[16:40:27.063131400] ? [queueDecode] 1/2帧 (50.0%), 15ms ?正常
+[16:40:27.064128800] ? [WebRTC] 连接状态: CONNECTED
+[16:40:27.064128800] =========================================

@@ -1,0 +1,961 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>流量整形(Traffic Shaping)技术架构文档</title>
+<style>
+  :root {
+    --bg: #0f172a;
+    --card: #1e293b;
+    --card2: #334155;
+    --accent: #38bdf8;
+    --accent2: #818cf8;
+    --accent3: #34d399;
+    --accent4: #fb923c;
+    --accent5: #f472b6;
+    --text: #e2e8f0;
+    --text2: #94a3b8;
+    --border: #475569;
+    --red: #ef4444;
+    --yellow: #facc15;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: 'Segoe UI', -apple-system, 'Microsoft YaHei', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.7;
+    padding: 0 20px 80px;
+  }
+  .container { max-width: 1100px; margin: 0 auto; }
+
+  /* Header */
+  header {
+    text-align: center;
+    padding: 60px 0 40px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 50px;
+  }
+  header h1 {
+    font-size: 2.4em;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    margin-bottom: 12px;
+  }
+  header p { color: var(--text2); font-size: 1.1em; }
+  .badge {
+    display: inline-block;
+    background: var(--card2);
+    color: var(--accent);
+    padding: 4px 14px;
+    border-radius: 20px;
+    font-size: 0.85em;
+    margin: 4px;
+    border: 1px solid var(--border);
+  }
+
+  /* Sections */
+  section { margin-bottom: 50px; }
+  h2 {
+    font-size: 1.6em;
+    margin-bottom: 20px;
+    padding-bottom: 10px;
+    border-bottom: 2px solid var(--accent);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  h2 .num {
+    background: var(--accent);
+    color: var(--bg);
+    width: 36px; height: 36px;
+    border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 0.9em; font-weight: 700;
+    flex-shrink: 0;
+  }
+  h3 {
+    font-size: 1.15em;
+    color: var(--accent3);
+    margin: 20px 0 10px;
+  }
+
+  /* Cards */
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 24px;
+    margin-bottom: 20px;
+  }
+  .card-title {
+    font-size: 1.1em;
+    font-weight: 600;
+    margin-bottom: 10px;
+    color: var(--accent);
+  }
+
+  /* Grid */
+  .grid { display: grid; gap: 16px; }
+  .grid-2 { grid-template-columns: 1fr 1fr; }
+  .grid-3 { grid-template-columns: 1fr 1fr 1fr; }
+  @media (max-width: 768px) {
+    .grid-2, .grid-3 { grid-template-columns: 1fr; }
+  }
+
+  /* Tech stack boxes */
+  .tech-box {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px;
+    text-align: center;
+    transition: transform 0.2s, border-color 0.2s;
+  }
+  .tech-box:hover {
+    transform: translateY(-4px);
+    border-color: var(--accent);
+  }
+  .tech-icon { font-size: 2.4em; margin-bottom: 8px; }
+  .tech-name { font-weight: 700; font-size: 1.05em; margin-bottom: 4px; }
+  .tech-desc { font-size: 0.85em; color: var(--text2); }
+
+  /* Flow diagram */
+  .flow {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    position: relative;
+  }
+  .flow-step {
+    display: flex;
+    align-items: stretch;
+    gap: 16px;
+  }
+  .flow-line {
+    width: 4px;
+    background: linear-gradient(180deg, var(--accent), var(--accent2));
+    position: relative;
+    flex-shrink: 0;
+    margin-left: 18px;
+  }
+  .flow-line::before {
+    content: '';
+    position: absolute;
+    left: -8px;
+    top: 24px;
+    width: 20px; height: 20px;
+    background: var(--accent);
+    border-radius: 50%;
+    border: 3px solid var(--bg);
+  }
+  .flow-content {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px 20px;
+    flex: 1;
+    margin: 8px 0;
+  }
+  .flow-content .label {
+    font-size: 0.8em;
+    color: var(--accent4);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .flow-content .title {
+    font-weight: 700;
+    margin: 2px 0 6px;
+    font-size: 1.05em;
+  }
+  .flow-content .desc {
+    color: var(--text2);
+    font-size: 0.9em;
+  }
+
+  /* Code blocks */
+  .code-block {
+    background: #0d1117;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px 20px;
+    font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+    font-size: 0.88em;
+    overflow-x: auto;
+    line-height: 1.6;
+    margin: 12px 0;
+    white-space: pre;
+  }
+  .code-block .kw { color: #ff7b72; }
+  .code-block .fn { color: #d2a8ff; }
+  .code-block .cm { color: #8b949e; }
+  .code-block .st { color: #a5d6ff; }
+  .code-block .num { color: #79c0ff; }
+  .code-block .type { color: #ffa657; }
+
+  /* Comparison table */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 12px 0;
+    font-size: 0.92em;
+  }
+  th, td {
+    padding: 12px 16px;
+    text-align: left;
+    border: 1px solid var(--border);
+  }
+  th {
+    background: var(--card2);
+    font-weight: 600;
+    color: var(--accent);
+  }
+  td { background: var(--card); }
+  tr:hover td { background: var(--card2); }
+
+  /* Algorithm visualization */
+  .algo-viz {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 30px;
+    text-align: center;
+  }
+  .bucket-svg { max-width: 100%; height: auto; }
+
+  /* Highlight box */
+  .highlight {
+    border-left: 4px solid var(--accent4);
+    background: rgba(251, 146, 60, 0.08);
+    padding: 14px 18px;
+    border-radius: 0 8px 8px 0;
+    margin: 12px 0;
+    font-size: 0.92em;
+  }
+  .highlight.green {
+    border-color: var(--accent3);
+    background: rgba(52, 211, 153, 0.08);
+  }
+  .highlight.red {
+    border-color: var(--red);
+    background: rgba(239, 68, 68, 0.08);
+  }
+  .highlight.blue {
+    border-color: var(--accent);
+    background: rgba(56, 189, 248, 0.08);
+  }
+
+  /* Layer diagram */
+  .layer-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    max-width: 600px;
+    margin: 20px auto;
+  }
+  .layer {
+    padding: 14px 20px;
+    border-radius: 8px;
+    text-align: center;
+    font-weight: 600;
+    font-size: 0.95em;
+    position: relative;
+  }
+  .layer .tag {
+    position: absolute;
+    right: 12px;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 0.75em;
+    font-weight: 400;
+    opacity: 0.7;
+  }
+  .layer-app  { background: #1e3a5f; border: 1px solid #38bdf8; }
+  .layer-sock { background: #312e81; border: 1px solid #818cf8; }
+  .layer-net  { background: #14532d; border: 1px solid #34d399; }
+  .layer-drv  { background: #7c2d12; border: 1px solid #fb923c; }
+  .layer-hw   { background: #3f3f46; border: 1px solid #a1a1aa; }
+  .layer-arrow {
+    text-align: center;
+    color: var(--text2);
+    font-size: 1.2em;
+    padding: 2px 0;
+  }
+
+  /* Stat counters */
+  .stat-grid {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 12px;
+    margin: 16px 0;
+  }
+  @media (max-width: 768px) {
+    .stat-grid { grid-template-columns: repeat(2, 1fr); }
+  }
+  .stat-item {
+    background: var(--card2);
+    border-radius: 8px;
+    padding: 14px;
+    text-align: center;
+  }
+  .stat-item .stat-val { font-size: 1.4em; font-weight: 700; }
+  .stat-item .stat-label { font-size: 0.8em; color: var(--text2); margin-top: 2px; }
+
+  ul { padding-left: 20px; }
+  ul li { margin: 4px 0; }
+  ul li::marker { color: var(--accent); }
+
+  .tag-inline {
+    display: inline-block;
+    background: var(--card2);
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-family: monospace;
+    font-size: 0.88em;
+    color: var(--accent3);
+  }
+</style>
+</head>
+<body>
+<div class="container">
+
+<header>
+  <h1>Traffic Shaping 流量整形技术架构</h1>
+  <p>基于 WinDivert + Token Bucket 的进程级精准限速方案</p>
+  <div style="margin-top: 16px;">
+    <span class="badge">WinDivert 内核驱动</span>
+    <span class="badge">Token Bucket 令牌桶</span>
+    <span class="badge">GetExtendedTcpTable</span>
+    <span class="badge">Windows Service</span>
+    <span class="badge">WebSocket / STOMP</span>
+    <span class="badge">IPv4 + IPv6</span>
+    <span class="badge">TCP + UDP</span>
+  </div>
+</header>
+
+<!-- ============================================================ -->
+<section>
+<h2><span class="num">1</span>系统架构总览</h2>
+
+<p>整个限流系统由<b>后端服务器</b>、<b>PC 客户端 (Phoenix)</b>、<b>子进程服务 (zjc_worker)</b> 三个部分协同工作，实现从云端下发限速指令到本地内核级精准限流的完整链路。</p>
+
+<div class="algo-viz" style="margin-top: 24px; text-align: left; padding: 30px 40px;">
+<pre style="font-family: 'Cascadia Code', monospace; font-size: 0.85em; line-height: 2; color: var(--text2);">
+<span style="color:#fb923c">┌──────────────────────────────────────────────────────────────────┐</span>
+<span style="color:#fb923c">│</span>  <b style="color:#38bdf8">后端服务器 (Spring Boot)</b>                                       <span style="color:#fb923c">│</span>
+<span style="color:#fb923c">│</span>  ┌─────────────┐   ┌──────────────┐   ┌────────────────────┐   <span style="color:#fb923c">│</span>
+<span style="color:#fb923c">│</span>  │ Admin 管理页 │──→│ BurstService │──→│ STOMP /topic/pc/   │   <span style="color:#fb923c">│</span>
+<span style="color:#fb923c">│</span>  │  (Vue.js)    │   │  (Redis)     │   │ {pcDeviceId}/shaper│   <span style="color:#fb923c">│</span>
+<span style="color:#fb923c">│</span>  └─────────────┘   └──────────────┘   └─────────┬──────────┘   <span style="color:#fb923c">│</span>
+<span style="color:#fb923c">└────────────────────────────────────────────────────┼─────────────┘</span>
+                                                     │ <span style="color:#facc15">WebSocket</span>
+                                                     ▼
+<span style="color:#818cf8">┌──────────────────────────────────────────────────────────────────┐</span>
+<span style="color:#818cf8">│</span>  <b style="color:#34d399">zjc_worker.exe (Windows Service, Session 0, SYSTEM)</b>             <span style="color:#818cf8">│</span>
+<span style="color:#818cf8">│</span>                                                                  <span style="color:#818cf8">│</span>
+<span style="color:#818cf8">│</span>  ┌──────────────────────┐                                        <span style="color:#818cf8">│</span>
+<span style="color:#818cf8">│</span>  │ STOMP 消息接收       │──→ 解析 TRAFFIC_SHAPE 指令              <span style="color:#818cf8">│</span>
+<span style="color:#818cf8">│</span>  │ action/processName/  │    processName + uploadBps + downloadBps<span style="color:#818cf8">│</span>
+<span style="color:#818cf8">│</span>  │ uploadBps/downloadBps│                                        <span style="color:#818cf8">│</span>
+<span style="color:#818cf8">│</span>  └──────────┬───────────┘                                        <span style="color:#818cf8">│</span>
+<span style="color:#818cf8">│</span>             │ 写入 zjc_shaper.rules 文件                         <span style="color:#818cf8">│</span>
+<span style="color:#818cf8">│</span>             ▼                                                    <span style="color:#818cf8">│</span>
+<span style="color:#818cf8">│</span>  ┌──────────────────────────────────────────────────────────┐    <span style="color:#818cf8">│</span>
+<span style="color:#818cf8">│</span>  │  <b style="color:#f472b6">WinShaper 引擎</b> (进程内线程)                              │    <span style="color:#818cf8">│</span>
+<span style="color:#818cf8">│</span>  │                                                          │    <span style="color:#818cf8">│</span>
+<span style="color:#818cf8">│</span>  │  ┌──────────────┐  ┌──────────┐  ┌───────────────────┐  │    <span style="color:#818cf8">│</span>
+<span style="color:#818cf8">│</span>  │  │ FlowMap 线程  │  │ Rules    │  │ Shape 主循环       │  │    <span style="color:#818cf8">│</span>
+<span style="color:#818cf8">│</span>  │  │ 每秒刷新      │  │ 加载规则 │  │ WinDivert 拦截     │  │    <span style="color:#818cf8">│</span>
+<span style="color:#818cf8">│</span>  │  │ TCP/UDP表     │  │ 进程+速率│  │ Token Bucket 限速  │  │    <span style="color:#818cf8">│</span>
+<span style="color:#818cf8">│</span>  │  └──────────────┘  └──────────┘  └───────────────────┘  │    <span style="color:#818cf8">│</span>
+<span style="color:#818cf8">│</span>  └──────────────────────────────────────────────────────────┘    <span style="color:#818cf8">│</span>
+<span style="color:#818cf8">└──────────────────────────────────────────────────────────────────┘</span>
+                           <span style="color:#facc15">│ WinDivert 内核驱动</span>
+                           ▼
+<span style="color:#ef4444">┌──────────────────────────────────────────────────────────────────┐</span>
+<span style="color:#ef4444">│</span>  <b style="color:#facc15">Windows 网络栈 (NDIS / TCP/IP Stack)</b>                            <span style="color:#ef4444">│</span>
+<span style="color:#ef4444">│</span>  所有 TCP/UDP 数据包在此被 WinDivert 拦截、排队、限速后放行       <span style="color:#ef4444">│</span>
+<span style="color:#ef4444">└──────────────────────────────────────────────────────────────────┘</span>
+</pre>
+</div>
+</section>
+
+<!-- ============================================================ -->
+<section>
+<h2><span class="num">2</span>核心技术栈</h2>
+
+<div class="grid grid-3">
+  <div class="tech-box">
+    <div class="tech-icon">🔧</div>
+    <div class="tech-name">WinDivert</div>
+    <div class="tech-desc">Windows 内核级网络数据包拦截驱动，工作在 NETWORK 层，能捕获所有进出 TCP/UDP 数据包</div>
+  </div>
+  <div class="tech-box">
+    <div class="tech-icon">🪣</div>
+    <div class="tech-name">Token Bucket</div>
+    <div class="tech-desc">令牌桶限速算法，按设定速率匀速生成令牌，包大小不超过令牌数才放行，否则排队等待</div>
+  </div>
+  <div class="tech-box">
+    <div class="tech-icon">🗺️</div>
+    <div class="tech-name">FlowMap</div>
+    <div class="tech-desc">自建哈希表，通过系统 API 定时扫描 TCP/UDP 连接表，建立 网络五元组 → PID 的映射</div>
+  </div>
+  <div class="tech-box">
+    <div class="tech-icon">⚙️</div>
+    <div class="tech-name">Windows Service</div>
+    <div class="tech-desc">zjc_worker 以 NT 服务形式运行在 Session 0 (SYSTEM 账户)，开机自启 + 崩溃自恢复</div>
+  </div>
+  <div class="tech-box">
+    <div class="tech-icon">🌐</div>
+    <div class="tech-name">STOMP over WebSocket</div>
+    <div class="tech-desc">后端通过 STOMP 协议向 PC 子进程推送限速指令，实时双向通信</div>
+  </div>
+  <div class="tech-box">
+    <div class="tech-icon">📡</div>
+    <div class="tech-name">GetExtendedTcpTable</div>
+    <div class="tech-desc">Windows IP Helper API，获取系统所有 TCP/UDP 连接及其所属进程 PID</div>
+  </div>
+</div>
+</section>
+
+<!-- ============================================================ -->
+<section>
+<h2><span class="num">3</span>完整限流流程</h2>
+
+<div class="flow">
+
+  <div class="flow-step">
+    <div class="flow-line"></div>
+    <div class="flow-content">
+      <div class="label">Step 1 — 后端下发指令</div>
+      <div class="title">管理员在 Web 页面发起限速</div>
+      <div class="desc">
+        管理员在 Vue.js 后台选择目标设备，填写进程名 (如 <span class="tag-inline">CefSharp.BrowserSubprocess</span>)、上传限速 (10KB/s)、下载限速 (10KB/s)、持续时间。
+        后端 <span class="tag-inline">BurstService</span> 通过 STOMP 推送到 <span class="tag-inline">/topic/pc/{pcDeviceId}/shaper</span>。
+      </div>
+<div class="code-block"><span class="cm">// 后端推送的 JSON 指令</span>
+{
+  <span class="st">"action"</span>: <span class="st">"TRAFFIC_SHAPE"</span>,
+  <span class="st">"processName"</span>: <span class="st">"CefSharp.BrowserSubprocess"</span>,
+  <span class="st">"uploadBps"</span>: <span class="num">10240</span>,     <span class="cm">// 10 KB/s = 10240 bytes/sec</span>
+  <span class="st">"downloadBps"</span>: <span class="num">10240</span>,
+  <span class="st">"durationSec"</span>: <span class="num">30</span>,
+  <span class="st">"taskId"</span>: <span class="st">"task_20260412_001723_940"</span>
+}</div>
+    </div>
+  </div>
+
+  <div class="flow-step">
+    <div class="flow-line"></div>
+    <div class="flow-content">
+      <div class="label">Step 2 — zjc_worker 接收并解析</div>
+      <div class="title">子进程服务收到 STOMP 消息</div>
+      <div class="desc">
+        zjc_worker (Windows Service) 通过 WinHTTP WebSocket 保持长连接，
+        订阅了 <span class="tag-inline">/topic/pc/{pcDeviceId}/shaper</span>。
+        收到消息后解析 JSON，提取进程名和速率参数。
+      </div>
+    </div>
+  </div>
+
+  <div class="flow-step">
+    <div class="flow-line"></div>
+    <div class="flow-content">
+      <div class="label">Step 3 — 写入规则文件</div>
+      <div class="title">生成 zjc_shaper.rules 规则文件</div>
+      <div class="desc">
+        将限速参数写入临时规则文件，格式为每行一条规则：
+      </div>
+<div class="code-block"><span class="cm">// zjc_shaper.rules 文件内容</span>
+<span class="st">CefSharp.BrowserSubprocess.exe</span>  <span class="num">10240</span>  <span class="num">10240</span>
+<span class="cm">// 格式: 进程名  上传限速(B/s)  下载限速(B/s)</span></div>
+    </div>
+  </div>
+
+  <div class="flow-step">
+    <div class="flow-line"></div>
+    <div class="flow-content">
+      <div class="label">Step 4 — 启动 WinShaper 引擎</div>
+      <div class="title">初始化三大核心组件</div>
+      <div class="desc">
+        WinShaper 引擎在 zjc_worker 进程内以独立线程运行，按顺序初始化：
+      </div>
+      <div class="grid grid-3" style="margin-top: 12px">
+        <div style="background:var(--card2); padding:12px; border-radius:8px; text-align:center">
+          <div style="color:var(--accent3); font-weight:700">① FlowMap 线程</div>
+          <div style="font-size:0.85em; color:var(--text2); margin-top:4px">启动后台线程每 1 秒刷新网络连接→PID 映射表</div>
+        </div>
+        <div style="background:var(--card2); padding:12px; border-radius:8px; text-align:center">
+          <div style="color:var(--accent4); font-weight:700">② Rules 加载</div>
+          <div style="font-size:0.85em; color:var(--text2); margin-top:4px">从规则文件读取进程名和速率限制</div>
+        </div>
+        <div style="background:var(--card2); padding:12px; border-radius:8px; text-align:center">
+          <div style="color:var(--accent5); font-weight:700">③ Shape 主循环</div>
+          <div style="font-size:0.85em; color:var(--text2); margin-top:4px">打开 WinDivert NETWORK 层，开始拦截数据包</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="flow-step">
+    <div class="flow-line"></div>
+    <div class="flow-content">
+      <div class="label">Step 5 — WinDivert 拦截数据包</div>
+      <div class="title">内核驱动捕获所有 TCP/UDP 数据包</div>
+      <div class="desc">
+        WinDivert 驱动在 Windows 网络栈 NETWORK 层注册过滤器 <span class="tag-inline">"tcp or udp"</span>，
+        <b>所有</b>进出的 TCP 和 UDP 数据包都会被拦截到用户态，程序处理完后再决定放行或排队。
+      </div>
+      <div class="layer-stack" style="margin-top: 16px">
+        <div class="layer layer-app">应用层 (CefSharp, Chrome, ...)<span class="tag">send()/recv()</span></div>
+        <div class="layer-arrow">↕</div>
+        <div class="layer layer-sock">Winsock / AFD 层<span class="tag">Socket API</span></div>
+        <div class="layer-arrow">↕</div>
+        <div class="layer layer-net" style="border-width:3px; box-shadow: 0 0 20px rgba(52,211,153,0.3)">
+          🎯 <b>WinDivert NETWORK 层 — 在此拦截!</b><span class="tag">filter: tcp or udp</span>
+        </div>
+        <div class="layer-arrow">↕</div>
+        <div class="layer layer-drv">NDIS 驱动层<span class="tag">网卡驱动</span></div>
+        <div class="layer-arrow">↕</div>
+        <div class="layer layer-hw">物理网络 (Ethernet / WiFi)<span class="tag">硬件</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="flow-step">
+    <div class="flow-line"></div>
+    <div class="flow-content">
+      <div class="label">Step 6 — 数据包归属识别</div>
+      <div class="title">通过 FlowMap 查找数据包属于哪个进程</div>
+      <div class="desc">
+        WinDivert NETWORK 层拦截到的数据包<b>不带进程信息</b>（只有 IP + 端口），
+        需要通过 FlowMap 反查 PID。完整流程：
+      </div>
+      <div style="margin: 12px 0;">
+        <div class="highlight blue">
+          <b>1. 解析数据包</b> → 提取 IP 头 (SrcAddr/DstAddr) + 端口号 (SrcPort/DstPort) + 协议 (TCP/UDP)
+        </div>
+        <div class="highlight green">
+          <b>2. 构造查询 Key</b> → 根据方向 (Outbound/Inbound) 确定 local/remote 地址和端口
+        </div>
+        <div class="highlight">
+          <b>3. 哈希查表</b> → TCP: 完整五元组匹配 (localIP:port ↔ remoteIP:port + proto)；UDP: 仅匹配本地端口
+        </div>
+        <div class="highlight" style="border-color: var(--accent5); background: rgba(244,114,182,0.08)">
+          <b>4. 获得 PID</b> → 再通过 <span class="tag-inline">QueryFullProcessImageNameW(pid)</span> 获取进程 .exe 名称
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="flow-step">
+    <div class="flow-line"></div>
+    <div class="flow-content">
+      <div class="label">Step 7 — 规则匹配</div>
+      <div class="title">进程名模糊匹配限速规则</div>
+      <div class="desc">
+        拿到进程 .exe 名称后，与规则列表逐一比对（大小写不敏感 + .exe 后缀自动补全/去除）。
+        匹配成功则获得该规则的 <span class="tag-inline">up_bps</span> 和 <span class="tag-inline">dn_bps</span> 限速值。
+      </div>
+<div class="code-block"><span class="cm">// 模糊匹配示例</span>
+<span class="st">"CefSharp.BrowserSubprocess"</span>     → 匹配 <span class="st">"CefSharp.BrowserSubprocess.exe"</span> ✅
+<span class="st">"CefSharp.BrowserSubprocess.exe"</span> → 匹配 <span class="st">"CefSharp.BrowserSubprocess"</span>     ✅
+<span class="st">"chrome.EXE"</span>                     → 匹配 <span class="st">"Chrome.exe"</span>                    ✅ <span class="cm">(不区分大小写)</span></div>
+    </div>
+  </div>
+
+  <div class="flow-step">
+    <div class="flow-line"></div>
+    <div class="flow-content">
+      <div class="label">Step 8 — Token Bucket 限速</div>
+      <div class="title">令牌桶算法决定放行或排队</div>
+      <div class="desc">
+        每个规则维护<b>上传 + 下载</b>两个独立的令牌桶。数据包到来时：
+      </div>
+      <div style="margin: 12px 0;">
+        <div class="highlight green">
+          <b>令牌足够 (tokens ≥ packet_size)</b> → 扣减令牌，<b>立即放行</b> (WinDivertSend)
+        </div>
+        <div class="highlight red">
+          <b>令牌不足 (tokens &lt; packet_size)</b> → <b>排入等待队列</b>，等下次 drain 循环令牌补充后再放行
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="flow-step">
+    <div class="flow-line" style="background: var(--accent3)"></div>
+    <div class="flow-content" style="border-color: var(--accent3)">
+      <div class="label" style="color: var(--accent3)">Result — 限速生效</div>
+      <div class="title">目标进程网速被精确控制</div>
+      <div class="desc">
+        不匹配规则的数据包直接放行 (零延迟)，匹配的数据包被令牌桶精准控速。
+        效果等同于 NetLimiter 等商业软件，但完全自研、可远程控制。
+      </div>
+    </div>
+  </div>
+
+</div>
+</section>
+
+<!-- ============================================================ -->
+<section>
+<h2><span class="num">4</span>Token Bucket 令牌桶算法详解</h2>
+
+<p>令牌桶是流量整形的核心。它以恒定速率产生"令牌"（每个令牌代表 1 字节的发送配额），数据包必须消耗足够令牌才能放行。</p>
+
+<div class="card" style="margin-top: 20px">
+  <div class="card-title">算法参数</div>
+  <table>
+    <tr><th>参数</th><th>含义</th><th>本系统取值</th></tr>
+    <tr><td><span class="tag-inline">rate_bps</span></td><td>令牌产生速率 (bytes/sec)</td><td>由后端下发，如 10240 = 10KB/s</td></tr>
+    <tr><td><span class="tag-inline">tokens</span></td><td>当前可用令牌数 (bytes)</td><td>实时计算，初始 = rate_bps</td></tr>
+    <tr><td><span class="tag-inline">cap</span></td><td>令牌桶容量上限</td><td>rate_bps × 2 (允许小突发)</td></tr>
+    <tr><td><span class="tag-inline">last_qpc</span></td><td>上次补充时间戳</td><td>QueryPerformanceCounter 高精度计时</td></tr>
+  </table>
+</div>
+
+<div class="grid grid-2" style="margin-top: 16px">
+  <div class="card">
+    <div class="card-title">bucket_refill — 令牌补充</div>
+<div class="code-block"><span class="kw">void</span> <span class="fn">bucket_refill</span>(<span class="type">Bucket</span> *b, <span class="type">int64_t</span> rate_bps) {
+    <span class="type">double</span> dt = (now - b->last_qpc) / frequency;
+    b->tokens += dt * rate_bps;
+    <span class="cm">// 上限 = rate × 2 (防止空闲后突发过大)</span>
+    <span class="kw">if</span> (b->tokens > rate_bps * <span class="num">2.0</span>)
+        b->tokens = rate_bps * <span class="num">2.0</span>;
+}</div>
+    <p style="font-size:0.88em; color:var(--text2); margin-top:8px">
+      每次数据包到来时计算距上次的时间差 <code>dt</code>，
+      按 <code>dt × rate</code> 补充令牌。
+      使用 <code>QueryPerformanceCounter</code> 实现微秒级精度。
+    </p>
+  </div>
+  <div class="card">
+    <div class="card-title">bucket_try — 令牌消费</div>
+<div class="code-block"><span class="type">BOOL</span> <span class="fn">bucket_try</span>(<span class="type">Bucket</span> *b, <span class="type">int64_t</span> rate, <span class="type">UINT</span> nbytes) {
+    <span class="fn">bucket_refill</span>(b, rate);
+    <span class="kw">if</span> (b->tokens >= nbytes) {
+        b->tokens -= nbytes; <span class="cm">// 扣减</span>
+        <span class="kw">return</span> <span class="num">TRUE</span>;  <span class="cm">// 放行</span>
+    }
+    <span class="kw">return</span> <span class="num">FALSE</span>;     <span class="cm">// 排队</span>
+}</div>
+    <p style="font-size:0.88em; color:var(--text2); margin-top:8px">
+      尝试消费 <code>nbytes</code> 个令牌。
+      足够则扣减并立即放行数据包；
+      不足则返回 FALSE，数据包进入排队等待。
+    </p>
+  </div>
+</div>
+
+<div class="highlight" style="margin-top: 16px">
+  <b>为什么上限是 rate × 2？</b> 允许短暂的突发流量（如 TCP 慢启动），但不会偏离限速太多。
+  如果桶容量 = rate × 1，TCP 会频繁出现排队延迟导致性能下降。
+</div>
+</section>
+
+<!-- ============================================================ -->
+<section>
+<h2><span class="num">5</span>FlowMap 连接映射机制</h2>
+
+<p>WinDivert 在 NETWORK 层拦截数据包时<b>不包含进程信息</b>（只有 IP + 端口），
+需要一种机制将 <b>网络五元组 (SrcIP, SrcPort, DstIP, DstPort, Protocol)</b> 反向映射到 <b>进程 PID</b>。</p>
+
+<div class="card" style="margin-top: 16px">
+  <div class="card-title">为什么不用 WinDivert SOCKET 层？</div>
+  <div class="highlight red">
+    <b>跨 Session 限制：</b>zjc_worker 作为 Windows Service 运行在 <b>Session 0 (SYSTEM)</b>，
+    而用户进程 (如 CefSharp) 运行在 <b>Session 1+</b>。WinDivert SOCKET 层<b>只能捕获同 Session 的连接事件</b>，
+    导致 99% 数据包查不到 PID (no_pid 极高)。
+  </div>
+  <div class="highlight green">
+    <b>解决方案：</b>使用 Windows IP Helper API
+    (<span class="tag-inline">GetExtendedTcpTable</span> / <span class="tag-inline">GetExtendedUdpTable</span>)
+    定时扫描系统全局连接表，<b>不受 Session 隔离限制</b>。
+  </div>
+</div>
+
+<h3>FlowMap 架构</h3>
+<div class="grid grid-2">
+  <div class="card">
+    <div class="card-title">TCP 映射 — 完整五元组</div>
+<div class="code-block"><span class="kw">struct</span> <span class="type">FNode</span> {
+    <span class="type">UINT32</span> local[<span class="num">4</span>];    <span class="cm">// 本地 IP (IPv4映射到IPv6格式)</span>
+    <span class="type">UINT32</span> remote[<span class="num">4</span>];   <span class="cm">// 远端 IP</span>
+    <span class="type">UINT16</span> local_port;
+    <span class="type">UINT16</span> remote_port;
+    <span class="type">DWORD</span>  pid;         <span class="cm">// 所属进程 PID</span>
+};
+<span class="cm">// 哈希表: 8192 个桶，链表法解决冲突</span></div>
+    <p style="font-size:0.88em; color:var(--text2); margin-top:8px">
+      TCP 有明确的连接状态，系统表包含完整的本地/远端地址+端口，可精确匹配。
+      只录入 <b>ESTABLISHED</b> 状态的连接。
+    </p>
+  </div>
+  <div class="card">
+    <div class="card-title">UDP 映射 — 仅本地端口</div>
+<div class="code-block"><span class="kw">struct</span> <span class="type">UNode</span> {
+    <span class="type">UINT16</span> local_port;  <span class="cm">// 本地端口</span>
+    <span class="type">DWORD</span>  pid;         <span class="cm">// 所属进程 PID</span>
+};
+<span class="cm">// 哈希表: 4096 个桶</span>
+<span class="cm">// UDP 系统表没有远端地址信息，只能按本地端口匹配</span></div>
+    <p style="font-size:0.88em; color:var(--text2); margin-top:8px">
+      UDP 无连接状态，系统表只有本地绑定端口，因此用<b>本地端口</b>作为唯一 key。
+      同端口的所有 UDP 流量归属同一进程。
+    </p>
+  </div>
+</div>
+
+<h3>刷新机制</h3>
+<div class="card">
+  <div class="card-title">flowmap_socket_thread — 每秒全量刷新</div>
+<div class="code-block"><span class="type">DWORD</span> <span class="kw">WINAPI</span> <span class="fn">flowmap_socket_thread</span>(<span class="type">LPVOID</span> arg) {
+    <span class="kw">while</span> (!g_stop) {
+        <span class="fn">refresh_from_system_tables</span>();  <span class="cm">// 清空旧表 + 重建</span>
+        <span class="fn">Sleep</span>(<span class="num">1000</span>);                    <span class="cm">// 每 1 秒刷新一次</span>
+    }
+}
+
+<span class="kw">void</span> <span class="fn">refresh_from_system_tables</span>() {
+    <span class="fn">map_clear_all</span>();                   <span class="cm">// 清空哈希表</span>
+    <span class="fn">GetExtendedTcpTable</span>(AF_INET);     <span class="cm">// IPv4 TCP</span>
+    <span class="fn">GetExtendedUdpTable</span>(AF_INET);     <span class="cm">// IPv4 UDP</span>
+    <span class="fn">GetExtendedTcpTable</span>(AF_INET6);    <span class="cm">// IPv6 TCP</span>
+    <span class="fn">GetExtendedUdpTable</span>(AF_INET6);    <span class="cm">// IPv6 UDP</span>
+}</div>
+</div>
+</section>
+
+<!-- ============================================================ -->
+<section>
+<h2><span class="num">6</span>Shape 主循环 — 每个数据包的处理流程</h2>
+
+<p>这是整个限流系统的核心循环，每一个进出网卡的 TCP/UDP 数据包都会经过这段逻辑：</p>
+
+<div class="card" style="margin-top: 16px">
+<div class="code-block" style="font-size: 0.84em"><span class="kw">while</span> (!g_stop) {
+    <span class="cm">// ① 从内核获取一个数据包 (阻塞等待)</span>
+    <span class="fn">WinDivertRecv</span>(g_net, pkt, &plen, &addr);
+
+    <span class="cm">// ② 解析 IP 头 + TCP/UDP 头，提取端口号</span>
+    <span class="fn">WinDivertHelperParsePacket</span>(pkt, plen, &ip, &ip6, &tcp, &udp);
+
+    <span class="cm">// ③ 通过 FlowMap 查找此数据包属于哪个 PID</span>
+    pid = <span class="fn">flowmap_lookup_ipv4</span>(outbound, ip, src_port, dst_port, proto);
+    <span class="kw">if</span> (!pid) { <span class="fn">pkt_forward</span>(); <span class="kw">continue</span>; }   <span class="cm">// 找不到 PID → 直接放行</span>
+
+    <span class="cm">// ④ PID → 进程名 → 匹配限速规则</span>
+    ri = <span class="fn">rules_match_pid</span>(pid);
+    <span class="kw">if</span> (ri < <span class="num">0</span>) { <span class="fn">pkt_forward</span>(); <span class="kw">continue</span>; }   <span class="cm">// 不在规则中 → 直接放行</span>
+
+    <span class="cm">// ⑤ Token Bucket 判断</span>
+    <span class="kw">if</span> (<span class="fn">bucket_try</span>(bucket, rate, plen)) {
+        <span class="fn">pkt_forward</span>();     <span class="cm">// 令牌足够 → 立即放行</span>
+    } <span class="kw">else</span> {
+        <span class="fn">pkt_enqueue</span>();     <span class="cm">// 令牌不足 → 排队等待</span>
+    }
+
+    <span class="cm">// ⑥ 尝试释放所有规则的排队数据包 (令牌可能已补充)</span>
+    <span class="fn">drain_all</span>(h, <span class="num">64</span>);
+}</div>
+</div>
+
+<h3>运行时统计 (每 5 秒输出到 zjc_shaper.log)</h3>
+
+<div class="stat-grid">
+  <div class="stat-item">
+    <div class="stat-val" style="color: var(--text)">total</div>
+    <div class="stat-label">拦截的总数据包数</div>
+  </div>
+  <div class="stat-item">
+    <div class="stat-val" style="color: var(--yellow)">no_pid</div>
+    <div class="stat-label">FlowMap 中找不到 PID</div>
+  </div>
+  <div class="stat-item">
+    <div class="stat-val" style="color: var(--text2)">no_rule</div>
+    <div class="stat-label">PID 不匹配任何规则</div>
+  </div>
+  <div class="stat-item">
+    <div class="stat-val" style="color: var(--accent3)">shaped</div>
+    <div class="stat-label">被限速处理的数据包</div>
+  </div>
+  <div class="stat-item">
+    <div class="stat-val" style="color: var(--accent)">passed</div>
+    <div class="stat-label">匹配规则但限速=0 (无限)</div>
+  </div>
+</div>
+
+<div class="highlight blue">
+  <b>诊断技巧：</b>如果 <code>no_pid</code> 占比过高 (>50%)，说明 FlowMap 映射有问题；
+  如果 <code>shaped = 0</code>，说明进程名匹配失败或目标进程无流量。
+</div>
+</section>
+
+<!-- ============================================================ -->
+<section>
+<h2><span class="num">7</span>数据包排队与释放机制</h2>
+
+<p>当令牌不足时，数据包不会被丢弃，而是进入<b>内存队列</b>等待令牌补充后再发送，保证不丢包。</p>
+
+<div class="card">
+<div class="card-title">排队结构 — 每个规则独立</div>
+<div class="code-block"><span class="kw">typedef struct</span> {
+    <span class="type">Bucket</span>  up, dn;       <span class="cm">// 上传 + 下载各一个令牌桶</span>
+    <span class="type">PktQ</span>   *uq_head/tail; <span class="cm">// 上传方向排队链表</span>
+    <span class="type">PktQ</span>   *dq_head/tail; <span class="cm">// 下载方向排队链表</span>
+    <span class="type">size_t</span>  uq_bytes;     <span class="cm">// 上传队列总字节数</span>
+    <span class="type">size_t</span>  dq_bytes;     <span class="cm">// 下载队列总字节数</span>
+} <span class="type">RuleState</span>;
+
+<span class="cm">// 单方向队列上限 = 4 MB，防止内存溢出</span>
+<span class="cm">// 超过上限的包直接放行 (降级为不限速，但不丢包)</span></div>
+</div>
+
+<div class="card" style="margin-top: 12px">
+<div class="card-title">drain_all — 释放排队数据包</div>
+<p style="margin-bottom: 10px; color: var(--text2); font-size: 0.92em;">
+每次处理完一个新数据包后，都会尝试把所有规则的排队包释放出去（令牌可能在这段时间内补充了）：
+</p>
+<div class="code-block"><span class="kw">for</span> (每个规则 i) {
+    <span class="kw">while</span> (队列不空 && budget > <span class="num">0</span>) {
+        <span class="kw">if</span> (上传队头 && <span class="fn">bucket_try</span>(up, 包大小)) → <span class="fn">WinDivertSend</span>() → 出队;
+        <span class="kw">if</span> (下载队头 && <span class="fn">bucket_try</span>(dn, 包大小)) → <span class="fn">WinDivertSend</span>() → 出队;
+    }
+}</div>
+</div>
+</section>
+
+<!-- ============================================================ -->
+<section>
+<h2><span class="num">8</span>与商业软件 (NetLimiter) 对比</h2>
+
+<table>
+  <tr>
+    <th>特性</th>
+    <th>NetLimiter</th>
+    <th>我们的方案</th>
+  </tr>
+  <tr>
+    <td>限速原理</td>
+    <td>内核驱动 + 令牌桶 (推测)</td>
+    <td>WinDivert NETWORK 层 + Token Bucket</td>
+  </tr>
+  <tr>
+    <td>进程识别</td>
+    <td>内核回调 (WFP callout)</td>
+    <td>GetExtendedTcpTable/UdpTable 定时扫描</td>
+  </tr>
+  <tr>
+    <td>协议支持</td>
+    <td>TCP + UDP + IPv4 + IPv6</td>
+    <td>TCP + UDP + IPv4 + IPv6</td>
+  </tr>
+  <tr>
+    <td>远程控制</td>
+    <td>仅本地 GUI</td>
+    <td style="color: var(--accent3)"><b>云端 WebSocket 远程下发</b></td>
+  </tr>
+  <tr>
+    <td>批量管理</td>
+    <td>单机</td>
+    <td style="color: var(--accent3)"><b>后台一键广播到所有在线设备</b></td>
+  </tr>
+  <tr>
+    <td>定时任务</td>
+    <td>无</td>
+    <td style="color: var(--accent3)"><b>支持定时调度限速</b></td>
+  </tr>
+  <tr>
+    <td>部署方式</td>
+    <td>手动安装</td>
+    <td>Windows Service 自动安装 + 崩溃自恢复</td>
+  </tr>
+  <tr>
+    <td>更新方式</td>
+    <td>手动升级</td>
+    <td>覆盖文件后主程序自动检测更新</td>
+  </tr>
+</table>
+</section>
+
+<!-- ============================================================ -->
+<section>
+<h2><span class="num">9</span>涉及的 Windows API 清单</h2>
+
+<div class="grid grid-2">
+  <div class="card">
+    <div class="card-title" style="color: var(--accent4)">网络 & 数据包</div>
+    <ul>
+      <li><span class="tag-inline">WinDivertOpen</span> — 打开内核过滤器</li>
+      <li><span class="tag-inline">WinDivertRecv</span> — 从内核接收拦截的数据包</li>
+      <li><span class="tag-inline">WinDivertSend</span> — 将处理后的数据包放回网络栈</li>
+      <li><span class="tag-inline">WinDivertHelperParsePacket</span> — 解析 IP/TCP/UDP 头</li>
+      <li><span class="tag-inline">GetExtendedTcpTable</span> — 获取全系统 TCP 连接表 (含 PID)</li>
+      <li><span class="tag-inline">GetExtendedUdpTable</span> — 获取全系统 UDP 端口表 (含 PID)</li>
+    </ul>
+  </div>
+  <div class="card">
+    <div class="card-title" style="color: var(--accent5)">进程 & 系统</div>
+    <ul>
+      <li><span class="tag-inline">QueryFullProcessImageNameW</span> — 通过 PID 获取 .exe 完整路径</li>
+      <li><span class="tag-inline">OpenProcess</span> — 打开进程句柄</li>
+      <li><span class="tag-inline">QueryPerformanceCounter</span> — 高精度计时 (令牌桶)</li>
+      <li><span class="tag-inline">QueryPerformanceFrequency</span> — 获取计时器频率</li>
+      <li><span class="tag-inline">CreateServiceW</span> — 注册 Windows 服务</li>
+      <li><span class="tag-inline">SERVICE_FAILURE_ACTIONS</span> — 服务崩溃自动恢复</li>
+    </ul>
+  </div>
+</div>
+</section>
+
+<!-- ============================================================ -->
+<section>
+<h2><span class="num">10</span>源码文件索引</h2>
+
+<table>
+  <tr><th>文件</th><th>职责</th><th>核心知识点</th></tr>
+  <tr>
+    <td><span class="tag-inline">shape.c</span></td>
+    <td>主拦截循环 + Token Bucket + 排队/释放</td>
+    <td>WinDivert NETWORK / Token Bucket / 数据包队列</td>
+  </tr>
+  <tr>
+    <td><span class="tag-inline">flowmap.c</span></td>
+    <td>网络连接 → PID 映射表</td>
+    <td>GetExtendedTcpTable / 哈希表 / 定时刷新线程</td>
+  </tr>
+  <tr>
+    <td><span class="tag-inline">procutil.c</span></td>
+    <td>PID → 进程名 + 模糊匹配</td>
+    <td>QueryFullProcessImageNameW / 大小写无关比较</td>
+  </tr>
+  <tr>
+    <td><span class="tag-inline">rules.h/c</span></td>
+    <td>规则加载 (进程名 + 上下行限速)</td>
+    <td>规则文件解析</td>
+  </tr>
+  <tr>
+    <td><span class="tag-inline">winshaper_runner.c</span></td>
+    <td>WinShaper 入口 + 线程编排</td>
+    <td>线程管理 / 日志</td>
+  </tr>
+  <tr>
+    <td><span class="tag-inline">zjc_worker.cpp</span></td>
+    <td>Windows Service 主体 + STOMP 通信</td>
+    <td>Windows Service / WebSocket / STOMP</td>
+  </tr>
+</table>
+</section>
+
+<footer style="text-align: center; padding: 40px 0; border-top: 1px solid var(--border); color: var(--text2); font-size: 0.9em;">
+  Traffic Shaping Architecture Document &nbsp;|&nbsp; Generated 2026-04-12
+</footer>
+
+</div>
+</body>
+</html>

@@ -1,0 +1,250 @@
+﻿<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>边缘节点播放测试</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #1a1a2e;
+            color: #eee;
+        }
+        h1 { color: #00d9ff; }
+        .player-container {
+            display: flex;
+            gap: 20px;
+            flex-wrap: wrap;
+        }
+        .player-box {
+            flex: 1;
+            min-width: 400px;
+            background: #16213e;
+            padding: 15px;
+            border-radius: 10px;
+        }
+        video {
+            width: 100%;
+            background: #000;
+            border-radius: 5px;
+        }
+        .url-input {
+            width: 100%;
+            padding: 10px;
+            margin: 10px 0;
+            background: #0f3460;
+            border: 1px solid #00d9ff;
+            color: #fff;
+            border-radius: 5px;
+        }
+        button {
+            padding: 10px 20px;
+            background: #00d9ff;
+            border: none;
+            color: #000;
+            cursor: pointer;
+            border-radius: 5px;
+            margin-right: 10px;
+        }
+        button:hover { background: #00b8d4; }
+        .status {
+            margin-top: 10px;
+            padding: 10px;
+            background: #0f3460;
+            border-radius: 5px;
+            font-size: 12px;
+        }
+        .success { color: #4caf50; }
+        .error { color: #f44336; }
+    </style>
+</head>
+<body>
+<h1>🎬 CDN边缘节点播放测试</h1>
+
+<div class="player-container">
+    <!-- HTTP-FLV 播放器 -->
+    <div class="player-box">
+        <h3>📺 HTTP-FLV 播放</h3>
+        <input type="text" id="flvUrl" class="url-input"
+               value="http://103.39.64.61:7001/tenantA/VID_F9D6FA3358359284F5034C6BE48C.flv">
+        <button onclick="playFlv()">播放 FLV</button>
+        <button onclick="stopFlv()">停止</button>
+        <video id="flvVideo" controls muted></video>
+        <div id="flvStatus" class="status">等待播放...</div>
+    </div>
+
+    <!-- WebRTC 播放器 -->
+    <div class="player-box">
+        <h3>📡 WebRTC 播放</h3>
+        <input type="text" id="webrtcUrl" class="url-input"
+               value="webrtc://103.39.64.61/tenantA/VID_F9D6FA3358359284F5034C6BE48C">
+        <button onclick="playWebRTC()">播放 WebRTC</button>
+        <button onclick="stopWebRTC()">停止</button>
+        <video id="webrtcVideo" controls muted autoplay></video>
+        <div id="webrtcStatus" class="status">等待播放...</div>
+    </div>
+</div>
+
+<hr style="margin: 30px 0; border-color: #333;">
+
+<h3>📊 对比测试（源站 vs 边缘）</h3>
+<div class="player-container">
+    <div class="player-box">
+        <h4>源站 (171.80.4.72)</h4>
+        <input type="text" id="originUrl" class="url-input"
+               value="webrtc://171.80.4.72/tenantA/VID_F9D6FA3358359284F5034C6BE48C">
+        <button onclick="playOrigin()">播放源站</button>
+        <video id="originVideo" controls muted autoplay></video>
+        <div id="originStatus" class="status">等待播放...</div>
+    </div>
+
+    <div class="player-box">
+        <h4>边缘节点 (103.39.64.61)</h4>
+        <input type="text" id="edgeUrl" class="url-input"
+               value="webrtc://103.39.64.61/tenantA/VID_F9D6FA3358359284F5034C6BE48C">
+        <button onclick="playEdge()">播放边缘</button>
+        <video id="edgeVideo" controls muted autoplay></video>
+        <div id="edgeStatus" class="status">等待播放...</div>
+    </div>
+</div>
+
+<!-- flv.js -->
+<script src="https://cdn.jsdelivr.net/npm/flv.js@1.6.2/dist/flv.min.js"></script>
+
+<script>
+    let flvPlayer = null;
+    let webrtcPc = null;
+    let originPc = null;
+    let edgePc = null;
+
+    // HTTP-FLV 播放
+    function playFlv() {
+        stopFlv();
+        const url = document.getElementById('flvUrl').value;
+        const video = document.getElementById('flvVideo');
+        const status = document.getElementById('flvStatus');
+
+        if (flvjs.isSupported()) {
+            flvPlayer = flvjs.createPlayer({
+                type: 'flv',
+                url: url,
+                isLive: true
+            });
+            flvPlayer.attachMediaElement(video);
+            flvPlayer.load();
+            flvPlayer.play();
+
+            flvPlayer.on(flvjs.Events.ERROR, (e) => {
+                status.innerHTML = `<span class="error">❌ 错误: ${e}</span>`;
+            });
+            flvPlayer.on(flvjs.Events.LOADING_COMPLETE, () => {
+                status.innerHTML = '<span class="success">✅ 加载完成</span>';
+            });
+            status.innerHTML = '<span class="success">▶️ 正在播放...</span>';
+        } else {
+            status.innerHTML = '<span class="error">❌ 浏览器不支持 flv.js</span>';
+        }
+    }
+
+    function stopFlv() {
+        if (flvPlayer) {
+            flvPlayer.pause();
+            flvPlayer.unload();
+            flvPlayer.detachMediaElement();
+            flvPlayer.destroy();
+            flvPlayer = null;
+        }
+    }
+
+    // WebRTC 播放
+    async function playWebRTC() {
+        const url = document.getElementById('webrtcUrl').value;
+        const video = document.getElementById('webrtcVideo');
+        const status = document.getElementById('webrtcStatus');
+        webrtcPc = await startWebRTC(url, video, status);
+    }
+
+    function stopWebRTC() {
+        if (webrtcPc) {
+            webrtcPc.close();
+            webrtcPc = null;
+        }
+    }
+
+    // 源站 WebRTC
+    async function playOrigin() {
+        const url = document.getElementById('originUrl').value;
+        const video = document.getElementById('originVideo');
+        const status = document.getElementById('originStatus');
+        originPc = await startWebRTC(url, video, status);
+    }
+
+    // 边缘 WebRTC
+    async function playEdge() {
+        const url = document.getElementById('edgeUrl').value;
+        const video = document.getElementById('edgeVideo');
+        const status = document.getElementById('edgeStatus');
+        edgePc = await startWebRTC(url, video, status);
+    }
+
+    // 通用 WebRTC 播放函数
+    async function startWebRTC(webrtcUrl, videoElement, statusElement) {
+        try {
+            statusElement.innerHTML = '🔄 连接中...';
+
+            // 解析 URL
+            const urlObj = new URL(webrtcUrl.replace('webrtc://', 'http://'));
+            const host = urlObj.host;
+            const app = urlObj.pathname.split('/')[1];
+            const stream = urlObj.pathname.split('/')[2];
+
+            const pc = new RTCPeerConnection();
+
+            pc.ontrack = (event) => {
+                videoElement.srcObject = event.streams[0];
+                statusElement.innerHTML = '<span class="success">✅ 正在播放</span>';
+            };
+
+            pc.oniceconnectionstatechange = () => {
+                if (pc.iceConnectionState === 'failed') {
+                    statusElement.innerHTML = '<span class="error">❌ 连接失败</span>';
+                }
+            };
+
+            pc.addTransceiver('video', { direction: 'recvonly' });
+            pc.addTransceiver('audio', { direction: 'recvonly' });
+
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+
+            const apiUrl = `http://${host}/rtc/v1/play/`;
+            const response = await fetch(apiUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    api: apiUrl,
+                    streamurl: webrtcUrl,
+                    sdp: offer.sdp
+                })
+            });
+
+            const data = await response.json();
+
+            if (data.code !== 0) {
+                throw new Error(data.msg || 'SRS 返回错误');
+            }
+
+            await pc.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp: data.sdp }));
+
+            return pc;
+        } catch (e) {
+            statusElement.innerHTML = `<span class="error">❌ 错误: ${e.message}</span>`;
+            console.error(e);
+            return null;
+        }
+    }
+</script>
+</body>
+</html>

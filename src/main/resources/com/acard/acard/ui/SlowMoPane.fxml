@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?import javafx.scene.control.*?>
+<?import javafx.scene.layout.*?>
+<?import javafx.geometry.*?>
+<AnchorPane xmlns="http://javafx.com/javafx/17" xmlns:fx="http://javafx.com/fxml/1"
+            fx:controller="com.acard.acard.ui.SlowMoPaneController">
+    <children>
+        <!-- 视频承载容器：控制器中注入 SlowMoView -->
+        <!-- ✅ 底部留出空间给操作按钮区域（50px），避免视频覆盖底部操作栏 -->
+        <StackPane fx:id="videoContainer" AnchorPane.topAnchor="2" AnchorPane.leftAnchor="2"
+                   AnchorPane.rightAnchor="2" AnchorPane.bottomAnchor="50" />
+
+        <!-- 底部：帧数显示 + 播放进度条 -->
+        <HBox spacing="10" alignment="CENTER_LEFT" AnchorPane.leftAnchor="8" AnchorPane.rightAnchor="8" AnchorPane.bottomAnchor="8">
+            <!-- 帧数显示：播放帧数/录制帧数 -->
+            <Label fx:id="frameCountLabel" text="0 / 0" prefWidth="150.0" minWidth="150.0" maxWidth="150.0" alignment="CENTER"
+                   style="-fx-background-color: rgba(0,0,0,0.7); -fx-text-fill: #0f0; -fx-font-size: 14px; -fx-font-weight: bold; -fx-padding: 6 10; -fx-background-radius: 6;" />
+            <!-- 播放进度条：可拖动跳转 -->
+            <Slider fx:id="progressSlider" HBox.hgrow="ALWAYS" maxWidth="Infinity" prefHeight="28" 
+                    style="-fx-padding: 0; -fx-background-radius: 4;" />
+            <!-- 速度控制下拉框：1x - 5x，步长0.5 -->
+            <ComboBox fx:id="speedComboBox" prefWidth="100.0" minWidth="100.0" maxWidth="100.0" promptText="速度"
+                      style="-fx-font-size: 13px; -fx-background-radius: 4;" />
+        </HBox>
+    </children>
+</AnchorPane>

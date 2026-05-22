@@ -1,0 +1,179 @@
+================================================================================
+                Windows端 绑定查询接口对接文档
+================================================================================
+
+
+================================================================================
+一、获取控制端绑定的设备列表
+================================================================================
+
+接口地址: GET /api/binding/devices
+调用方: Windows控制端
+需要Token: 否
+
+【请求参数】
+参数              类型      必填    说明
+controlUsername   String    是      控制端账号（Query参数）
+
+【请求示例】
+GET /api/binding/devices?controlUsername=windows001
+
+【成功响应】
+{
+  "devices": [
+    {
+      "bindingId": 1,
+      "deviceUsername": "testuser01",
+      "deviceNickname": "我的iPhone",
+      "deviceId": "A1B2C3D4-E5F6-7890-ABCD-EF1234567890",
+      "online": true,
+      "remark": "客厅设备",
+      "bindTime": "2024-12-14T10:30:00"
+    },
+    {
+      "bindingId": 2,
+      "deviceUsername": "testuser02",
+      "deviceNickname": "备用手机",
+      "deviceId": "B2C3D4E5-F6A7-8901-BCDE-F23456789012",
+      "online": false,
+      "remark": "卧室设备",
+      "bindTime": "2024-12-13T15:20:00"
+    }
+  ],
+  "count": 2
+}
+
+【响应字段说明】
+字段                      类型      说明
+devices                   Array     设备列表
+devices[].bindingId       Long      绑定记录ID
+devices[].deviceUsername  String    iOS设备端账号
+devices[].deviceNickname  String    iOS设备端昵称
+devices[].deviceId        String    设备ID
+devices[].online          Boolean   是否在线
+devices[].remark          String    备注（Windows端设置的）
+devices[].bindTime        String    绑定完成时间
+count                     Integer   设备数量
+
+
+================================================================================
+二、批量查询设备在线状态
+================================================================================
+
+接口地址: POST /api/binding/online-status
+Content-Type: application/json
+调用方: Windows控制端
+需要Token: 否
+
+【请求参数】
+字段              类型            必填    说明
+controlUsernames  Array<String>   是      控制端账号列表
+
+【请求示例】
+{
+  "controlUsernames": ["windows001", "windows002"]
+}
+
+【成功响应】
+{
+  "list": [
+    {
+      "controlUsername": "windows001",
+      "deviceUsername": "testuser01",
+      "deviceNickname": "我的iPhone",
+      "deviceId": "A1B2C3D4-E5F6-7890-ABCD-EF1234567890",
+      "online": true,
+      "bound": true,
+      "bindingId": 1,
+      "remark": "客厅设备",
+      "message": "设备在线"
+    },
+    {
+      "controlUsername": "windows001",
+      "deviceUsername": "testuser02",
+      "deviceNickname": "备用手机",
+      "deviceId": "B2C3D4E5-F6A7-8901-BCDE-F23456789012",
+      "online": false,
+      "bound": true,
+      "bindingId": 2,
+      "remark": "卧室设备",
+      "message": "设备离线"
+    },
+    {
+      "controlUsername": "windows002",
+      "deviceUsername": null,
+      "deviceNickname": null,
+      "deviceId": null,
+      "online": false,
+      "bound": false,
+      "message": "未绑定设备"
+    }
+  ],
+  "count": 3
+}
+
+【响应字段说明】
+字段                    类型      说明
+list                    Array     状态列表
+list[].controlUsername  String    控制端账号
+list[].deviceUsername   String    iOS设备端账号（未绑定时为null）
+list[].deviceNickname   String    iOS设备端昵称（未绑定时为null）
+list[].deviceId         String    设备ID（未绑定时为null）
+list[].online           Boolean   是否在线
+list[].bound            Boolean   是否已绑定
+list[].bindingId        Long      绑定记录ID（未绑定时无此字段）
+list[].remark           String    备注（Windows端设置的）
+list[].message          String    状态描述
+count                   Integer   记录数量
+
+
+================================================================================
+三、获取设备端的绑定列表（iOS设备端查询绑定了哪些Windows控制端）
+================================================================================
+
+接口地址: GET /api/binding/list
+调用方: iOS设备端
+需要Token: 是（Bearer Token）
+
+【请求头】
+Authorization: Bearer <token>
+
+【请求示例】
+GET /api/binding/list
+
+【成功响应】
+{
+  "bindings": [
+    {
+      "bindingId": 1,
+      "controlUsername": "windows001",
+      "controlNickname": "我的电脑",
+      "remark": "客厅设备",
+      "createdAt": "2024-12-14T10:30:00"
+    },
+    {
+      "bindingId": 2,
+      "controlUsername": "windows002",
+      "controlNickname": "办公室电脑",
+      "remark": "办公设备",
+      "createdAt": "2024-12-13T15:20:00"
+    }
+  ],
+  "count": 2
+}
+
+【响应字段说明】
+字段                        类型      说明
+bindings                    Array     绑定列表
+bindings[].bindingId        Long      绑定记录ID
+bindings[].controlUsername  String    Windows控制端账号
+bindings[].controlNickname  String    Windows控制端昵称
+bindings[].remark           String    备注（Windows端设置的）
+bindings[].createdAt        String    绑定创建时间
+count                       Integer   绑定数量
+
+
+================================================================================
+                        文档结束
+================================================================================
+

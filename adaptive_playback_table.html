@@ -1,0 +1,1334 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>自适应播放算法 - 降帧/升帧条件表</title>
+    <style>
+        body {
+            font-family: 'Microsoft YaHei', Arial, sans-serif;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        h1 { color: #333; border-bottom: 2px solid #4CAF50; padding-bottom: 10px; }
+        h2 { color: #4CAF50; margin-top: 30px; }
+        h3 { color: #666; margin-top: 20px; }
+        table {
+            border-collapse: collapse;
+            width: 100%;
+            margin: 15px 0;
+            background: white;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+        th, td {
+            border: 1px solid #ddd;
+            padding: 12px 15px;
+            text-align: center;
+        }
+        th {
+            background: #4CAF50;
+            color: white;
+            font-weight: bold;
+        }
+        tr:nth-child(even) { background: #f9f9f9; }
+        tr:hover { background: #f0f0f0; }
+        .highlight { background: #fff3cd !important; font-weight: bold; }
+        .warning { color: #dc3545; font-weight: bold; }
+        .success { color: #28a745; font-weight: bold; }
+        .info { color: #17a2b8; }
+        .formula {
+            background: #e9ecef;
+            padding: 15px;
+            border-radius: 5px;
+            font-family: monospace;
+            margin: 10px 0;
+        }
+        .note {
+            background: #fff3cd;
+            border-left: 4px solid #ffc107;
+            padding: 10px 15px;
+            margin: 15px 0;
+        }
+        .section { margin-bottom: 40px; }
+    </style>
+</head>
+<body>
+
+<h1>🎮 自适应播放算法 - 降帧/升帧条件表 v8.4（到达帧率检测）</h1>
+
+<!-- ==================== v8.3 新逻辑（待确认） ==================== -->
+<div class="section" style="background: #e3f2fd; padding: 20px; border-radius: 10px; border: 3px solid #2196F3;">
+    <h2>🆕 v8.3 新逻辑（待客户确认）</h2>
+    
+    <h3>📐 基础公式</h3>
+    <div class="formula">
+        最佳缓冲 = 帧率 × 15%（对应 <strong>150ms</strong> 延迟）<br>
+        队列下限 = 帧率 × 8%（对应 <strong>80ms</strong> 延迟）<br>
+        队列上限 = 帧率 × 40%（对应 <strong>400ms</strong> 延迟）
+    </div>
+
+    <h3>🛡️ 第一道保险：播放速度控制</h3>
+    <table>
+        <tr>
+            <th>延迟范围</th>
+            <th>队列状态</th>
+            <th>播放速度</th>
+            <th>说明</th>
+        </tr>
+        <tr class="warning">
+            <td>&lt; 80ms</td>
+            <td>队列严重不足</td>
+            <td class="warning"><strong>50%</strong></td>
+            <td>紧急减速，等待帧到达</td>
+        </tr>
+        <tr class="highlight">
+            <td>150ms - 220ms</td>
+            <td>队列偏少</td>
+            <td>50% - 100%</td>
+            <td>减速，让队列恢复</td>
+        </tr>
+        <tr class="success">
+            <td><strong>220ms（最佳）</strong></td>
+            <td>队列正常</td>
+            <td><strong>100%</strong></td>
+            <td>正常速度</td>
+        </tr>
+        <tr class="highlight">
+            <td>220ms - 470ms</td>
+            <td>队列偏多</td>
+            <td>100% - 110%</td>
+            <td>加速，消耗多余帧</td>
+        </tr>
+        <tr>
+            <td>&gt; 470ms</td>
+            <td>队列过满</td>
+            <td class="success"><strong>110%</strong></td>
+            <td>最大加速</td>
+        </tr>
+    </table>
+
+    <h3>🛡️ 第二道保险：推流帧率控制（降帧）</h3>
+    
+    <h4>触发条件一：基于队列帧数（主要）⭐简化</h4>
+    <div class="formula">
+        <strong>核心逻辑</strong>：队列每减少1帧 → 推流帧率也降低1帧（<strong>1:1对应</strong>）<br><br>
+        60fps 最佳缓冲 = 60 × 22% = <strong>13帧</strong>（220ms延迟）<br>
+        队列从9帧减少到8帧 → 推流帧率从60fps降到<strong>59fps</strong><br>
+        队列从9帧减少到5帧 → 推流帧率从60fps降到<strong>56fps</strong>（减少4帧）
+    </div>
+    
+    <table>
+        <tr>
+            <th>推流fps</th>
+            <th>最佳缓冲<br>(220ms)</th>
+            <th>每帧对应<br>fps降幅</th>
+            <th>队列9帧</th>
+            <th>队列7帧</th>
+            <th>队列5帧</th>
+            <th>队列3帧</th>
+            <th>队列1帧</th>
+        </tr>
+        <tr>
+            <td><strong>60fps</strong></td>
+            <td>9帧</td>
+            <td class="success"><strong>1fps</strong></td>
+            <td class="success">60fps</td>
+            <td>58fps(-2)</td>
+            <td>56fps(-4)</td>
+            <td class="highlight">54fps(-6)</td>
+            <td class="highlight">52fps(-8)</td>
+        </tr>
+        <tr>
+            <td><strong>45fps</strong></td>
+            <td>6.75帧≈7帧</td>
+            <td class="success"><strong>1fps</strong></td>
+            <td class="success">45fps</td>
+            <td>45fps</td>
+            <td>43fps(-2)</td>
+            <td class="highlight">41fps(-4)</td>
+            <td class="highlight">39fps(-6)</td>
+        </tr>
+        <tr>
+            <td><strong>30fps</strong></td>
+            <td>4.5帧≈5帧</td>
+            <td class="success"><strong>1fps</strong></td>
+            <td class="success">30fps</td>
+            <td>28fps(-2)</td>
+            <td class="highlight">30fps</td>
+            <td class="highlight">28fps(-2)</td>
+            <td class="warning">26fps(-4)</td>
+        </tr>
+    </table>
+    
+    <div class="note" style="background: #c8e6c9;">
+        ✅ <strong>简化后的降帧公式</strong>：<br>
+        目标帧率 = 原始帧率 - (最佳缓冲 - 当前队列帧数)<br>
+        目标帧率 = max(15, 目标帧率)  // 最低15fps
+    </div>
+
+    <h4>触发条件二：基于队列水位</h4>
+    <table>
+        <tr>
+            <th>水位范围</th>
+            <th>含义</th>
+            <th>动作</th>
+            <th>目标帧率</th>
+        </tr>
+        <tr class="success">
+            <td>≥ 100%</td>
+            <td>队列充足</td>
+            <td>可以升帧</td>
+            <td>逐步恢复</td>
+        </tr>
+        <tr>
+            <td>50% - 100%</td>
+            <td>队列正常</td>
+            <td>保持</td>
+            <td>-</td>
+        </tr>
+        <tr class="highlight">
+            <td><strong>10% - 50%</strong></td>
+            <td>队列偏少</td>
+            <td><strong>开始降帧</strong></td>
+            <td>平滑 60fps→15fps</td>
+        </tr>
+        <tr class="warning">
+            <td>&lt; 10%</td>
+            <td>队列危急</td>
+            <td>立即降帧</td>
+            <td>15fps</td>
+        </tr>
+    </table>
+
+    <h4>60fps 详细降帧对照表（1:1对应）</h4>
+    <table>
+        <tr>
+            <th>队列帧数</th>
+            <th>减少帧数</th>
+            <th>水位</th>
+            <th>延迟</th>
+            <th>目标帧率(实际)</th>
+            <th>目标帧率(服务器)</th>
+            <th>状态</th>
+        </tr>
+        <tr class="success">
+            <td>9帧</td>
+            <td>0</td>
+            <td>100%</td>
+            <td>150ms</td>
+            <td><strong>60fps</strong></td>
+            <td>240fps</td>
+            <td>✅ 最佳</td>
+        </tr>
+        <tr>
+            <td>8帧</td>
+            <td>-1</td>
+            <td>89%</td>
+            <td>133ms</td>
+            <td><strong>59fps</strong></td>
+            <td>236fps</td>
+            <td>降1fps</td>
+        </tr>
+        <tr>
+            <td>7帧</td>
+            <td>-2</td>
+            <td>78%</td>
+            <td>117ms</td>
+            <td><strong>58fps</strong></td>
+            <td>232fps</td>
+            <td>降2fps</td>
+        </tr>
+        <tr>
+            <td>6帧</td>
+            <td>-3</td>
+            <td>67%</td>
+            <td>100ms</td>
+            <td><strong>57fps</strong></td>
+            <td>228fps</td>
+            <td>降3fps</td>
+        </tr>
+        <tr>
+            <td>5帧</td>
+            <td>-4</td>
+            <td>56%</td>
+            <td>83ms</td>
+            <td><strong>56fps</strong></td>
+            <td>224fps</td>
+            <td>降4fps</td>
+        </tr>
+        <tr class="highlight">
+            <td>4帧</td>
+            <td>-5</td>
+            <td>44%</td>
+            <td>67ms</td>
+            <td><strong>55fps</strong></td>
+            <td>220fps</td>
+            <td>降5fps</td>
+        </tr>
+        <tr class="highlight">
+            <td>3帧</td>
+            <td>-6</td>
+            <td>33%</td>
+            <td>50ms</td>
+            <td><strong>54fps</strong></td>
+            <td>216fps</td>
+            <td>降6fps</td>
+        </tr>
+        <tr class="warning">
+            <td>2帧</td>
+            <td>-7</td>
+            <td>22%</td>
+            <td>33ms</td>
+            <td><strong>53fps</strong></td>
+            <td>212fps</td>
+            <td>降7fps</td>
+        </tr>
+        <tr class="warning">
+            <td>1帧</td>
+            <td>-8</td>
+            <td>11%</td>
+            <td>17ms</td>
+            <td><strong>52fps</strong></td>
+            <td>208fps</td>
+            <td>降8fps</td>
+        </tr>
+        <tr class="warning">
+            <td>0帧</td>
+            <td>-9</td>
+            <td>0%</td>
+            <td>0ms</td>
+            <td><strong>51fps</strong></td>
+            <td>204fps</td>
+            <td>降9fps</td>
+        </tr>
+    </table>
+    
+    <div class="note" style="background: #ffcdd2;">
+        ⚠️ <strong>注意</strong>：按1:1对应，60fps最多降9fps（队列从9帧→0帧），即降到51fps。<br>
+        如果需要降到15fps，需要另外设置<strong>最低帧率限制</strong>或<strong>紧急降帧机制</strong>。
+    </div>
+
+    <h4>降帧公式（1:1简化版）</h4>
+    <div class="formula">
+        <strong>⭐ 简化公式：队列每减少1帧 → 帧率降低1帧</strong><br><br>
+        
+        目标帧率 = 原始帧率 - (最佳缓冲 - 当前队列帧数)<br>
+        目标帧率 = max(15, 目标帧率)  // 最低不低于15fps<br><br>
+        
+        <strong>示例（60fps，最佳缓冲9帧）：</strong><br>
+        队列9帧 → 60 - (9-9) = 60fps<br>
+        队列7帧 → 60 - (9-7) = 58fps<br>
+        队列5帧 → 60 - (9-5) = 56fps<br>
+        队列1帧 → 60 - (9-1) = 52fps
+    </div>
+
+    <h3>📈 升帧逻辑 ⭐更新</h3>
+    <table>
+        <tr>
+            <th>条件</th>
+            <th>阈值</th>
+            <th>说明</th>
+        </tr>
+        <tr>
+            <td>触发条件</td>
+            <td>队列 ≥ 最佳缓冲（水位≥100%）</td>
+            <td>队列充足才能升帧</td>
+        </tr>
+        <tr>
+            <td>升帧幅度</td>
+            <td class="success"><strong>当前推流帧率 × 5%-10%</strong></td>
+            <td>例：当前30fps → +1.5~3fps</td>
+        </tr>
+        <tr>
+            <td>升帧上限</td>
+            <td class="warning"><strong>不超过到达帧率</strong></td>
+            <td>网络能支撑多少就升多少</td>
+        </tr>
+    </table>
+    
+    <h4>升帧示例</h4>
+    <table>
+        <tr>
+            <th>当前推流帧率</th>
+            <th>升帧幅度(5%)</th>
+            <th>升帧幅度(10%)</th>
+            <th>到达帧率</th>
+            <th>实际升帧</th>
+        </tr>
+        <tr>
+            <td>15fps</td>
+            <td>+0.75fps≈1fps</td>
+            <td>+1.5fps≈2fps</td>
+            <td>20fps</td>
+            <td class="success">15→16fps 或 15→17fps</td>
+        </tr>
+        <tr>
+            <td>30fps</td>
+            <td>+1.5fps≈2fps</td>
+            <td>+3fps</td>
+            <td>45fps</td>
+            <td class="success">30→32fps 或 30→33fps</td>
+        </tr>
+        <tr>
+            <td>45fps</td>
+            <td>+2.25fps≈2fps</td>
+            <td>+4.5fps≈5fps</td>
+            <td>50fps</td>
+            <td class="success">45→47fps 或 45→50fps</td>
+        </tr>
+        <tr>
+            <td>50fps</td>
+            <td>+2.5fps≈3fps</td>
+            <td>+5fps</td>
+            <td>50fps</td>
+            <td class="warning">50→50fps（已达上限）</td>
+        </tr>
+    </table>
+    
+    <div class="note" style="background: #c8e6c9;">
+        ✅ <strong>升帧公式</strong>：<br>
+        升帧幅度 = 当前推流帧率 × 5%~10%<br>
+        目标帧率 = 当前帧率 + 升帧幅度<br>
+        目标帧率 = min(目标帧率, 到达帧率)  // ⭐不超过到达帧率
+    </div>
+
+    <h3>🔄 完整逻辑流程（简化版）</h3>
+    <div class="formula" style="background: #333; color: #fff; padding: 15px;">
+<pre>
+// ========== 第一道保险：播放速度控制 ==========
+// v8.3: 延迟阈值顺延+70ms（最低150ms）
+if (延迟 < 150ms) {
+    播放速度 = 50%;          // 紧急减速
+} else if (延迟 < 220ms) {
+    播放速度 = 50% + (延迟-150)/(220-150) × 50%;  // 线性恢复
+} else if (延迟 <= 470ms) {
+    播放速度 = 100% + (延迟-220)/(470-220) × 10%;  // 线性加速
+} else {
+    播放速度 = 110%;         // 最大加速
+}
+
+// ========== 第二道保险：降帧（1:1对应）==========
+最佳缓冲 = 原始帧率 × 15%;  // 例：60fps → 9帧
+缺少帧数 = 最佳缓冲 - 当前队列帧数;
+
+if (缺少帧数 > 0) {
+    // ⭐ 1:1降帧：队列每少1帧，帧率降1fps
+    目标帧率 = 原始帧率 - 缺少帧数;
+    目标帧率 = max(15, 目标帧率);  // 最低15fps
+    触发降帧(目标帧率);
+}
+
+// ========== 第三道保险：升帧（按当前帧率5%-10%）==========
+if (当前队列帧数 >= 最佳缓冲 && 已降帧) {
+    // ⭐ 升帧幅度 = 当前推流帧率 × 5%~10%
+    升帧幅度 = 当前帧率 × 0.05 ~ 0.10;
+    目标帧率 = 当前帧率 + 升帧幅度;
+    
+    // ⭐ 不超过到达帧率！
+    目标帧率 = min(目标帧率, 到达帧率);
+    目标帧率 = min(目标帧率, 原始帧率);
+    触发升帧(目标帧率);
+}
+</pre>
+    </div>
+
+    <div class="note" style="background: #c8e6c9; border-color: #4CAF50;">
+        ✅ <strong>已确认逻辑</strong>：<br>
+        1. <strong>降帧</strong>：队列每减少1帧 → 帧率降低1fps（1:1对应）<br>
+        2. <strong>升帧</strong>：按当前推流帧率的5%-10%回升<br>
+        3. <strong>升帧上限</strong>：不超过到达帧率
+    </div>
+</div>
+
+<hr style="margin: 30px 0; border: 2px dashed #ccc;">
+
+<!-- ==================== 方案对比 ==================== -->
+<div class="section" style="background: #e3f2fd; padding: 20px; border-radius: 10px;">
+    <h2>💡 两种判断方式对比</h2>
+    <table>
+        <tr>
+            <th>方式</th>
+            <th>判断依据</th>
+            <th>优点</th>
+            <th>缺点</th>
+        </tr>
+        <tr>
+            <td><strong>方式A：水位百分比</strong></td>
+            <td>水位 = 队列帧数 / 最佳缓冲</td>
+            <td>与延迟成正比</td>
+            <td class="warning">低帧率时1帧=44%，无法触发&lt;35%</td>
+        </tr>
+        <tr class="highlight">
+            <td><strong>方式B：包量（帧数）⭐推荐</strong></td>
+            <td>直接用队列帧数判断</td>
+            <td class="success">简单直观，所有帧率通用</td>
+            <td>需要设定固定阈值</td>
+        </tr>
+    </table>
+</div>
+
+<!-- ==================== 包量方案 ==================== -->
+<div class="section" style="background: #e8f5e9; padding: 20px; border-radius: 10px; margin-top: 20px;">
+    <h2>📦 方案B：用包量（队列帧数）判断（⭐推荐）</h2>
+    
+    <h3>降帧条件（包量方式）</h3>
+    <table>
+        <tr>
+            <th>条件</th>
+            <th>队列帧数</th>
+            <th>动作</th>
+            <th>目标帧率</th>
+        </tr>
+        <tr>
+            <td>条件1：包量不足</td>
+            <td class="warning">&lt; 3帧</td>
+            <td>降帧</td>
+            <td>60fps → 20fps（平滑）</td>
+        </tr>
+        <tr>
+            <td>条件2：延迟过高</td>
+            <td>延迟 &gt; 270ms</td>
+            <td>降帧</td>
+            <td>60fps → 15fps（平滑）</td>
+        </tr>
+        <tr class="highlight">
+            <td><strong>条件3：抖动预警⭐</strong></td>
+            <td class="warning"><strong>抖动比例 &gt; 30%</strong></td>
+            <td><strong>预测式降帧</strong></td>
+            <td>60fps → 15fps（提前感知！）</td>
+        </tr>
+    </table>
+    
+    <h4>🔮 帧间隔抖动检测公式（预测式感知网络波动）</h4>
+    <div class="formula">
+        <strong>核心公式</strong>：<br>
+        期望间隔 I<sub>exp</sub> = 1000 / fps（如60fps→16.7ms）<br>
+        实际间隔 I<sub>act</sub> = T<sub>当前帧</sub> - T<sub>上一帧</sub><br>
+        瞬时抖动 J = |I<sub>act</sub> - I<sub>exp</sub>|<br>
+        抖动EMA J<sub>ema</sub> = 0.3 × J + 0.7 × J<sub>ema</sub><br>
+        <strong>抖动比例 R = J<sub>ema</sub> / I<sub>exp</sub></strong>
+    </div>
+    
+    <table>
+        <tr>
+            <th>抖动比例(R)</th>
+            <th>60fps期望间隔</th>
+            <th>实际抖动</th>
+            <th>状态</th>
+            <th>目标帧率</th>
+        </tr>
+        <tr class="success">
+            <td>≤20%</td>
+            <td>16.7ms</td>
+            <td>≤3.3ms</td>
+            <td><strong>可升帧</strong></td>
+            <td>逐步恢复</td>
+        </tr>
+        <tr>
+            <td>20%-30%</td>
+            <td>16.7ms</td>
+            <td>3.3-5ms</td>
+            <td>正常</td>
+            <td>保持</td>
+        </tr>
+        <tr class="highlight">
+            <td><strong>30%</strong></td>
+            <td>16.7ms</td>
+            <td><strong>5ms</strong></td>
+            <td><strong>⚠️预警</strong></td>
+            <td><strong>60fps</strong>（开始降）</td>
+        </tr>
+        <tr class="highlight">
+            <td>50%</td>
+            <td>16.7ms</td>
+            <td>8.3ms</td>
+            <td>⚠️波动</td>
+            <td>47fps</td>
+        </tr>
+        <tr class="warning">
+            <td>65%</td>
+            <td>16.7ms</td>
+            <td>10.8ms</td>
+            <td>🚨严重</td>
+            <td>37fps</td>
+        </tr>
+        <tr class="warning">
+            <td><strong>100%</strong></td>
+            <td>16.7ms</td>
+            <td><strong>16.7ms</strong></td>
+            <td><strong>🚨危急</strong></td>
+            <td><strong>15fps</strong></td>
+        </tr>
+    </table>
+
+    <h3>升帧条件（需同时满足）</h3>
+    <table>
+        <tr>
+            <th>条件</th>
+            <th>阈值</th>
+            <th>动作</th>
+            <th>说明</th>
+        </tr>
+        <tr class="highlight">
+            <td><strong>条件1：抖动稳定⭐</strong></td>
+            <td class="success"><strong>抖动比例 &lt; 20%</strong></td>
+            <td>允许升帧</td>
+            <td><strong>网络恢复稳定</strong></td>
+        </tr>
+        <tr>
+            <td>条件2：包量充足</td>
+            <td class="success">≥ 5帧</td>
+            <td>可以升帧</td>
+            <td>队列有足够缓冲</td>
+        </tr>
+        <tr>
+            <td>条件3：延迟正常</td>
+            <td>270-470ms</td>
+            <td>-</td>
+            <td>延迟在合理范围</td>
+        </tr>
+        <tr>
+            <td>升帧幅度</td>
+            <td>-</td>
+            <td>每次 +10% 当前帧率</td>
+            <td>指数平滑恢复</td>
+        </tr>
+        <tr>
+            <td>上限</td>
+            <td>-</td>
+            <td>不超过到达帧率</td>
+            <td>缓存帧率为辅</td>
+        </tr>
+    </table>
+
+    <h3>包量方式的优势</h3>
+    <table>
+        <tr>
+            <th>推流帧率</th>
+            <th>最佳缓冲</th>
+            <th>降帧触发(&lt;3帧)</th>
+            <th>升帧触发(≥5帧)</th>
+            <th>是否可行</th>
+        </tr>
+        <tr>
+            <td>60fps</td>
+            <td>9帧</td>
+            <td>队列&lt;3帧</td>
+            <td>队列≥5帧</td>
+            <td class="success">✅ 可行</td>
+        </tr>
+        <tr>
+            <td>30fps</td>
+            <td>4.5帧</td>
+            <td>队列&lt;3帧</td>
+            <td>队列≥5帧</td>
+            <td class="success">✅ 可行</td>
+        </tr>
+        <tr>
+            <td>15fps</td>
+            <td>2.25帧</td>
+            <td>队列&lt;3帧</td>
+            <td>队列≥5帧</td>
+            <td class="success">✅ 可行</td>
+        </tr>
+    </table>
+
+    <div class="formula">
+        <strong>包量方式逻辑：</strong><br>
+        降帧：队列 &lt; 3帧 → 平滑降帧 60fps→20fps<br>
+        保持：3帧 ≤ 队列 &lt; 5帧 → 保持当前帧率<br>
+        升帧：队列 ≥ 5帧 → 逐步升帧 +10%
+    </div>
+</div>
+
+<!-- ==================== 基础公式 ==================== -->
+<div class="section">
+    <h2>📐 基础公式</h2>
+    <div class="formula">
+        最佳缓冲帧数 = 当前推流帧率 × 15%（对应150ms延迟）<br>
+        水位 = 当前队列帧数 / 最佳缓冲帧数 × 100%<br>
+        应用层延迟 = 当前队列帧数 × 1000 / 当前推流帧率 (ms)<br>
+        <br>
+        <strong>帧率映射：实际帧率 × 4 = 服务器帧率 = WebSocket发送值 = UI显示值</strong>
+    </div>
+</div>
+
+<!-- ==================== 帧率映射表 ==================== -->
+<div class="section">
+    <h2>🔄 帧率映射表</h2>
+    <table>
+        <tr>
+            <th>实际帧率</th>
+            <th>服务器帧率</th>
+            <th>说明</th>
+        </tr>
+        <tr><td>60fps</td><td class="success">240fps</td><td>最高帧率</td></tr>
+        <tr><td>45fps</td><td>180fps</td><td>-</td></tr>
+        <tr><td>30fps</td><td>120fps</td><td>-</td></tr>
+        <tr><td>20fps</td><td>80fps</td><td>水位触发最低</td></tr>
+        <tr><td>15fps</td><td class="warning">60fps</td><td>延迟触发最低</td></tr>
+    </table>
+</div>
+
+<!-- ==================== 水位对照表 ==================== -->
+<div class="section">
+    <h2>📊 各帧率下的水位对照表</h2>
+    <table>
+        <tr>
+            <th>推流帧率</th>
+            <th>最佳缓冲<br>(220ms)</th>
+            <th>1帧水位</th>
+            <th>2帧水位</th>
+            <th>3帧水位</th>
+            <th>4帧水位</th>
+            <th>5帧水位</th>
+            <th>9帧水位</th>
+        </tr>
+        <tr>
+            <td><strong>60fps</strong></td>
+            <td>9帧</td>
+            <td>11%</td>
+            <td>22%</td>
+            <td class="highlight">33%</td>
+            <td>44%</td>
+            <td>56%</td>
+            <td class="success">100%</td>
+        </tr>
+        <tr>
+            <td><strong>45fps</strong></td>
+            <td>6.75帧</td>
+            <td>15%</td>
+            <td>30%</td>
+            <td>44%</td>
+            <td>59%</td>
+            <td>74%</td>
+            <td>133%</td>
+        </tr>
+        <tr>
+            <td><strong>30fps</strong></td>
+            <td>4.5帧</td>
+            <td>22%</td>
+            <td>44%</td>
+            <td>67%</td>
+            <td>89%</td>
+            <td class="success">111%</td>
+            <td>200%</td>
+        </tr>
+        <tr>
+            <td><strong>20fps</strong></td>
+            <td>3帧</td>
+            <td class="highlight">33%</td>
+            <td>67%</td>
+            <td class="success">100%</td>
+            <td>133%</td>
+            <td>167%</td>
+            <td>300%</td>
+        </tr>
+        <tr>
+            <td><strong>15fps</strong></td>
+            <td>2.25帧</td>
+            <td class="success">44%</td>
+            <td>89%</td>
+            <td>133%</td>
+            <td>178%</td>
+            <td>222%</td>
+            <td>400%</td>
+        </tr>
+    </table>
+    <div class="note">
+        ⚠️ <strong>注意</strong>：低帧率(15fps)时，1帧就是44%水位，很难触发降帧条件(&lt;35%)
+    </div>
+</div>
+
+<!-- ==================== 延迟对照表 ==================== -->
+<div class="section">
+    <h2>⏱️ 各帧率下的应用层延迟对照表</h2>
+    <table>
+        <tr>
+            <th>推流帧率</th>
+            <th>1帧延迟</th>
+            <th>2帧延迟</th>
+            <th>3帧延迟</th>
+            <th>4帧延迟</th>
+            <th>5帧延迟</th>
+            <th>9帧延迟</th>
+        </tr>
+        <tr>
+            <td><strong>60fps</strong></td>
+            <td>17ms</td>
+            <td>33ms</td>
+            <td>50ms</td>
+            <td>67ms</td>
+            <td>83ms</td>
+            <td>150ms</td>
+        </tr>
+        <tr>
+            <td><strong>45fps</strong></td>
+            <td>22ms</td>
+            <td>44ms</td>
+            <td>67ms</td>
+            <td>89ms</td>
+            <td>111ms</td>
+            <td class="highlight">200ms</td>
+        </tr>
+        <tr>
+            <td><strong>30fps</strong></td>
+            <td>33ms</td>
+            <td>67ms</td>
+            <td>100ms</td>
+            <td>133ms</td>
+            <td>167ms</td>
+            <td class="warning">300ms</td>
+        </tr>
+        <tr>
+            <td><strong>20fps</strong></td>
+            <td>50ms</td>
+            <td>100ms</td>
+            <td>150ms</td>
+            <td class="highlight">200ms</td>
+            <td>250ms</td>
+            <td class="warning">450ms</td>
+        </tr>
+        <tr>
+            <td><strong>15fps</strong></td>
+            <td>67ms</td>
+            <td>133ms</td>
+            <td class="highlight">200ms</td>
+            <td>267ms</td>
+            <td class="warning">333ms</td>
+            <td class="warning">600ms</td>
+        </tr>
+    </table>
+    <div class="note">
+        ⚠️ <strong>触发降帧</strong>：应用层延迟 &gt; 200ms 时触发<br>
+        黄色高亮 = 200ms（触发点），红色 = 超过阈值
+    </div>
+</div>
+
+<!-- ==================== 降帧条件 v8.4 ==================== -->
+<div class="section">
+    <h2>📉 降帧触发条件 v8.4（满足任一即可）</h2>
+    
+    <h3>⭐ 条件1：抖动触发（30%→100% = 60fps→15fps）- 预测式</h3>
+    <table>
+        <tr>
+            <th>抖动比例</th>
+            <th>目标帧率(实际)</th>
+            <th>目标帧率(服务器)</th>
+            <th>说明</th>
+        </tr>
+        <tr><td>≤30%</td><td colspan="2">不降帧</td><td>网络稳定</td></tr>
+        <tr><td class="highlight">30%</td><td>60fps</td><td>240fps</td><td>开始降帧</td></tr>
+        <tr><td>50%</td><td>47fps</td><td>188fps</td><td>轻微波动</td></tr>
+        <tr><td>65%</td><td>37fps</td><td>148fps</td><td>中度波动</td></tr>
+        <tr><td>80%</td><td>28fps</td><td>112fps</td><td>严重波动</td></tr>
+        <tr><td class="warning">100%</td><td class="warning">15fps</td><td class="warning">60fps</td><td>极端波动</td></tr>
+    </table>
+    <div class="formula">
+        抖动比例 R = 抖动EMA / 期望间隔<br>
+        公式：targetFps = 60 - 45 × (R - 0.30) / 0.70
+    </div>
+
+    <h3>条件2：水位触发（35%→5% = 60fps→20fps）</h3>
+    <table>
+        <tr>
+            <th>水位</th>
+            <th>目标帧率(实际)</th>
+            <th>目标帧率(服务器)</th>
+            <th>说明</th>
+        </tr>
+        <tr><td>≥35%</td><td colspan="2">不降帧</td><td>水位正常</td></tr>
+        <tr><td class="highlight">35%</td><td>60fps</td><td>240fps</td><td>开始降帧</td></tr>
+        <tr><td>30%</td><td>53fps</td><td>212fps</td><td>-</td></tr>
+        <tr><td>25%</td><td>47fps</td><td>188fps</td><td>-</td></tr>
+        <tr><td>20%</td><td>40fps</td><td>160fps</td><td>-</td></tr>
+        <tr><td>15%</td><td>33fps</td><td>132fps</td><td>-</td></tr>
+        <tr><td>10%</td><td>27fps</td><td>108fps</td><td>-</td></tr>
+        <tr><td class="warning">5%</td><td class="warning">20fps</td><td class="warning">80fps</td><td>最低帧率</td></tr>
+    </table>
+    <div class="formula">
+        公式：targetFps = 60 - 40 × (0.35 - 水位) / 0.30
+    </div>
+
+    <h3>条件3：延迟触发（>270ms = 60fps→15fps）</h3>
+    <table>
+        <tr>
+            <th>应用层延迟</th>
+            <th>目标帧率(实际)</th>
+            <th>目标帧率(服务器)</th>
+            <th>说明</th>
+        </tr>
+        <tr><td>≤270ms</td><td colspan="2">不降帧</td><td>延迟正常</td></tr>
+        <tr><td class="highlight">270ms</td><td>60fps</td><td>240fps</td><td>开始降帧</td></tr>
+        <tr><td>320ms</td><td>49fps</td><td>196fps</td><td>-</td></tr>
+        <tr><td>370ms</td><td>37fps</td><td>148fps</td><td>-</td></tr>
+        <tr><td>420ms</td><td>26fps</td><td>104fps</td><td>-</td></tr>
+        <tr><td class="warning">470ms</td><td class="warning">15fps</td><td class="warning">60fps</td><td>最低帧率</td></tr>
+    </table>
+    <div class="formula">
+        公式：targetFps = 60 - 45 × (延迟ms - 270) / 200
+    </div>
+
+    <h3>⭐ 条件4：到达帧率不足（85%→50% = 60fps→15fps）- v8.4新增</h3>
+    <table>
+        <tr>
+            <th>配置fps</th>
+            <th>到达fps</th>
+            <th>到达率</th>
+            <th>触发？</th>
+            <th>目标帧率</th>
+            <th>说明</th>
+        </tr>
+        <tr><td>35fps</td><td>35fps</td><td>100%</td><td>❌</td><td>保持</td><td>到达充足</td></tr>
+        <tr><td>35fps</td><td>30fps</td><td>85.7%</td><td>❌</td><td>保持</td><td>到达充足</td></tr>
+        <tr><td class="highlight">35fps</td><td>29fps</td><td>82.9%</td><td class="warning">✅</td><td>29fps</td><td>开始降帧</td></tr>
+        <tr><td class="highlight">35fps</td><td>24fps</td><td>68.6%</td><td class="warning">✅</td><td>24fps</td><td>降到到达帧率</td></tr>
+        <tr><td class="highlight">60fps</td><td>45fps</td><td>75%</td><td class="warning">✅</td><td>45fps</td><td>降到到达帧率</td></tr>
+        <tr><td class="warning">60fps</td><td>30fps</td><td>50%</td><td class="warning">✅</td><td class="warning">30fps</td><td>降到到达帧率</td></tr>
+    </table>
+    <div class="formula">
+        到达率 = 到达帧率 / 配置帧率<br>
+        <strong>核心：目标帧率 ≤ 实际到达帧率（不能超过到达帧率！）</strong>
+    </div>
+
+    <div class="note">
+        ⚠️ <strong>取四个条件中最低的帧率</strong>：最终帧率 = min(抖动帧率, 水位帧率, 延迟帧率, 到达帧率)<br>
+        💡 <strong>条件4的意义</strong>：抖动检测只能感知"帧间隔不稳定"，条件4能感知"稳定地慢"（均匀低于配置帧率）
+    </div>
+</div>
+
+<!-- ==================== 升帧条件 v8.4 ==================== -->
+<div class="section">
+    <h2>📈 升帧触发条件 v8.4（需同时满足）</h2>
+    
+    <table>
+        <tr>
+            <th>条件</th>
+            <th>阈值</th>
+            <th>说明</th>
+        </tr>
+        <tr class="highlight">
+            <td>⭐ 条件1：抖动稳定</td>
+            <td>抖动比例 &lt; 20%</td>
+            <td>网络恢复稳定（预测式）</td>
+        </tr>
+        <tr class="highlight">
+            <td>⭐ 条件2：到达帧率充足</td>
+            <td>到达率 ≥ 85%</td>
+            <td>帧到达数量充足（v8.4新增）</td>
+        </tr>
+        <tr>
+            <td>条件3：队列充足</td>
+            <td>队列 ≥ 动态阈值×70%</td>
+            <td>队列有足够缓冲</td>
+        </tr>
+        <tr>
+            <td>条件4：延迟正常</td>
+            <td>延迟 270ms~470ms 之间</td>
+            <td>延迟在合理范围</td>
+        </tr>
+        <tr>
+            <td>条件5：持续时间</td>
+            <td>持续 1 秒</td>
+            <td>防止抖动</td>
+        </tr>
+        <tr class="success">
+            <td>升帧幅度</td>
+            <td>每次 +10% 当前推流帧率</td>
+            <td><strong>不能超过到达帧率！</strong></td>
+        </tr>
+        <tr>
+            <td>上限限制</td>
+            <td>不超过到达帧率</td>
+            <td>-</td>
+            <td>缓存帧率为辅</td></td>
+        </tr>
+        <tr>
+            <td>上限限制</td>
+            <td>不超过原始帧率</td>
+            <td>-</td>
+            <td>不超过设定值</td>
+        </tr>
+    </table>
+
+    <h3>⚠️ 待确认：水位升帧条件</h3>
+    <table>
+        <tr>
+            <th>推流帧率</th>
+            <th>最佳缓冲</th>
+            <th>水位5%对应帧数</th>
+            <th>水位30%对应帧数</th>
+            <th>问题</th>
+        </tr>
+        <tr>
+            <td>60fps</td>
+            <td>9帧</td>
+            <td>0.45帧</td>
+            <td>2.7帧</td>
+            <td class="success">可以用整数帧判断</td>
+        </tr>
+        <tr>
+            <td>30fps</td>
+            <td>4.5帧</td>
+            <td>0.23帧</td>
+            <td>1.35帧</td>
+            <td class="highlight">1帧=22%，2帧=44%</td>
+        </tr>
+        <tr>
+            <td>15fps</td>
+            <td>2.25帧</td>
+            <td>0.11帧</td>
+            <td>0.68帧</td>
+            <td class="warning">1帧=44%，永远>30%</td>
+        </tr>
+    </table>
+    <div class="note">
+        ❓ <strong>问题</strong>：低帧率(15fps)时，队列最少也有1帧，水位=44%，永远无法落入5%~30%区间<br>
+        💡 <strong>建议</strong>：改用 <strong>队列帧数</strong> 而非 <strong>水位百分比</strong> 判断升帧
+    </div>
+</div>
+
+<!-- ==================== 完整触发逻辑 ==================== -->
+<div class="section">
+    <h2>🔄 完整触发逻辑总结</h2>
+    <table>
+        <tr>
+            <th>操作</th>
+            <th>条件1（水位）</th>
+            <th>条件2（延迟）</th>
+            <th>帧率范围</th>
+            <th>等待时间</th>
+        </tr>
+        <tr class="warning">
+            <td><strong>降帧</strong></td>
+            <td>水位 &lt; 35%</td>
+            <td>延迟 &gt; 200ms</td>
+            <td>60fps → 15fps/20fps</td>
+            <td>1秒</td>
+        </tr>
+        <tr class="success">
+            <td><strong>升帧</strong></td>
+            <td>水位 5%~30%（待确认）</td>
+            <td>延迟 200ms~400ms</td>
+            <td>逐步 +10% 到达帧率</td>
+            <td>1秒</td>
+        </tr>
+    </table>
+</div>
+
+<div class="note" style="background: #d4edda; border-color: #28a745;">
+    📝 <strong>请确认以上数据表是否正确，确认后再修改代码</strong>
+</div>
+
+<!-- ==================== 包量详细表 ==================== -->
+<div class="section" style="background: #fff3e0; padding: 20px; border-radius: 10px; margin-top: 20px;">
+    <h2>📊 包量方式详细计算表</h2>
+    
+    <h3>各帧率下队列帧数对应的延迟</h3>
+    <table>
+        <tr>
+            <th>队列帧数</th>
+            <th>60fps延迟</th>
+            <th>45fps延迟</th>
+            <th>30fps延迟</th>
+            <th>20fps延迟</th>
+            <th>15fps延迟</th>
+            <th>状态</th>
+        </tr>
+        <tr class="warning">
+            <td><strong>0帧</strong></td>
+            <td>0ms</td>
+            <td>0ms</td>
+            <td>0ms</td>
+            <td>0ms</td>
+            <td>0ms</td>
+            <td>🛑 紧急</td>
+        </tr>
+        <tr class="warning">
+            <td><strong>1帧</strong></td>
+            <td>17ms</td>
+            <td>22ms</td>
+            <td>33ms</td>
+            <td>50ms</td>
+            <td>67ms</td>
+            <td>⚠️ 降帧</td>
+        </tr>
+        <tr class="warning">
+            <td><strong>2帧</strong></td>
+            <td>33ms</td>
+            <td>44ms</td>
+            <td>67ms</td>
+            <td>100ms</td>
+            <td>133ms</td>
+            <td>⚠️ 降帧</td>
+        </tr>
+        <tr class="highlight">
+            <td><strong>3帧</strong></td>
+            <td>50ms</td>
+            <td>67ms</td>
+            <td>100ms</td>
+            <td>150ms</td>
+            <td>200ms</td>
+            <td>📊 临界</td>
+        </tr>
+        <tr>
+            <td><strong>4帧</strong></td>
+            <td>67ms</td>
+            <td>89ms</td>
+            <td>133ms</td>
+            <td>200ms</td>
+            <td>267ms</td>
+            <td>✅ 保持</td>
+        </tr>
+        <tr class="success">
+            <td><strong>5帧</strong></td>
+            <td>83ms</td>
+            <td>111ms</td>
+            <td>167ms</td>
+            <td>250ms</td>
+            <td>333ms</td>
+            <td>📈 可升帧</td>
+        </tr>
+        <tr class="success">
+            <td><strong>6帧</strong></td>
+            <td>100ms</td>
+            <td>133ms</td>
+            <td>200ms</td>
+            <td>300ms</td>
+            <td>400ms</td>
+            <td>📈 可升帧</td>
+        </tr>
+        <tr class="success">
+            <td><strong>9帧</strong></td>
+            <td>150ms</td>
+            <td>200ms</td>
+            <td>300ms</td>
+            <td>450ms</td>
+            <td>600ms</td>
+            <td>📈 可升帧</td>
+        </tr>
+    </table>
+
+    <h3>包量方式 vs 水位方式 对比</h3>
+    <table>
+        <tr>
+            <th>帧率</th>
+            <th>队列3帧</th>
+            <th>水位方式</th>
+            <th>包量方式</th>
+            <th>结果</th>
+        </tr>
+        <tr>
+            <td>60fps</td>
+            <td>3帧</td>
+            <td>33% → 降帧</td>
+            <td>&lt;3帧 → 不降</td>
+            <td>水位更敏感</td>
+        </tr>
+        <tr>
+            <td>30fps</td>
+            <td>3帧</td>
+            <td>67% → 不降</td>
+            <td>&lt;3帧 → 不降</td>
+            <td>一致</td>
+        </tr>
+        <tr class="highlight">
+            <td>15fps</td>
+            <td>3帧</td>
+            <td>133% → 不降</td>
+            <td>&lt;3帧 → 不降</td>
+            <td>一致</td>
+        </tr>
+        <tr>
+            <td>15fps</td>
+            <td>1帧</td>
+            <td class="warning">44% → 不降❌</td>
+            <td class="success">&lt;3帧 → 降帧✅</td>
+            <td class="success">包量更合理</td>
+        </tr>
+    </table>
+
+    <div class="note">
+        💡 <strong>结论</strong>：包量方式在低帧率(15fps)时更合理，1帧时会触发降帧，而水位方式(44%)不会触发
+    </div>
+</div>
+
+<!-- ==================== 预测式降帧（新方案） ==================== -->
+<div class="section" style="background: #ffebee; padding: 20px; border-radius: 10px; margin-top: 20px; border: 2px solid #f44336;">
+    <h2>🔮 新方案：预测式降帧（提前介入）</h2>
+    
+    <h3>核心思路：监测队列下降速度</h3>
+    <div class="formula">
+        <strong>下降速度 = 上一秒队列 - 当前队列</strong><br><br>
+        
+        正常波动：60fps时队列应该在 6-9帧 波动（±1-2帧/秒）<br>
+        异常信号：队列快速下降（≥3帧/秒）= 网络正在恶化<br><br>
+        
+        <strong>预测公式：</strong><br>
+        预测N秒后队列 = 当前队列 - 下降速度 × N<br>
+        如果预测值 &lt; 安全阈值 → 提前触发降帧
+    </div>
+
+    <h3>队列下降速度判断表</h3>
+    <table>
+        <tr>
+            <th>下降速度</th>
+            <th>含义</th>
+            <th>动作</th>
+            <th>说明</th>
+        </tr>
+        <tr class="success">
+            <td>0 或 负值</td>
+            <td>队列在增加</td>
+            <td>可以升帧</td>
+            <td>网络好</td>
+        </tr>
+        <tr>
+            <td>1-2帧/秒</td>
+            <td>正常波动</td>
+            <td>保持</td>
+            <td>网络稳定</td>
+        </tr>
+        <tr class="highlight">
+            <td class="warning">≥3帧/秒</td>
+            <td>快速下降</td>
+            <td>⚠️ 预警</td>
+            <td>网络开始恶化</td>
+        </tr>
+        <tr class="warning">
+            <td class="warning">≥5帧/秒</td>
+            <td>急剧下降</td>
+            <td>🛑 立即降帧</td>
+            <td>网络严重恶化</td>
+        </tr>
+    </table>
+
+    <h3>预测式降帧示例</h3>
+    <table>
+        <tr>
+            <th>时间</th>
+            <th>队列</th>
+            <th>下降速度</th>
+            <th>预测2秒后</th>
+            <th>动作</th>
+        </tr>
+        <tr>
+            <td>T+0</td>
+            <td>9帧</td>
+            <td>-</td>
+            <td>-</td>
+            <td>正常</td>
+        </tr>
+        <tr>
+            <td>T+1</td>
+            <td>8帧</td>
+            <td>1帧/秒</td>
+            <td>6帧</td>
+            <td>正常波动</td>
+        </tr>
+        <tr class="highlight">
+            <td>T+2</td>
+            <td>6帧</td>
+            <td class="warning">2帧/秒</td>
+            <td>2帧 ⚠️</td>
+            <td>预警！准备降帧</td>
+        </tr>
+        <tr class="warning">
+            <td>T+3</td>
+            <td>3帧</td>
+            <td class="warning">3帧/秒</td>
+            <td>-3帧 🛑</td>
+            <td>立即降帧！</td>
+        </tr>
+    </table>
+    
+    <div class="note" style="background: #ffcdd2;">
+        💡 <strong>关键</strong>：不是等队列降到临界值才反应，而是<strong>监测下降趋势，提前介入</strong>！<br>
+        就像汽车ABS：不是等轮胎锁死才介入，而是检测到即将锁死时就提前介入。
+    </div>
+</div>
+
+<!-- ==================== 最终方案建议 ==================== -->
+<div class="section" style="background: #e8f5e9; padding: 20px; border-radius: 10px; margin-top: 20px; border: 2px solid #4CAF50;">
+    <h2>✅ 最终建议：三重条件降帧</h2>
+    
+    <table>
+        <tr>
+            <th>操作</th>
+            <th>条件1（包量）</th>
+            <th>条件2（延迟）</th>
+            <th>条件3（下降速度）⭐新增</th>
+            <th>帧率范围</th>
+        </tr>
+        <tr class="warning">
+            <td><strong>📉 降帧</strong></td>
+            <td>队列 &lt; 3帧</td>
+            <td>延迟 &gt; 200ms</td>
+            <td class="warning">下降速度 ≥ 3帧/秒</td>
+            <td>60fps → 15fps/20fps</td>
+        </tr>
+        <tr class="success">
+            <td><strong>📈 升帧</strong></td>
+            <td>队列 ≥ 5帧</td>
+            <td>延迟 200ms~400ms</td>
+            <td class="success">下降速度 ≤ 0（队列在增加）</td>
+            <td>+10% 到达帧率</td>
+        </tr>
+    </table>
+
+    <div class="formula">
+        <strong>降帧逻辑（满足任一即可）：</strong><br>
+        条件1：队列 &lt; 3帧 → 平滑降帧（包量触发）<br>
+        条件2：延迟 &gt; 200ms → 平滑降帧（延迟触发）<br>
+        <span style="color: #f44336;"><strong>条件3：下降速度 ≥ 3帧/秒 → 提前降帧（预测触发）⭐新增</strong></span><br>
+        取三者中最低的帧率<br><br>
+        
+        <strong>升帧逻辑（需同时满足）：</strong><br>
+        条件1：队列 ≥ 5帧<br>
+        条件2：延迟在200-400ms<br>
+        <span style="color: #4CAF50;"><strong>条件3：下降速度 ≤ 0（队列在增加或稳定）⭐新增</strong></span><br>
+        每次+10%到达帧率，不超过到达帧率
+    </div>
+</div>
+
+<!-- ==================== 实现伪代码 ==================== -->
+<div class="section" style="background: #f3e5f5; padding: 20px; border-radius: 10px; margin-top: 20px;">
+    <h2>💻 实现伪代码</h2>
+    
+    <div class="formula" style="background: #333; color: #fff; padding: 15px; font-family: monospace;">
+<pre>
+// 每秒计算一次
+int lastQueueDepth = m_lastQueueDepth;    // 上一秒队列
+int currentQueueDepth = queueDepth;       // 当前队列
+int dropSpeed = lastQueueDepth - currentQueueDepth;  // 下降速度
+
+// 预测2秒后队列
+int predictQueue = currentQueueDepth - dropSpeed * 2;
+
+// ========== 降帧条件 ==========
+bool condition1 = (currentQueueDepth < 3);           // 包量不足
+bool condition2 = (appDelayMs > 200);                // 延迟过高
+bool condition3 = (dropSpeed >= 3);                  // 下降过快 ⭐新增
+bool condition4 = (predictQueue < 0);                // 预测见底 ⭐新增
+
+if (condition1 || condition2 || condition3 || condition4) {
+    // 触发降帧
+    降帧幅度 = max(包量计算, 延迟计算, 下降速度计算);
+}
+
+// ========== 升帧条件 ==========
+bool canRestore = (currentQueueDepth >= 5)           // 包量充足
+               && (appDelayMs >= 200 && appDelayMs <= 400)  // 延迟正常
+               && (dropSpeed <= 0);                  // 队列稳定或增加 ⭐新增
+
+if (canRestore && m_requestedFps > 0) {
+    // 触发升帧
+    targetFps = currentFps + arrivalFps * 0.10;
+}
+
+m_lastQueueDepth = currentQueueDepth;  // 保存供下次计算
+</pre>
+    </div>
+</div>
+
+</body>
+</html>
