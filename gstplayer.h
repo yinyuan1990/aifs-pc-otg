@@ -381,10 +381,10 @@ private:
     // P2P模式：30fps → optimal=3帧(100ms), min=2帧(67ms), max=6帧(200ms)
     static inline void getQueueSizeByFps(double fps, int &outMin, int &outOptimal, int &outMax, double /*corruptRatio*/ = 0.0, bool isP2P = false) {
         if (isP2P) {
-            // P2P 直连：抖动小，用更浅的缓冲，延迟更低
-            outOptimal = qMax(2, static_cast<int>(fps * 0.10 + 0.5));  // 10%，约100ms
-            outMin = qMax(2, static_cast<int>(fps * 0.07 + 0.5));      // 7%，约70ms
-            outMax = qMax(3, static_cast<int>(fps * 0.20 + 0.5));      // 20%，约200ms
+            // P2P 直连：加深缓冲（之前100ms太浅，网络抖动一次就见底）
+            outOptimal = qMax(4, static_cast<int>(fps * 0.17 + 0.5));  // 17%，约170ms
+            outMin = qMax(3, static_cast<int>(fps * 0.10 + 0.5));      // 10%，约100ms
+            outMax = qMax(6, static_cast<int>(fps * 0.30 + 0.5));      // 30%，约300ms
         } else {
             // SRS 中转：网络路径长，需要更深缓冲
             outOptimal = qMax(QUEUE_ABS_MIN, static_cast<int>(fps * BUFFER_RATIO_OPTIMAL + 0.5));
@@ -405,10 +405,10 @@ private:
     static constexpr double W_DROP_THRESHOLD = 1.5;   // ⭐ 队列>150%时丢帧
     static constexpr double W_DROP_TARGET = 1.2;      // ⭐ 丢帧后目标120%
     
-    // ⭐ 速率范围（🔥 v11.3 调整：追帧更快，避免跳帧）
-    static constexpr double R_MIN = 0.85;             // 🔥 v11: 最低85%（之前70%跳动太大）
-    static constexpr double R_MAX = 1.15;             // 🔥 v11.3: 最高115%（追帧更快，避免丢帧）
-    static constexpr double R_CHANGE_LIMIT = 0.05;    // 🔥 v11.3: 每帧最大变化±5%（更快响应）
+    // ⭐ 速率范围（收窄：减少人眼感知的忽快忽慢）
+    static constexpr double R_MIN = 0.93;             // 最低93%（之前85%跳动太大）
+    static constexpr double R_MAX = 1.07;             // 最高107%（之前115%跳动太大）
+    static constexpr double R_CHANGE_LIMIT = 0.03;    // 每帧最大变化±3%（更平滑）
     
     // ⭐⭐⭐ 第二道防线：推流帧率控制（边缘化触发）
     // 2025-01-27 优化：更早触发（30%+1秒），快速响应网络恶化
