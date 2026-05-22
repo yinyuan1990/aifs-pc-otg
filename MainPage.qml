@@ -5472,8 +5472,18 @@ Rectangle {
         }
         console.log("🔦 抗频闪:", enabled ? "开启 fps=" + fps : "关闭")
         captureManager.sendStompCommand(JSON.stringify(payload))
-        // 同步帧率给 gstPlayer
+
         if (enabled) {
+            // 同步 FPS 滑块 UI
+            iosCameraSettingsPopup.fpsValue = fps
+            fpsSlider.value = fps
+
+            // 200 档需要超高帧档位
+            if (fps === 200 && iosCameraSettingsPopup.qualityType !== "ultra") {
+                switchQuality("ultra", "超高帧")
+            }
+
+            // 同步帧率给 gstPlayer
             gstPlayer.setConfigFps(fps / 4)
         }
     }
