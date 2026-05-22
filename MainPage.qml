@@ -5406,6 +5406,13 @@ Rectangle {
                             cursorShape: Qt.PointingHandCursor
                             onClicked: {
                                 iosCameraSettingsPopup.antiFlickerEnabled = !iosCameraSettingsPopup.antiFlickerEnabled
+                                if (iosCameraSettingsPopup.antiFlickerEnabled) {
+                                    // 打开时强制同步到默认80档
+                                    iosCameraSettingsPopup.antiFlickerFps = 80
+                                    iosCameraSettingsPopup.fpsValue = 80
+                                    fpsSlider.value = 80
+                                    gstPlayer.setConfigFps(20)
+                                }
                                 sendAntiFlickerConfig()
                             }
                         }
