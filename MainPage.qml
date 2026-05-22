@@ -4235,7 +4235,7 @@ Rectangle {
     Window {
         id: iosCameraSettingsPopup
         width: 560
-        height: 820
+        height: 870
         flags: Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
         color: "transparent"
         visible: false
@@ -4274,6 +4274,8 @@ Rectangle {
         property string directionValue: "1"  // 摄像头方向：1=后置, 0=前置
         property string selectedButton: ""  // 睡眠/工作/刷新
         property string qualityType: "high" // 档位：low/standard/high/ultra/p4k
+        property bool antiFlickerEnabled: false  // 抗频闪开关（默认关闭）
+        property int antiFlickerFps: 80          // 抗频闪帧率档位（80/100/200）
         
         // 窗口内容背景
         Rectangle {
@@ -4642,6 +4644,8 @@ Rectangle {
                         to: 240
                         stepSize: 2  // 步长2，保证下发时为整数
                         value: iosCameraSettingsPopup.fpsValue
+                        enabled: !iosCameraSettingsPopup.antiFlickerEnabled  // 抗频闪开启时禁用
+                        opacity: iosCameraSettingsPopup.antiFlickerEnabled ? 0.4 : 1.0
                         
                         onMoved: {
                             // 使用全局分段函数获取上限（档位+会员等级）
@@ -5365,6 +5369,80 @@ Rectangle {
                     }
                 }
             }
+
+            // 第9行：抗频闪（开关 + 3档按钮，默认关闭）
+            Item {
+                Layout.fillWidth: true
+                height: 36
+
+                Row {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    spacing: 10
+
+                    Text {
+                        text: "抗频闪"
+                        font.family: "PingFang HK"
+                        font.pixelSize: 13
+                        color: "#78909C"
+                        anchors.verticalCenter: parent.verticalCenter
+                    }
+
+                    // 开关
+                    Rectangle {
+                        width: 44; height: 24; radius: 12
+                        color: iosCameraSettingsPopup.antiFlickerEnabled ? "#4DB6AC" : "#E0E0E0"
+                        anchors.verticalCenter: parent.verticalCenter
+
+                        Rectangle {
+                            width: 20; height: 20; radius: 10
+                            color: "#FFFFFF"
+                            x: parent.parent.parent.parent.antiFlickerEnabled ? 22 : 2
+                            anchors.verticalCenter: parent.verticalCenter
+                            Behavior on x { NumberAnimation { duration: 150 } }
+                        }
+
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: {
+                                iosCameraSettingsPopup.antiFlickerEnabled = !iosCameraSettingsPopup.antiFlickerEnabled
+                                sendAntiFlickerConfig()
+                            }
+                        }
+                    }
+
+                    // 80 档（20fps）
+                    Rectangle {
+                        width: 50; height: 32; radius: 16
+                        property bool active: iosCameraSettingsPopup.antiFlickerEnabled && iosCameraSettingsPopup.antiFlickerFps === 80
+                        color: !iosCameraSettingsPopup.antiFlickerEnabled ? "#E8E8E8" : (active ? "#4DB6AC" : "#E8F5E9")
+                        border.color: !iosCameraSettingsPopup.antiFlickerEnabled ? "#C0C0C0" : (active ? "#4DB6AC" : "#A5D6A7")
+                        Text { anchors.centerIn: parent; text: "80"; font.pixelSize: 13; font.family: "PingFang HK"; color: !iosCameraSettingsPopup.antiFlickerEnabled ? "#999" : (parent.active ? "#FFF" : "#333") }
+                        MouseArea { anchors.fill: parent; cursorShape: iosCameraSettingsPopup.antiFlickerEnabled ? Qt.PointingHandCursor : Qt.ForbiddenCursor; onClicked: { if (iosCameraSettingsPopup.antiFlickerEnabled) { iosCameraSettingsPopup.antiFlickerFps = 80; sendAntiFlickerConfig() } } }
+                    }
+
+                    // 100 档（25fps）
+                    Rectangle {
+                        width: 50; height: 32; radius: 16
+                        property bool active: iosCameraSettingsPopup.antiFlickerEnabled && iosCameraSettingsPopup.antiFlickerFps === 100
+                        color: !iosCameraSettingsPopup.antiFlickerEnabled ? "#E8E8E8" : (active ? "#4DB6AC" : "#E8F5E9")
+                        border.color: !iosCameraSettingsPopup.antiFlickerEnabled ? "#C0C0C0" : (active ? "#4DB6AC" : "#A5D6A7")
+                        Text { anchors.centerIn: parent; text: "100"; font.pixelSize: 13; font.family: "PingFang HK"; color: !iosCameraSettingsPopup.antiFlickerEnabled ? "#999" : (parent.active ? "#FFF" : "#333") }
+                        MouseArea { anchors.fill: parent; cursorShape: iosCameraSettingsPopup.antiFlickerEnabled ? Qt.PointingHandCursor : Qt.ForbiddenCursor; onClicked: { if (iosCameraSettingsPopup.antiFlickerEnabled) { iosCameraSettingsPopup.antiFlickerFps = 100; sendAntiFlickerConfig() } } }
+                    }
+
+                    // 200 档（50fps，仅 deviceLevel>=4 可用）
+                    Rectangle {
+                        property bool accessible: HttpClient.deviceLevel() >= 4
+                        width: 50; height: 32; radius: 16
+                        property bool active: iosCameraSettingsPopup.antiFlickerEnabled && iosCameraSettingsPopup.antiFlickerFps === 200
+                        color: !accessible ? "#E8E8E8" : (!iosCameraSettingsPopup.antiFlickerEnabled ? "#E8E8E8" : (active ? "#4DB6AC" : "#E8F5E9"))
+                        border.color: !accessible ? "#C0C0C0" : (!iosCameraSettingsPopup.antiFlickerEnabled ? "#C0C0C0" : (active ? "#4DB6AC" : "#A5D6A7"))
+                        Text { anchors.centerIn: parent; text: "200"; font.pixelSize: 13; font.family: "PingFang HK"; color: !parent.accessible || !iosCameraSettingsPopup.antiFlickerEnabled ? "#999" : (parent.active ? "#FFF" : "#333") }
+                        MouseArea { anchors.fill: parent; cursorShape: (parent.accessible && iosCameraSettingsPopup.antiFlickerEnabled) ? Qt.PointingHandCursor : Qt.ForbiddenCursor; onClicked: { if (parent.accessible && iosCameraSettingsPopup.antiFlickerEnabled) { iosCameraSettingsPopup.antiFlickerFps = 200; sendAntiFlickerConfig() } } }
+                    }
+                }
+            }
             }  // 关闭 ColumnLayout
         }  // 关闭 Rectangle
     }  // 关闭 Window (相机设定)
@@ -5374,13 +5452,30 @@ Rectangle {
         // ⭐ 不再每次打开都从服务器获取配置，使用本地缓存值
         // 用户修改后的值保持在 iosCameraSettingsPopup 的属性中
         // 登录时已通过 getThinConfig() 获取过初始值
-        
+
         // 设置位置：使用屏幕绝对坐标（Window 组件）
         var globalPos = cameraSettingText.mapToGlobal(0, cameraSettingText.height + 5)
         iosCameraSettingsPopup.x = globalPos.x
         iosCameraSettingsPopup.y = globalPos.y
-        
+
         iosCameraSettingsPopup.open()
+    }
+
+    // 抗频闪：发送开关和帧率档位到 iOS
+    function sendAntiFlickerConfig() {
+        var enabled = iosCameraSettingsPopup.antiFlickerEnabled
+        var fps = iosCameraSettingsPopup.antiFlickerFps  // 80/100/200（服务器格式）
+        var payload = {
+            "cmd": "anti_flicker",
+            "enabled": enabled,
+            "fps": enabled ? fps : 0
+        }
+        console.log("🔦 抗频闪:", enabled ? "开启 fps=" + fps : "关闭")
+        captureManager.sendStompCommand(JSON.stringify(payload))
+        // 同步帧率给 gstPlayer
+        if (enabled) {
+            gstPlayer.setConfigFps(fps / 4)
+        }
     }
     
     // ============ 曝光值设定 Window（独立窗口，可全屏拖动）============
