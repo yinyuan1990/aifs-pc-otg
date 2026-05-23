@@ -218,6 +218,29 @@ Rectangle {
         property int displayFps: gstPlayer.receiveFps
     }
 
+    // 拉流心跳：每秒通知 iOS"我在看"（基于画面是否显示）
+    Timer {
+        id: viewerHeartbeatTimer
+        interval: 1000
+        repeats: true
+        running: true
+        onTriggered: {
+            // 只在画面实际显示时发送（receiveFps > 0）
+            if (gstPlayer.receiveFps > 0) {
+                var deviceId = HttpClient.currentDeviceId()
+                if (!deviceId) return
+                var payload = {
+                    "type": "VIEWER_HEARTBEAT",
+                    "deviceId": deviceId,
+                    "fps": gstPlayer.receiveFps,
+                    "timestamp": Date.now()
+                }
+                var destination = "/topic/device/" + deviceId + "/config"
+                WebSocketClient.sendMessageJson(destination, JSON.stringify(payload))
+            }
+        }
+    }
+
     // ============ 核心组件 ============
     
     GpuPipeline {
@@ -5389,7 +5412,8 @@ Rectangle {
                         text: "抗频闪"
                         font.family: "PingFang HK"
                         font.pixelSize: 13
-                        color: "#78909C"
+                        font.bold: true
+                        color: "#E53935"
                         anchors.verticalCenter: parent.verticalCenter
                     }
 
