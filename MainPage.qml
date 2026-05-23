@@ -222,7 +222,7 @@ Rectangle {
     Timer {
         id: viewerHeartbeatTimer
         interval: 1000
-        repeats: true
+        repeat: true
         running: true
         onTriggered: {
             // 只在画面实际显示时发送（receiveFps > 0）
