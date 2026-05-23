@@ -4269,7 +4269,7 @@ Rectangle {
     Window {
         id: iosCameraSettingsPopup
         width: 560
-        height: 960
+        height: 870
         flags: Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
         color: "transparent"
         visible: false
@@ -4310,7 +4310,6 @@ Rectangle {
         property string qualityType: "high" // 档位：low/standard/high/ultra/p4k
         property bool antiFlickerEnabled: false  // 抗频闪开关（默认关闭）
         property int antiFlickerFps: 80          // 抗频闪帧率档位（80/100/200）
-        property bool testModeEnabled: false     // 测试模式：硬件EV/ISO 调亮度（玉麒麟方案对比）
         
         // 窗口内容背景
         Rectangle {
@@ -5529,98 +5528,6 @@ Rectangle {
                     }
                 }
             }
-
-            // 测试模式（硬件 EV/ISO 调亮度，对比玉麒麟方案）
-            Item {
-                Layout.fillWidth: true
-                height: 36
-
-                Row {
-                    anchors.horizontalCenter: parent.horizontalCenter
-                    spacing: 10
-
-                    Text {
-                        text: "测试模式"
-                        font.family: "PingFang HK"
-                        font.pixelSize: 13
-                        font.bold: true
-                        color: "#1976D2"
-                        anchors.verticalCenter: parent.verticalCenter
-                    }
-
-                    Rectangle {
-                        width: 44; height: 24; radius: 12
-                        color: iosCameraSettingsPopup.testModeEnabled ? "#1976D2" : "#E0E0E0"
-                        anchors.verticalCenter: parent.verticalCenter
-
-                        Rectangle {
-                            width: 20; height: 20; radius: 10
-                            color: "#FFFFFF"
-                            x: iosCameraSettingsPopup.testModeEnabled ? 22 : 2
-                            anchors.verticalCenter: parent.verticalCenter
-                            Behavior on x { NumberAnimation { duration: 150 } }
-                        }
-
-                        MouseArea {
-                            anchors.fill: parent
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: {
-                                iosCameraSettingsPopup.testModeEnabled = !iosCameraSettingsPopup.testModeEnabled
-                                sendTestModeConfig()
-                            }
-                        }
-                    }
-
-                    Text {
-                        text: iosCameraSettingsPopup.testModeEnabled ? "硬件调节(玉麒麟)" : "后处理(原方案)"
-                        font.family: "PingFang HK"
-                        font.pixelSize: 11
-                        color: "#78909C"
-                        anchors.verticalCenter: parent.verticalCenter
-                    }
-                }
-            }
-
-            // 测试亮度滑块（仅测试模式开启时生效，独立于综合亮度）
-            RowLayout {
-                Layout.fillWidth: true
-                Layout.leftMargin: 18
-                Layout.rightMargin: 18
-                spacing: 12
-
-                Text {
-                    text: "测试亮度"
-                    font.family: "PingFang HK"
-                    font.pixelSize: 13
-                    font.bold: true
-                    color: iosCameraSettingsPopup.testModeEnabled ? "#1976D2" : "#B0BEC5"
-                    Layout.preferredWidth: 70
-                }
-
-                Slider {
-                    id: testBrightnessSlider
-                    Layout.fillWidth: true
-                    from: 0
-                    to: 100
-                    stepSize: 1
-                    value: 50
-                    enabled: iosCameraSettingsPopup.testModeEnabled
-                    opacity: iosCameraSettingsPopup.testModeEnabled ? 1.0 : 0.4
-
-                    onMoved: {
-                        sendTestBrightnessConfig(value)
-                    }
-                }
-
-                Text {
-                    text: Math.round(testBrightnessSlider.value)
-                    font.family: "PingFang HK"
-                    font.pixelSize: 13
-                    color: iosCameraSettingsPopup.testModeEnabled ? "#1976D2" : "#B0BEC5"
-                    Layout.preferredWidth: 28
-                    horizontalAlignment: Text.AlignRight
-                }
-            }
             }  // 关闭 ColumnLayout
         }  // 关闭 Rectangle
     }  // 关闭 Window (相机设定)
@@ -5637,21 +5544,6 @@ Rectangle {
         iosCameraSettingsPopup.y = globalPos.y
 
         iosCameraSettingsPopup.open()
-    }
-
-    // 测试模式：通知 iOS 切换到硬件 EV/ISO 调亮度（玉麒麟方案对比）
-    function sendTestModeConfig() {
-        var enabled = iosCameraSettingsPopup.testModeEnabled
-        var payload = { "cmd": "test_mode", "enabled": enabled }
-        console.log("🧪 测试模式:", enabled ? "开启(硬件EV/ISO)" : "关闭(后处理)")
-        sendConfigUpdate("test_mode", payload)
-    }
-
-    // 测试亮度：独立滑块（仅测试模式生效，不影响综合亮度后处理）
-    function sendTestBrightnessConfig(value) {
-        if (!iosCameraSettingsPopup.testModeEnabled) return
-        var payload = { "cmd": "test_brightness", "value": Math.round(value) }
-        sendConfigUpdate("test_brightness", payload)
     }
 
     // 抗频闪：发送开关和帧率档位到 iOS
