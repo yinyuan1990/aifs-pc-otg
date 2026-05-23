@@ -4352,15 +4352,18 @@ Rectangle {
                             hoverEnabled: true
                             cursorShape: Qt.PointingHandCursor
                             onClicked: {
-                                // 重置所有相机参数为默认值
                                 // 对焦：0.6
                                 iosCameraSettingsPopup.focusValue = 0.6
                                 focusSlider.value = 0.6
-                                
-                                // ⭐ 综合亮度回到中点 50 → 同时把 iOS 滤镜的 brightness/gamma/exposure 回到各自 default
+
+                                // 综合亮度：回中点 50，参照登录逻辑（onLoginSuccess 也是这样做）
+                                captureManager.exposure = 50
                                 iosCameraSettingsPopup.exposureValue = 50
                                 exposureBiasSlider.value = 50
                                 iosFilterPopup.syncFromOverallBrightness(50)
+
+                                // 对比度 / 曝光度 / 红外模式 → 重新拉服务器默认值（与登录后行为一致）
+                                HttpClient.getIosFilterDefaults()
 
                                 // 清晰度：50
                                 iosCameraSettingsPopup.clarityValue = 50
@@ -4370,23 +4373,26 @@ Rectangle {
                                 iosCameraSettingsPopup.flickerValue = 120
                                 flickerSlider.value = 120
 
-                                // ⭐ 帧率：120（不再除以2，UI值=后端值）
-                                iosCameraSettingsPopup.fpsValue = 120
-                                fpsSlider.value = 120
+                                // 帧率：100
+                                iosCameraSettingsPopup.fpsValue = 100
+                                fpsSlider.value = 100
 
-                                // ⭐ 对比度 / 红外模式 → iOS 滤镜默认值
-                                iosFilterPopup.syncSingle("contrast",   iosFilterPopup.contrastDefault)
-                                iosFilterPopup.syncSingle("saturation", iosFilterPopup.saturationDefault)
+                                // 抗频闪：打开过就关闭
+                                if (iosCameraSettingsPopup.antiFlickerEnabled) {
+                                    iosCameraSettingsPopup.antiFlickerEnabled = false
+                                    iosCameraSettingsPopup.antiFlickerFps = 80
+                                    sendAntiFlickerConfig()
+                                }
 
-                                // 下发硬件配置（不含色彩，色彩已通过 iosFilterPopup.syncXxx 走 STOMP）
+                                // 下发硬件配置
                                 HttpClient.updateFocusDistance(0.6)
                                 sendConfigUpdate("focus", {"focus": 0.6})
                                 HttpClient.updateFlicker(120)
                                 sendConfigUpdate("cjfps", {"cjfps": 120})
-                                HttpClient.updateFps(120)
-                                sendConfigUpdate("fps", {"fps": 120})
+                                HttpClient.updateFps(100)
+                                sendConfigUpdate("fps", {"fps": 100})
 
-                                console.log("🔄 相机设定已还原 (综合亮度=50中点, iOS 滤镜全部回 default)")
+                                console.log("🔄 相机设定已还原（综合亮度=50, fps=100, 抗频闪关闭, 色彩参数走服务器默认值）")
                             }
                         }
                     }
