@@ -2835,7 +2835,7 @@ Rectangle {
                 color: "#E53935"
                 radius: 4
                 visible: false  // 隐藏"录制中"文字
-                
+
                 Text {
                     id: stateText
                     anchors.centerIn: parent
@@ -2843,6 +2843,139 @@ Rectangle {
                     color: "#ffffff"
                     font.pixelSize: 12
                     font.bold: true
+                }
+            }
+
+            // 慢放进度条（贴在慢放view底部，跟随窗口切换）
+            Rectangle {
+                id: slowmoProgressBar
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.bottom: parent.bottom
+                height: 44
+                color: "#80000000"
+                visible: slowMotionPlayer.hasContent
+
+                RowLayout {
+                    anchors.fill: parent
+                    anchors.leftMargin: 16
+                    anchors.rightMargin: 16
+                    spacing: 12
+
+                    // 帧数显示: 当前播放帧/已录制帧数
+                    Text {
+                        text: (slowMotionPlayer.currentFrame + 1) + "/" + slowMotionPlayer.recordedFrames
+                        font.family: "PingFang HK"
+                        font.pixelSize: 14
+                        color: "#FFFFFF"
+                        Layout.minimumWidth: 70
+                    }
+
+                    // 进度条
+                    Item {
+                        id: frameSliderContainer
+                        Layout.fillWidth: true
+                        height: 16
+
+                        MouseArea {
+                            anchors.fill: parent
+                            onWheel: function(wheel) {
+                                wheel.accepted = true
+                                if (!slowMotionPlayer.hasContent) return
+                                if (wheel.angleDelta.y > 0) slowMotionPlayer.prevFrame()
+                                else slowMotionPlayer.nextFrame()
+                            }
+                            onClicked: function(mouse) {
+                                if (slowMotionPlayer.recordedFrames > 1) {
+                                    var ratio = mouse.x / frameSliderContainer.width
+                                    var frame = Math.round(ratio * (slowMotionPlayer.recordedFrames - 1))
+                                    slowMotionPlayer.jumpToFrame(frame)
+                                }
+                            }
+                        }
+
+                        Rectangle {
+                            anchors.centerIn: parent
+                            width: parent.width
+                            height: 4
+                            radius: 999
+                            color: "#C8E6C9"
+                        }
+
+                        Rectangle {
+                            id: frameHandle
+                            width: 16
+                            height: 16
+                            radius: 8
+                            color: "#A5D6A7"
+                            x: slowMotionPlayer.recordedFrames > 1 ?
+                               slowMotionPlayer.currentFrame / (slowMotionPlayer.recordedFrames - 1) * (parent.width - 16) : 0
+                            anchors.verticalCenter: parent.verticalCenter
+
+                            MouseArea {
+                                anchors.fill: parent
+                                anchors.margins: -4
+                                drag.target: parent
+                                drag.axis: Drag.XAxis
+                                drag.minimumX: 0
+                                drag.maximumX: frameSliderContainer.width - 16
+
+                                onWheel: function(wheel) {
+                                    wheel.accepted = true
+                                    if (!slowMotionPlayer.hasContent) return
+                                    if (wheel.angleDelta.y > 0) slowMotionPlayer.prevFrame()
+                                    else slowMotionPlayer.nextFrame()
+                                }
+
+                                onPositionChanged: {
+                                    if (drag.active && slowMotionPlayer.recordedFrames > 1) {
+                                        var ratio = frameHandle.x / (frameSliderContainer.width - 16)
+                                        var frame = Math.round(ratio * (slowMotionPlayer.recordedFrames - 1))
+                                        slowMotionPlayer.jumpToFrame(frame)
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // 播放/暂停按钮
+                    Item {
+                        width: 72
+                        height: 32
+
+                        Rectangle {
+                            anchors.fill: parent
+                            anchors.topMargin: 2
+                            radius: 6
+                            color: "#30000000"
+                        }
+
+                        Rectangle {
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            anchors.top: parent.top
+                            height: 30
+                            radius: 6
+                            color: playBtnArea.containsMouse ? "#A5D6A7" : "#E8F5E9"
+
+                            Text {
+                                anchors.centerIn: parent
+                                text: slowMotionPlayer.isPlaying ? "暂停(Q)" : "播放(Q)"
+                                font.family: "PingFang HK"
+                                font.weight: Font.Medium
+                                font.pixelSize: 13
+                                color: slowMotionPlayer.hasContent ? "#37474F" : "#90A4AE"
+                            }
+
+                            MouseArea {
+                                id: playBtnArea
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: slowMotionPlayer.togglePlay()
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -2877,130 +3010,8 @@ Rectangle {
                     anchors.fill: parent
                     anchors.margins: 20
                     spacing: 0
-                    
-                    // 慢放播放控制（第一行）
-                    RowLayout {
-                        Layout.fillWidth: true
-                        Layout.leftMargin: 12
-                        Layout.rightMargin: 12
-                        spacing: 12
 
-                        // 帧数显示: 当前播放帧/已录制帧数
-                        Text {
-                            text: (slowMotionPlayer.currentFrame + 1) + "/" + slowMotionPlayer.recordedFrames
-                            font.family: "PingFang HK"
-                            font.pixelSize: 14
-                            color: mainPage.panelTextColor  // 文字色随面板调整
-                            Layout.minimumWidth: 70
-                        }
-
-                        // 进度条
-                        Item {
-                            id: frameSliderContainer
-                            Layout.fillWidth: true
-                            height: 16
-
-                            MouseArea {
-                                anchors.fill: parent
-                                onWheel: function(wheel) {
-                                    wheel.accepted = true
-                                    if (!slowMotionPlayer.hasContent) return
-                                    if (wheel.angleDelta.y > 0) slowMotionPlayer.prevFrame()
-                                    else slowMotionPlayer.nextFrame()
-                                }
-                                onClicked: function(mouse) {
-                                    if (slowMotionPlayer.recordedFrames > 1) {
-                                        var ratio = mouse.x / frameSliderContainer.width
-                                        var frame = Math.round(ratio * (slowMotionPlayer.recordedFrames - 1))
-                                        slowMotionPlayer.jumpToFrame(frame)
-                                    }
-                                }
-                            }
-
-                            Rectangle {
-                                anchors.centerIn: parent
-                                width: parent.width
-                                height: 4
-                                radius: 999
-                                color: "#C8E6C9"
-                            }
-
-                            Rectangle {
-                                id: frameHandle
-                                width: 16
-                                height: 16
-                                radius: 8
-                                color: "#A5D6A7"
-                                x: slowMotionPlayer.recordedFrames > 1 ? 
-                                   slowMotionPlayer.currentFrame / (slowMotionPlayer.recordedFrames - 1) * (parent.width - 16) : 0
-                                anchors.verticalCenter: parent.verticalCenter
-
-                                MouseArea {
-                                    anchors.fill: parent
-                                    anchors.margins: -4
-                                    drag.target: parent
-                                    drag.axis: Drag.XAxis
-                                    drag.minimumX: 0
-                                    drag.maximumX: frameSliderContainer.width - 16
-
-                                    onWheel: function(wheel) {
-                                        wheel.accepted = true
-                                        if (!slowMotionPlayer.hasContent) return
-                                        if (wheel.angleDelta.y > 0) slowMotionPlayer.prevFrame()
-                                        else slowMotionPlayer.nextFrame()
-                                    }
-
-                                    onPositionChanged: {
-                                        if (drag.active && slowMotionPlayer.recordedFrames > 1) {
-                                            var ratio = frameHandle.x / (frameSliderContainer.width - 16)
-                                            var frame = Math.round(ratio * (slowMotionPlayer.recordedFrames - 1))
-                                            slowMotionPlayer.jumpToFrame(frame)
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        // 播放/暂停按钮
-                        Item {
-                            width: 72
-                            height: 32
-
-                            Rectangle {
-                                anchors.fill: parent
-                                anchors.topMargin: 2
-                                radius: 6
-                                color: "#30000000"
-                            }
-
-                            Rectangle {
-                                anchors.left: parent.left
-                                anchors.right: parent.right
-                                anchors.top: parent.top
-                                height: 30
-                                radius: 6
-                                color: playBtnArea.containsMouse ? "#A5D6A7" : "#E8F5E9"
-
-                                Text {
-                                    anchors.centerIn: parent
-                                    text: slowMotionPlayer.isPlaying ? "暂停(Q)" : "播放(Q)"
-                                    font.family: "PingFang HK"
-                                    font.weight: Font.Medium
-                                    font.pixelSize: 13
-                                    color: slowMotionPlayer.hasContent ? "#37474F" : "#90A4AE"
-                                }
-
-                                MouseArea {
-                                    id: playBtnArea
-                                    anchors.fill: parent
-                                    hoverEnabled: true
-                                    cursorShape: Qt.PointingHandCursor
-                                    onClicked: slowMotionPlayer.togglePlay()
-                                }
-                            }
-                        }
-                    }
-                    
+                    // 慢放播放控制（已移到慢放view底部 slowmoProgressBar，这里留空占位）
                     Item { Layout.fillHeight: true }
 
                     // 四个按钮
