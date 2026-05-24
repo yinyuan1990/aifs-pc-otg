@@ -5540,7 +5540,7 @@ Rectangle {
                     spacing: 10
 
                     Text {
-                        text: "测试模式"
+                        text: "原生模式"
                         font.family: "PingFang HK"
                         font.pixelSize: 13
                         font.bold: true
@@ -5572,7 +5572,7 @@ Rectangle {
                     }
 
                     Text {
-                        text: iosCameraSettingsPopup.testModeEnabled ? "硬件调节(玉麒麟)" : "后处理(原方案)"
+                        text: iosCameraSettingsPopup.testModeEnabled ? "硬件直出" : "后处理增强"
                         font.family: "PingFang HK"
                         font.pixelSize: 11
                         color: "#78909C"
@@ -5581,20 +5581,17 @@ Rectangle {
                 }
             }
 
-            // 测试亮度滑块（仅测试模式开启时生效，独立于综合亮度）
+            // 测试亮度滑块（仅原生模式开启时生效，独立于综合亮度）
             RowLayout {
                 Layout.fillWidth: true
-                Layout.leftMargin: 18
-                Layout.rightMargin: 18
-                spacing: 12
+                spacing: 10
 
                 Text {
-                    text: "测试亮度"
+                    text: "原生亮度"
                     font.family: "PingFang HK"
-                    font.pixelSize: 13
-                    font.bold: true
-                    color: iosCameraSettingsPopup.testModeEnabled ? "#1976D2" : "#B0BEC5"
-                    Layout.preferredWidth: 70
+                    font.pixelSize: 16
+                    color: iosCameraSettingsPopup.testModeEnabled ? "#263238" : "#B0BEC5"
+                    Layout.preferredWidth: 60
                 }
 
                 Slider {
@@ -5610,15 +5607,43 @@ Rectangle {
                     onMoved: {
                         sendTestBrightnessConfig(value)
                     }
+
+                    background: Rectangle {
+                        x: testBrightnessSlider.leftPadding
+                        y: testBrightnessSlider.topPadding + testBrightnessSlider.availableHeight / 2 - height / 2
+                        implicitWidth: 200
+                        implicitHeight: 4
+                        width: testBrightnessSlider.availableWidth
+                        height: 4
+                        radius: 999
+                        color: "#C8E6C9"
+
+                        Rectangle {
+                            width: testBrightnessSlider.visualPosition * parent.width
+                            height: parent.height
+                            radius: 999
+                            color: "#4DB6AC"
+                        }
+                    }
+
+                    handle: Rectangle {
+                        x: testBrightnessSlider.leftPadding + testBrightnessSlider.visualPosition * (testBrightnessSlider.availableWidth - width)
+                        y: testBrightnessSlider.topPadding + testBrightnessSlider.availableHeight / 2 - height / 2
+                        implicitWidth: 14
+                        implicitHeight: 14
+                        width: 14
+                        height: 14
+                        radius: 7
+                        color: "#4DB6AC"
+                    }
                 }
 
                 Text {
                     text: Math.round(testBrightnessSlider.value)
                     font.family: "PingFang HK"
-                    font.pixelSize: 13
-                    color: iosCameraSettingsPopup.testModeEnabled ? "#1976D2" : "#B0BEC5"
-                    Layout.preferredWidth: 28
-                    horizontalAlignment: Text.AlignRight
+                    font.pixelSize: 16
+                    color: iosCameraSettingsPopup.testModeEnabled ? "#263238" : "#B0BEC5"
+                    Layout.preferredWidth: 40
                 }
             }
             }  // 关闭 ColumnLayout
