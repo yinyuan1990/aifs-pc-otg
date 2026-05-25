@@ -75,6 +75,7 @@ protected:
     void run() override;
 
 private:
+    void cleanupEncoder();
     QByteArray encodeJpeg(const QImage &image);
 
 private:
