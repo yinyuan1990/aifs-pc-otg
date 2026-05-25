@@ -155,7 +155,7 @@ GstPlayer::GstPlayer(QObject *parent)
     
     // ⭐ 程序启动时清空所有 JPEG 文件（所有会话前缀）
     if (dir.exists()) {
-        QStringList files = dir.entryList(QStringList() << "s_*.jpeg", QDir::Files);
+        QStringList files = dir.entryList(QStringList() << "s_*.png", QDir::Files);
         for (const QString &file : files) {
             dir.remove(file);
         }
@@ -684,7 +684,7 @@ bool GstPlayer::createPipeline()
     m_jpegRate = nullptr;       // WebRTC 流没有有效时长，不使用 videorate
     m_jpegConvert = gst_element_factory_make("videoconvert", "jpeg_convert");  // ⭐ 色彩转换
     m_jpegCapsFilter = gst_element_factory_make("capsfilter", "jpeg_caps");    // ⭐ 强制 RGB 格式
-    m_jpegEnc = gst_element_factory_make("jpegenc", "jpeg_enc");
+    m_jpegEnc = gst_element_factory_make("pngenc", "png_enc");
     m_jpegSink = gst_element_factory_make("multifilesink", "jpeg_sink");
     
     // 检查所有元素
@@ -793,25 +793,20 @@ bool GstPlayer::createPipeline()
     g_object_set(m_jpegValve, "drop", FALSE, nullptr);
     m_jpegEnabled = true;
     
-    // ⭐ 配置 capsfilter 强制 RGB 格式（与显示分支 BGRA 色彩一致）
-    // RGB 是 jpegenc 支持的格式，色彩转换矩阵与 BGRA 相同
+    // pngenc 支持 RGB/RGBA，保持 RGB 格式
     GstCaps *jpegCaps = gst_caps_new_simple("video/x-raw",
         "format", G_TYPE_STRING, "RGB",
         nullptr);
     g_object_set(m_jpegCapsFilter, "caps", jpegCaps, nullptr);
     gst_caps_unref(jpegCaps);
-    qDebug() << "✅ JPEG 管道：queue → valve → videoconvert → capsfilter(RGB) → jpegenc";
-    
-    // JPEG 编码器配置
-    g_object_set(m_jpegEnc,
-        "quality", 50,       // 质量 50（测试效果）
-        "idct-method", 2,    // 快速 IDCT
-        nullptr);
-    
+    qDebug() << "✅ PNG 管道：queue → valve → videoconvert → capsfilter(RGB) → pngenc";
+
+    // PNG 无损，compression=6 平衡速度与文件大小
+    g_object_set(m_jpegEnc, "compression", 6, nullptr);
+
     // ⭐ multifilesink 配置（使用会话前缀）
     QDir().mkpath(m_jpegDirectory);
-    // 文件格式: s_1737012345_000000001.jpeg (会话前缀 + 9位序号)
-    QString location = QString("%1/%2_%09d.jpeg").arg(m_jpegDirectory).arg(m_sessionPrefix);
+    QString location = QString("%1/%2_%09d.png").arg(m_jpegDirectory).arg(m_sessionPrefix);
     g_object_set(m_jpegSink,
         "location", location.toUtf8().constData(),
         "post-messages", TRUE,
@@ -991,7 +986,7 @@ bool GstPlayer::createPipeline()
         destroyPipeline();
         return false;
     }
-    qDebug() << "✅ JPEG 分支链接成功（videoconvert → RGB → jpegenc）";
+    qDebug() << "✅ PNG 分支链接成功（videoconvert → RGB → pngenc）";
 
     // P2: 240fps 截图帧计数 probe（在 jpegSink 的 sink pad 上计数每帧）
     GstPad *jpegSinkPad = gst_element_get_static_pad(m_jpegSink, "sink");
@@ -1105,7 +1100,7 @@ void GstPlayer::setJpegDirectory(const QString &dir)
         
         // ⭐ 更新 multifilesink 路径（使用会话前缀）
         if (m_jpegSink) {
-            QString location = QString("%1/%2_%09d.jpeg").arg(m_jpegDirectory).arg(m_sessionPrefix);
+            QString location = QString("%1/%2_%09d.png").arg(m_jpegDirectory).arg(m_sessionPrefix);
             g_object_set(m_jpegSink, "location", location.toUtf8().constData(), nullptr);
             qDebug() << "📁 JPEG 目录更新:" << m_jpegDirectory << "前缀:" << m_sessionPrefix;
         }
@@ -1130,7 +1125,7 @@ void GstPlayer::startJpegCapture()
     m_oldestFrame = 0;
     if (m_jpegSink) {
         // ⭐ 更新 multifilesink 位置为新会话前缀
-        QString location = QString("%1/%2_%09d.jpeg").arg(m_jpegDirectory).arg(m_sessionPrefix);
+        QString location = QString("%1/%2_%09d.png").arg(m_jpegDirectory).arg(m_sessionPrefix);
         g_object_set(m_jpegSink, 
             "location", location.toUtf8().constData(),
             "index", 0, 
@@ -1152,8 +1147,8 @@ void GstPlayer::stopJpegCapture()
 void GstPlayer::clearJpegFiles()
 {
     QDir dir(m_jpegDirectory);
-    // ⭐ 清理所有会话的 JPEG 文件（s_*.jpeg 匹配所有会话前缀）
-    QStringList files = dir.entryList(QStringList() << "s_*.jpeg", QDir::Files);
+    // 清理所有会话的 PNG 文件（s_*.png 匹配所有会话前缀）
+    QStringList files = dir.entryList(QStringList() << "s_*.png", QDir::Files);
     
     int count = 0;
     for (const QString &file : files) {
@@ -1189,14 +1184,14 @@ void GstPlayer::generateSessionPrefix()
 
 QString GstPlayer::frameFilePath(qint64 frameIndex) const
 {
-    // ⭐ 文件格式: s_1737012345_000000123.jpeg (会话前缀 + 9位数字)
-    return QString("%1/%2_%3.jpeg").arg(m_jpegDirectory).arg(m_sessionPrefix).arg(frameIndex, 9, 10, QChar('0'));
+    // 文件格式: s_1737012345_000000123.png (会话前缀 + 9位数字)
+    return QString("%1/%2_%3.png").arg(m_jpegDirectory).arg(m_sessionPrefix).arg(frameIndex, 9, 10, QChar('0'));
 }
 
 // ⭐ 使用指定的会话前缀获取文件路径
 QString GstPlayer::frameFilePathWithPrefix(qint64 frameIndex, const QString &sessionPrefix) const
 {
-    return QString("%1/%2_%3.jpeg").arg(m_jpegDirectory).arg(sessionPrefix).arg(frameIndex, 9, 10, QChar('0'));
+    return QString("%1/%2_%3.png").arg(m_jpegDirectory).arg(sessionPrefix).arg(frameIndex, 9, 10, QChar('0'));
 }
 
 QByteArray GstPlayer::getJpeg(qint64 frameIndex) const
@@ -1945,11 +1940,8 @@ void GstPlayer::setAllImageParams(double brightness, double contrast, double sat
 
 void GstPlayer::setJpegQuality(int quality)
 {
-    if (m_jpegEnc) {
-        quality = qBound(1, quality, 100);
-        g_object_set(m_jpegEnc, "quality", quality, nullptr);
-        qDebug() << "📸 JPEG质量已调整为:" << quality;
-    }
+    Q_UNUSED(quality);
+    // PNG 无损，无需质量调节
 }
 
 void GstPlayer::setConfigFps(double fps)

@@ -726,14 +726,13 @@ void SlowMotionDecodeThread::run()
         }
         
         if (request.globalIndex >= 0) {
-            // ⭐ 使用会话前缀构建正确的 JPEG 路径（如 s_1737012345_000000123.jpeg）
             QString sessionPrefix;
             {
                 QMutexLocker locker(&m_queueMutex);
                 sessionPrefix = m_sessionPrefix;
             }
-            QString jpegPath = QCoreApplication::applicationDirPath() + 
-                QString("/captures/frames/%1_%2.jpeg").arg(sessionPrefix).arg(request.globalIndex, 9, 10, QChar('0'));
+            QString jpegPath = QCoreApplication::applicationDirPath() +
+                QString("/captures/frames/%1_%2.png").arg(sessionPrefix).arg(request.globalIndex, 9, 10, QChar('0'));
             
             QFile file(jpegPath);
             if (file.open(QIODevice::ReadOnly)) {

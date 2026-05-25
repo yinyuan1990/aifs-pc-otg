@@ -80,7 +80,7 @@ Rectangle {
     // ⭐ 本地设置存储（持久化）
     Settings {
         id: appSettings
-        property int screenshotQuality: 60  // 截图质量，默认60
+        property int screenshotQuality: 100  // 截图质量，默认100
         property real panelColorH: 0     // 面板颜色色相 (0-1)，默认90%白色
         property real panelColorS: 0     // 面板颜色饱和度 (0-1)，默认90%白色
         property real panelColorV: 0.9   // 面板颜色明度 (0-1)，默认90%白色

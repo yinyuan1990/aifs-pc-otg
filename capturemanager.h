@@ -15,12 +15,6 @@
 #include "gpupipeline.h"
 #include "gstplayer.h"
 
-// 前向声明
-struct AVCodecContext;
-struct AVFrame;
-struct AVPacket;
-struct SwsContext;
-
 #include "slowmotionplayer.h"
 
 /**
@@ -81,8 +75,6 @@ protected:
     void run() override;
 
 private:
-    bool initEncoder(int width, int height);
-    void cleanupEncoder();
     QByteArray encodeJpeg(const QImage &image);
 
 private:
@@ -98,17 +90,10 @@ private:
     std::atomic<bool> m_running{true};
     std::atomic<qint64> m_currentIndex{0};
     
-    // FFmpeg MJPEG 编码器
-    AVCodecContext *m_codecCtx = nullptr;
-    AVFrame *m_frame = nullptr;
-    AVPacket *m_packet = nullptr;
-    SwsContext *m_swsCtx = nullptr;
-    int m_encoderWidth = 0;
-    int m_encoderHeight = 0;
-    bool m_useHardware = false;
-    
-    static constexpr int MAX_QUEUE_SIZE = 5;   // 编码队列
-    static constexpr int JPEG_QUALITY = 85;
+    tjhandle m_tjEncoder = nullptr;
+
+    static constexpr int MAX_QUEUE_SIZE = 5;
+    static constexpr int JPEG_QUALITY = 100;
 };
 
 /**
