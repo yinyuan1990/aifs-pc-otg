@@ -510,7 +510,7 @@ QImage SlowMotionPlayer::getFrameImage(int frameOffset) const
             jpegData = m_gstPlayer->getJpeg(globalIndex);
         }
         if (!jpegData.isEmpty()) {
-            img.loadFromData(jpegData, "JPEG");
+            img.loadFromData(jpegData);
         }
     }
     
@@ -740,7 +740,7 @@ void SlowMotionDecodeThread::run()
                 file.close();
                 
                 QImage img;
-                if (img.loadFromData(jpegData, "JPEG")) {
+                if (img.loadFromData(jpegData)) {
                     int origW = img.width();
                     int origH = img.height();
                     

@@ -967,7 +967,7 @@ QImage CaptureManager::loadFrameFromDisk(qint64 globalFrameIndex, const QString 
         }
         if (!jpegData.isEmpty()) {
             QImage img;
-            if (img.loadFromData(jpegData, "JPEG")) {
+            if (img.loadFromData(jpegData)) {
                 // ⭐ 保存有效帧
                 lastValidFrame = globalFrameIndex;
                 lastValidImage = img;
