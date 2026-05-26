@@ -794,21 +794,23 @@ bool GstPlayer::createPipeline()
     m_jpegEnabled = true;
     
     // ⭐ 配置 capsfilter 强制 RGB 格式（与显示分支 BGRA 色彩一致）
+    // RGB 是 jpegenc 支持的格式，色彩转换矩阵与 BGRA 相同
     GstCaps *jpegCaps = gst_caps_new_simple("video/x-raw",
         "format", G_TYPE_STRING, "RGB",
         nullptr);
     g_object_set(m_jpegCapsFilter, "caps", jpegCaps, nullptr);
     gst_caps_unref(jpegCaps);
     qDebug() << "✅ JPEG 管道：queue → valve → videoconvert → capsfilter(RGB) → jpegenc";
-
-    // JPEG 编码器：quality=95 + 4:4:4 色度保留（与 turbojpeg 一致）
+    
+    // JPEG 编码器配置
     g_object_set(m_jpegEnc,
-        "quality", 95,
-        "idct-method", 2,
+        "quality", 50,       // 质量 50（测试效果）
+        "idct-method", 2,    // 快速 IDCT
         nullptr);
-
+    
     // ⭐ multifilesink 配置（使用会话前缀）
     QDir().mkpath(m_jpegDirectory);
+    // 文件格式: s_1737012345_000000001.jpeg (会话前缀 + 9位序号)
     QString location = QString("%1/%2_%09d.jpeg").arg(m_jpegDirectory).arg(m_sessionPrefix);
     g_object_set(m_jpegSink,
         "location", location.toUtf8().constData(),

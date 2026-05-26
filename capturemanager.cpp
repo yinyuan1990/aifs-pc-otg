@@ -16,6 +16,11 @@
 #include <psapi.h>
 #endif
 
+extern "C" {
+#include <libavcodec/avcodec.h>
+#include <libavutil/imgutils.h>
+#include <libswscale/swscale.h>
+}
 
 // ============== 内存监控 ==============
 static double getMemoryUsageMB() {
@@ -163,53 +168,192 @@ void JpegEncoder::submitFrame(const QImage &frame, qint64 frameIndex)
     m_mutex.unlock();
 }
 
+bool JpegEncoder::initEncoder(int width, int height)
+{
+    if (m_codecCtx && m_encoderWidth == width && m_encoderHeight == height) {
+        return true;
+    }
+    
+    cleanupEncoder();
+    
+    // 列出所有可用的 MJPEG 编码器
+    qDebug() << "=== Searching for MJPEG encoders ===";
+    void *iter = nullptr;
+    const AVCodec *c;
+    while ((c = av_codec_iterate(&iter))) {
+        if (av_codec_is_encoder(c) && c->id == AV_CODEC_ID_MJPEG) {
+            qDebug() << "Found MJPEG encoder:" << c->name << "-" << (c->long_name ? c->long_name : "");
+        }
+    }
+    qDebug() << "=== End encoder search ===";
+    
+    // 尝试硬件加速编码器
+    const AVCodec *codec = nullptr;
+    bool useHardware = false;
+    
+    // 1. 尝试 Intel QSV (mjpeg_qsv) - 需要 Intel GPU
+    codec = avcodec_find_encoder_by_name("mjpeg_qsv");
+    if (codec) {
+        qDebug() << "Trying Intel QSV MJPEG encoder";
+        useHardware = true;
+    }
+    
+    // 2. 尝试 VAAPI (Linux/一些 Windows)
+    if (!codec) {
+        codec = avcodec_find_encoder_by_name("mjpeg_vaapi");
+        if (codec) {
+            qDebug() << "Trying VAAPI MJPEG encoder";
+            useHardware = true;
+        }
+    }
+    
+    // 3. 回退到软件编码器
+    if (!codec) {
+        codec = avcodec_find_encoder(AV_CODEC_ID_MJPEG);
+        qDebug() << "Using software MJPEG encoder";
+    }
+    
+    if (!codec) {
+        qWarning() << "No MJPEG encoder found";
+        return false;
+    }
+    
+    m_codecCtx = avcodec_alloc_context3(codec);
+    if (!m_codecCtx) return false;
+    
+    m_codecCtx->width = width;
+    m_codecCtx->height = height;
+    m_codecCtx->time_base = {1, 60};
+    
+    if (useHardware) {
+        // QSV 使用 NV12 格式
+        m_codecCtx->pix_fmt = AV_PIX_FMT_NV12;
+    } else {
+        m_codecCtx->pix_fmt = AV_PIX_FMT_YUVJ444P;
+    }
+    
+    // 使用多线程加速（软件编码时）
+    if (!useHardware) {
+        m_codecCtx->thread_count = 4;
+        m_codecCtx->thread_type = FF_THREAD_SLICE;  // 使用 slice 线程避免警告
+    }
+    
+    // 固定质量
+    m_codecCtx->flags |= AV_CODEC_FLAG_QSCALE;
+    m_codecCtx->global_quality = FF_QP2LAMBDA * 5;
+    
+    if (avcodec_open2(m_codecCtx, codec, nullptr) < 0) {
+        qWarning() << "Failed to open encoder, trying software fallback";
+        avcodec_free_context(&m_codecCtx);
+        
+        // 回退到软件
+        codec = avcodec_find_encoder(AV_CODEC_ID_MJPEG);
+        if (!codec) return false;
+        
+        m_codecCtx = avcodec_alloc_context3(codec);
+        m_codecCtx->width = width;
+        m_codecCtx->height = height;
+        m_codecCtx->time_base = {1, 60};
+        m_codecCtx->pix_fmt = AV_PIX_FMT_YUVJ444P;
+        m_codecCtx->thread_count = 4;
+        m_codecCtx->thread_type = FF_THREAD_SLICE;
+        m_codecCtx->flags |= AV_CODEC_FLAG_QSCALE;
+        m_codecCtx->global_quality = FF_QP2LAMBDA * 5;
+        
+        if (avcodec_open2(m_codecCtx, codec, nullptr) < 0) {
+            avcodec_free_context(&m_codecCtx);
+            return false;
+        }
+        useHardware = false;
+    }
+    
+    m_frame = av_frame_alloc();
+    m_frame->format = m_codecCtx->pix_fmt;
+    m_frame->width = width;
+    m_frame->height = height;
+    if (!useHardware) {
+        m_frame->color_range = AVCOL_RANGE_JPEG;
+    }
+    av_frame_get_buffer(m_frame, 32);
+    
+    m_packet = av_packet_alloc();
+    
+    // 设置色彩空间转换
+    AVPixelFormat dstFmt = useHardware ? AV_PIX_FMT_NV12 : AV_PIX_FMT_YUVJ444P;
+    m_swsCtx = sws_getContext(
+        width, height, AV_PIX_FMT_RGB32,
+        width, height, dstFmt,
+        SWS_FAST_BILINEAR, nullptr, nullptr, nullptr);
+    
+    m_encoderWidth = width;
+    m_encoderHeight = height;
+    m_useHardware = useHardware;
+    
+    qDebug() << "MJPEG encoder initialized:" << width << "x" << height 
+             << (useHardware ? "(Hardware)" : "(Software)");
+    
+    return true;
+}
+
 void JpegEncoder::cleanupEncoder()
 {
-    if (m_tjEncoder) {
-        tjDestroy(m_tjEncoder);
-        m_tjEncoder = nullptr;
+    if (m_swsCtx) {
+        sws_freeContext(m_swsCtx);
+        m_swsCtx = nullptr;
     }
+    if (m_packet) {
+        av_packet_free(&m_packet);
+        m_packet = nullptr;
+    }
+    if (m_frame) {
+        av_frame_free(&m_frame);
+        m_frame = nullptr;
+    }
+    if (m_codecCtx) {
+        avcodec_free_context(&m_codecCtx);
+        m_codecCtx = nullptr;
+    }
+    m_encoderWidth = 0;
+    m_encoderHeight = 0;
 }
 
 QByteArray JpegEncoder::encodeJpeg(const QImage &image)
 {
     if (image.isNull()) return QByteArray();
-
-    if (!m_tjEncoder) {
-        m_tjEncoder = tjInitCompress();
-        if (!m_tjEncoder) return QByteArray();
-    }
-
+    
     QImage img = image;
     if (img.format() != QImage::Format_RGB32 && img.format() != QImage::Format_ARGB32) {
         img = img.convertToFormat(QImage::Format_RGB32);
     }
-
-    unsigned char *jpegBuf = nullptr;
-    unsigned long jpegSize = 0;
-
-    // BGRX: QImage::Format_RGB32 在小端内存中布局为 B G R X
-    int ret = tjCompress2(
-        m_tjEncoder,
-        const_cast<unsigned char *>(img.constBits()),
-        img.width(),
-        img.bytesPerLine(),
-        img.height(),
-        TJPF_BGRX,
-        &jpegBuf,
-        &jpegSize,
-        TJSAMP_444,      // 4:4:4 不降色度，与实时流一致
-        JPEG_QUALITY,
-        TJFLAG_ACCURATEDCT
-    );
-
-    if (ret != 0) {
-        if (jpegBuf) tjFree(jpegBuf);
-        return QByteArray();
+    
+    if (!initEncoder(img.width(), img.height())) {
+        // 回退到 Qt 编码
+        QByteArray data;
+        QBuffer buffer(&data);
+        buffer.open(QIODevice::WriteOnly);
+        img.save(&buffer, "JPEG", JPEG_QUALITY);
+        return data;
     }
-
-    QByteArray result(reinterpret_cast<char *>(jpegBuf), static_cast<int>(jpegSize));
-    tjFree(jpegBuf);
+    
+    // RGB -> YUV
+    const uint8_t *srcData[1] = {img.constBits()};
+    int srcLinesize[1] = {static_cast<int>(img.bytesPerLine())};
+    
+    sws_scale(m_swsCtx, srcData, srcLinesize, 0, img.height(),
+              m_frame->data, m_frame->linesize);
+    
+    m_frame->pts = m_currentIndex.load();
+    
+    // 编码
+    int ret = avcodec_send_frame(m_codecCtx, m_frame);
+    if (ret < 0) return QByteArray();
+    
+    ret = avcodec_receive_packet(m_codecCtx, m_packet);
+    if (ret < 0) return QByteArray();
+    
+    QByteArray result(reinterpret_cast<char*>(m_packet->data), m_packet->size);
+    av_packet_unref(m_packet);
+    
     return result;
 }
 
@@ -967,7 +1111,7 @@ QImage CaptureManager::loadFrameFromDisk(qint64 globalFrameIndex, const QString 
         }
         if (!jpegData.isEmpty()) {
             QImage img;
-            if (img.loadFromData(jpegData)) {
+            if (img.loadFromData(jpegData, "JPEG")) {
                 // ⭐ 保存有效帧
                 lastValidFrame = globalFrameIndex;
                 lastValidImage = img;
