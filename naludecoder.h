@@ -20,6 +20,8 @@ public:
     ~NaluDecoder();
 
     QImage decodeFrame(qint64 frameIndex);
+    QImage tryCachedFrame(qint64 frameIndex);
+    bool canDecodeQuickly(qint64 frameIndex);
     void clearCache();
     void flush();
 
@@ -28,6 +30,7 @@ private:
     void cleanupDecoder();
     QImage decodeOneNalu(const QByteArray &naluData);
     void evictCache();
+    static QByteArray ensureAnnexB(const QByteArray &data);
 
     NaluFrameStore *m_store;
 

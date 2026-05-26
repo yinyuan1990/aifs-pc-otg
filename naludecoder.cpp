@@ -98,33 +98,40 @@ void NaluDecoder::evictCache()
     }
 }
 
-static bool hasAnnexBStartCode(const uint8_t *data, int size)
+QByteArray NaluDecoder::ensureAnnexB(const QByteArray &data)
 {
-    if (size < 4) return false;
-    return (data[0] == 0x00 && data[1] == 0x00 && data[2] == 0x00 && data[3] == 0x01) ||
-           (data[0] == 0x00 && data[1] == 0x00 && data[2] == 0x01);
-}
+    if (data.size() < 4) return data;
+    const uint8_t *p = reinterpret_cast<const uint8_t*>(data.constData());
+    int size = data.size();
 
-static QByteArray avccToAnnexB(const QByteArray &avcc)
-{
-    const uint8_t *src = reinterpret_cast<const uint8_t*>(avcc.constData());
-    int srcSize = avcc.size();
-    QByteArray result;
-    result.reserve(srcSize + 32);
-
-    static const char startCode[] = {0x00, 0x00, 0x00, 0x01};
-    int pos = 0;
-    while (pos + 4 <= srcSize) {
-        uint32_t nalLen = (static_cast<uint32_t>(src[pos]) << 24) |
-                          (static_cast<uint32_t>(src[pos+1]) << 16) |
-                          (static_cast<uint32_t>(src[pos+2]) << 8) |
-                          static_cast<uint32_t>(src[pos+3]);
-        pos += 4;
-        if (nalLen == 0 || pos + static_cast<int>(nalLen) > srcSize) break;
-        result.append(startCode, 4);
-        result.append(reinterpret_cast<const char*>(src + pos), static_cast<int>(nalLen));
-        pos += static_cast<int>(nalLen);
+    if ((p[0] == 0 && p[1] == 0 && p[2] == 0 && p[3] == 1) ||
+        (p[0] == 0 && p[1] == 0 && p[2] == 1)) {
+        return data;
     }
+
+    static const char sc[4] = {0, 0, 0, 1};
+    QByteArray result;
+    result.reserve(size + 64);
+    int pos = 0;
+    bool parsed = false;
+
+    while (pos + 4 <= size) {
+        uint32_t nalLen = (uint32_t(p[pos]) << 24) | (uint32_t(p[pos+1]) << 16) |
+                          (uint32_t(p[pos+2]) << 8) | uint32_t(p[pos+3]);
+        if (nalLen == 0 || nalLen > uint32_t(size - pos - 4)) break;
+        pos += 4;
+        result.append(sc, 4);
+        result.append(reinterpret_cast<const char*>(p + pos), int(nalLen));
+        pos += int(nalLen);
+        parsed = true;
+    }
+
+    if (parsed && pos >= size - 3) return result;
+
+    result.clear();
+    result.reserve(size + 4);
+    result.append(sc, 4);
+    result.append(data);
     return result;
 }
 
@@ -132,24 +139,11 @@ QImage NaluDecoder::decodeOneNalu(const QByteArray &naluData)
 {
     if (!m_codecCtx || naluData.isEmpty()) return QImage();
 
-    const uint8_t *rawData = reinterpret_cast<const uint8_t*>(naluData.constData());
-    QByteArray annexB;
-    const uint8_t *feedData;
-    int feedSize;
-
-    if (hasAnnexBStartCode(rawData, naluData.size())) {
-        feedData = rawData;
-        feedSize = naluData.size();
-    } else {
-        annexB = avccToAnnexB(naluData);
-        if (annexB.isEmpty()) return QImage();
-        feedData = reinterpret_cast<const uint8_t*>(annexB.constData());
-        feedSize = annexB.size();
-    }
+    QByteArray feed = ensureAnnexB(naluData);
 
     AVPacket *pkt = av_packet_alloc();
-    pkt->data = const_cast<uint8_t*>(feedData);
-    pkt->size = feedSize;
+    pkt->data = reinterpret_cast<uint8_t*>(feed.data());
+    pkt->size = feed.size();
 
     int ret = avcodec_send_packet(m_codecCtx, pkt);
 
@@ -185,6 +179,25 @@ QImage NaluDecoder::decodeOneNalu(const QByteArray &naluData)
               dstData, dstLinesize);
 
     return img;
+}
+
+QImage NaluDecoder::tryCachedFrame(qint64 frameIndex)
+{
+    QMutexLocker lock(&m_mutex);
+    auto it = m_cache.find(frameIndex);
+    if (it != m_cache.end()) {
+        it.value().accessOrder = ++m_accessCounter;
+        return it.value().image;
+    }
+    return QImage();
+}
+
+bool NaluDecoder::canDecodeQuickly(qint64 frameIndex)
+{
+    QMutexLocker lock(&m_mutex);
+    if (m_cache.contains(frameIndex)) return true;
+    if (frameIndex == m_lastDecodedIndex + 1) return true;
+    return false;
 }
 
 QImage NaluDecoder::decodeFrame(qint64 frameIndex)

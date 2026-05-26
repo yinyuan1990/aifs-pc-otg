@@ -10,6 +10,7 @@
 #include <QDebug>
 #include <QTextStream>
 #include <QDateTime>
+#include <QtConcurrent>
 
 #ifdef Q_OS_WIN
 #include <windows.h>
@@ -779,9 +780,23 @@ void CaptureManager::capture()
     
     emit countChanged();
     emit itemAdded(newIndex);
-    // 🔥 不再自动选中新 item，由 QML 根据鼠标位置决定
-    // setCurrentItemIndex(newIndex);
     emit captureComplete(newIndex);
+
+    // 异步预解码事件帧（避免阻塞渲染线程导致实时流卡顿）
+    qint64 preDecodeIdx = eventIndex;
+    int preDecodeItem = newIndex;
+    int preDecodeOffset = item.eventOffset();
+    QtConcurrent::run([this, preDecodeIdx, preDecodeItem, preDecodeOffset]() {
+        if (m_naluDecoder) {
+            m_naluDecoder->decodeFrame(preDecodeIdx);
+        }
+        QMetaObject::invokeMethod(this, [this, preDecodeItem, preDecodeOffset]() {
+            m_cachedImage = QImage();
+            if (preDecodeItem < m_items.size()) {
+                emit frameChanged(preDecodeItem, preDecodeOffset);
+            }
+        }, Qt::QueuedConnection);
+    });
 }
 
 void CaptureManager::saveItemToDisk(int itemIndex)
@@ -956,12 +971,30 @@ QImage CaptureManager::getFrameImage(int itemIndex, int frameOffset)
 
     QImage img;
 
-    // 使用 NaluDecoder 解码 H.264 NALU（零格式转换，原始画质）
     if (m_naluDecoder) {
-        img = m_naluDecoder->decodeFrame(globalIndex);
+        img = m_naluDecoder->tryCachedFrame(globalIndex);
+        if (img.isNull()) {
+            if (m_naluDecoder->canDecodeQuickly(globalIndex)) {
+                img = m_naluDecoder->decodeFrame(globalIndex);
+            } else {
+                int idx = itemIndex;
+                int off = frameOffset;
+                QtConcurrent::run([this, globalIndex, idx, off]() {
+                    if (m_naluDecoder) {
+                        m_naluDecoder->decodeFrame(globalIndex);
+                    }
+                    QMetaObject::invokeMethod(this, [this, idx, off]() {
+                        m_cachedImage = QImage();
+                        if (idx < m_items.size()) {
+                            emit frameChanged(idx, off);
+                        }
+                    }, Qt::QueuedConnection);
+                });
+                return QImage();
+            }
+        }
     }
 
-    // 回退到 JPEG（兼容旧数据）
     if (img.isNull()) {
         img = loadFrameFromDisk(globalIndex, item.sessionPrefix);
     }
