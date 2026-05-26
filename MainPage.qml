@@ -7734,7 +7734,8 @@ Rectangle {
             if (publishStatus === 1 && streamKey && streamKey.length > 0) {
                 // 开始推流
                 if (publishState === 0) {
-                    console.log("📥 设备开始推流，启动拉流...")
+                    console.log("📥 设备开始推流，推流ID: " + streamKey)
+                    HttpClient.copyToClipboard(streamKey)
                     publishState = 1
                     mainPage.deviceStatus = ""
                     lastStreamKey = streamKey
