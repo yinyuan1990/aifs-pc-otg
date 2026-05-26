@@ -98,13 +98,58 @@ void NaluDecoder::evictCache()
     }
 }
 
+static bool hasAnnexBStartCode(const uint8_t *data, int size)
+{
+    if (size < 4) return false;
+    return (data[0] == 0x00 && data[1] == 0x00 && data[2] == 0x00 && data[3] == 0x01) ||
+           (data[0] == 0x00 && data[1] == 0x00 && data[2] == 0x01);
+}
+
+static QByteArray avccToAnnexB(const QByteArray &avcc)
+{
+    const uint8_t *src = reinterpret_cast<const uint8_t*>(avcc.constData());
+    int srcSize = avcc.size();
+    QByteArray result;
+    result.reserve(srcSize + 32);
+
+    static const char startCode[] = {0x00, 0x00, 0x00, 0x01};
+    int pos = 0;
+    while (pos + 4 <= srcSize) {
+        uint32_t nalLen = (static_cast<uint32_t>(src[pos]) << 24) |
+                          (static_cast<uint32_t>(src[pos+1]) << 16) |
+                          (static_cast<uint32_t>(src[pos+2]) << 8) |
+                          static_cast<uint32_t>(src[pos+3]);
+        pos += 4;
+        if (nalLen == 0 || pos + static_cast<int>(nalLen) > srcSize) break;
+        result.append(startCode, 4);
+        result.append(reinterpret_cast<const char*>(src + pos), static_cast<int>(nalLen));
+        pos += static_cast<int>(nalLen);
+    }
+    return result;
+}
+
 QImage NaluDecoder::decodeOneNalu(const QByteArray &naluData)
 {
     if (!m_codecCtx || naluData.isEmpty()) return QImage();
 
+    const uint8_t *rawData = reinterpret_cast<const uint8_t*>(naluData.constData());
+    QByteArray annexB;
+    const uint8_t *feedData;
+    int feedSize;
+
+    if (hasAnnexBStartCode(rawData, naluData.size())) {
+        feedData = rawData;
+        feedSize = naluData.size();
+    } else {
+        annexB = avccToAnnexB(naluData);
+        if (annexB.isEmpty()) return QImage();
+        feedData = reinterpret_cast<const uint8_t*>(annexB.constData());
+        feedSize = annexB.size();
+    }
+
     AVPacket *pkt = av_packet_alloc();
-    pkt->data = const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(naluData.constData()));
-    pkt->size = naluData.size();
+    pkt->data = const_cast<uint8_t*>(feedData);
+    pkt->size = feedSize;
 
     int ret = avcodec_send_packet(m_codecCtx, pkt);
 
