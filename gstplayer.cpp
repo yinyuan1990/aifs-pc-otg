@@ -771,9 +771,11 @@ bool GstPlayer::createPipeline()
     
     GstCaps *sinkCaps = gst_caps_new_simple("video/x-raw",
         "format", G_TYPE_STRING, "BGRA",
+        "colorimetry", G_TYPE_STRING, "bt709",
         nullptr);
     gst_app_sink_set_caps(GST_APP_SINK(m_appsink), sinkCaps);
     gst_caps_unref(sinkCaps);
+    qDebug() << "✅ appsink caps: BGRA + bt709 (修复发黄: 强制 BT.709 矩阵 + full-range 输出)";
     
     g_signal_connect(m_appsink, "new-sample", G_CALLBACK(onNewSample), this);
     
@@ -793,14 +795,14 @@ bool GstPlayer::createPipeline()
     g_object_set(m_jpegValve, "drop", FALSE, nullptr);
     m_jpegEnabled = true;
     
-    // ⭐ 配置 capsfilter 强制 RGB 格式（与显示分支 BGRA 色彩一致）
-    // RGB 是 jpegenc 支持的格式，色彩转换矩阵与 BGRA 相同
+    // ⭐ 配置 capsfilter 强制 RGB 格式 + BT.709 色彩空间
     GstCaps *jpegCaps = gst_caps_new_simple("video/x-raw",
         "format", G_TYPE_STRING, "RGB",
+        "colorimetry", G_TYPE_STRING, "bt709",
         nullptr);
     g_object_set(m_jpegCapsFilter, "caps", jpegCaps, nullptr);
     gst_caps_unref(jpegCaps);
-    qDebug() << "✅ JPEG 管道：queue → valve → videoconvert → capsfilter(RGB) → jpegenc";
+    qDebug() << "✅ JPEG 管道：queue → valve → videoconvert → capsfilter(RGB+bt709) → jpegenc";
     
     // JPEG 编码器配置
     g_object_set(m_jpegEnc,
