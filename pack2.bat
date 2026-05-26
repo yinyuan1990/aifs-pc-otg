@@ -134,6 +134,7 @@ copy "%GST_ROOT%\lib\gstreamer-1.0\gstvideorate.dll" "%RELEASE_DIR%\runtime\gstr
 copy "%GST_ROOT%\lib\gstreamer-1.0\gstvideoparsersbad.dll" "%RELEASE_DIR%\runtime\gstreamer\lib\gstreamer-1.0\" >nul 2>&1
 copy "%GST_ROOT%\lib\gstreamer-1.0\gstd3d11.dll" "%RELEASE_DIR%\runtime\gstreamer\lib\gstreamer-1.0\" >nul 2>&1
 copy "%GST_ROOT%\lib\gstreamer-1.0\gstjpeg.dll" "%RELEASE_DIR%\runtime\gstreamer\lib\gstreamer-1.0\" >nul 2>&1
+copy "%GST_ROOT%\lib\gstreamer-1.0\gstpng.dll" "%RELEASE_DIR%\runtime\gstreamer\lib\gstreamer-1.0\" >nul 2>&1
 copy "%GST_ROOT%\lib\gstreamer-1.0\gstmultifile.dll" "%RELEASE_DIR%\runtime\gstreamer\lib\gstreamer-1.0\" >nul 2>&1
 copy "%GST_ROOT%\lib\gstreamer-1.0\gstautodetect.dll" "%RELEASE_DIR%\runtime\gstreamer\lib\gstreamer-1.0\" >nul 2>&1
 copy "%GST_ROOT%\lib\gstreamer-1.0\gsttypefindfunctions.dll" "%RELEASE_DIR%\runtime\gstreamer\lib\gstreamer-1.0\" >nul 2>&1
