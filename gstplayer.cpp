@@ -149,22 +149,8 @@ GstPlayer::GstPlayer(QObject *parent)
 {
     qDebug() << "📦 GstPlayer 构造函数 (WebRTCBin 版本)";
     
-    // JPEG 目录（与 copycodejpeg 版本一致）
-    m_jpegDirectory = QCoreApplication::applicationDirPath() + "/captures/frames";
-    QDir dir(m_jpegDirectory);
-    
-    // ⭐ 程序启动时清空所有 JPEG 文件（所有会话前缀）
-    if (dir.exists()) {
-        QStringList files = dir.entryList(QStringList() << "s_*.jpeg", QDir::Files);
-        for (const QString &file : files) {
-            dir.remove(file);
-        }
-        qDebug() << "📁 GstPlayer: 启动时清理" << files.size() << "个旧 JPEG 文件";
-    }
-    QDir().mkpath(m_jpegDirectory);
-    
-    // ⭐ 生成初始会话前缀
-    generateSessionPrefix();
+    // NALU 帧存储（H.264 ring buffer，零格式转换）
+    m_naluStore = new NaluFrameStore(NaluFrameStore::DEFAULT_CAPACITY, this);
     
     // ⭐⭐⭐ 创建自适应渲染定时器（应用层 Jitter Buffer 方案）
     m_renderTimer = new QTimer(this);
@@ -667,31 +653,16 @@ bool GstPlayer::createPipeline()
     qDebug() << "✅ videobalance 和 gamma 元素已创建并初始化（对比度=1.10, 饱和度=1.10, 伽马=1.08）";
     */
     
-    // ========== 创建 tee 分流器 ==========
-    m_tee = gst_element_factory_make("tee", "tee");
-    
     // ========== 显示分支元素 ==========
     m_displayQueue = gst_element_factory_make("queue", "display_queue");
-    // ⭐ 不用 clocksync（它和 identity 一样会延迟帧）
     m_clockSync = nullptr;
     m_convert = gst_element_factory_make("videoconvert", "convert");
     m_appsink = gst_element_factory_make("appsink", "sink");
-    
-    // ========== JPEG 分支元素 ==========
-    // ⭐ 添加 videoconvert + capsfilter 确保 JPEG 色彩与显示一致
-    m_jpegQueue = gst_element_factory_make("queue", "jpeg_queue");
-    m_jpegValve = gst_element_factory_make("valve", "jpeg_valve");
-    m_jpegRate = nullptr;       // WebRTC 流没有有效时长，不使用 videorate
-    m_jpegConvert = gst_element_factory_make("videoconvert", "jpeg_convert");  // ⭐ 色彩转换
-    m_jpegCapsFilter = gst_element_factory_make("capsfilter", "jpeg_caps");    // ⭐ 强制 RGB 格式
-    m_jpegEnc = gst_element_factory_make("jpegenc", "jpeg_enc");
-    m_jpegSink = gst_element_factory_make("multifilesink", "jpeg_sink");
-    
+
     // 检查所有元素
     bool srcOk = m_useWebRTC ? (m_webrtcbin && m_rtph264depay) : (m_appsrc != nullptr);
     if (!srcOk || !m_h264parse || !m_queueDepay || !m_decoder || !m_queueDecode ||
-        !m_tee || !m_displayQueue || !m_convert || !m_appsink ||
-        !m_jpegQueue || !m_jpegValve || !m_jpegConvert || !m_jpegCapsFilter || !m_jpegEnc || !m_jpegSink ||
+        !m_displayQueue || !m_convert || !m_appsink ||
         !m_videoBalance || !m_gamma) {
         qCritical() << "❌ 创建 GStreamer 元素失败";
         emit error("创建 GStreamer 元素失败");
@@ -779,52 +750,7 @@ bool GstPlayer::createPipeline()
     
     g_signal_connect(m_appsink, "new-sample", G_CALLBACK(onNewSample), this);
     
-    // ========== 配置 JPEG 分支（与 Java 一致）==========
-    // ⚡ 极低延迟配置：最小缓冲
-    g_object_set(m_jpegQueue,
-        "max-size-buffers", 1,    // ⚡ 与Java一致：最小1帧缓冲
-        "max-size-bytes", 0,
-        "max-size-time", 0,
-        "leaky", 2,               // 丢弃老帧，保持最新帧
-        "silent", TRUE,
-        "flush-on-eos", TRUE,
-        nullptr);
-    qDebug() << "⚡ captureImageQueue: buffers=1（与Java一致）";
-    
-    // 默认开启 JPEG 录制
-    g_object_set(m_jpegValve, "drop", FALSE, nullptr);
-    m_jpegEnabled = true;
-    
-    // ⭐ 配置 capsfilter 强制 RGB 格式 + BT.709 色彩空间
-    GstCaps *jpegCaps = gst_caps_new_simple("video/x-raw",
-        "format", G_TYPE_STRING, "RGB",
-        "colorimetry", G_TYPE_STRING, "bt709",
-        nullptr);
-    g_object_set(m_jpegCapsFilter, "caps", jpegCaps, nullptr);
-    gst_caps_unref(jpegCaps);
-    qDebug() << "✅ JPEG 管道：queue → valve → videoconvert → capsfilter(RGB+bt709) → jpegenc";
-    
-    // JPEG 编码器配置
-    g_object_set(m_jpegEnc,
-        "quality", 50,       // 质量 50（测试效果）
-        "idct-method", 2,    // 快速 IDCT
-        nullptr);
-    
-    // ⭐ multifilesink 配置（使用会话前缀）
-    QDir().mkpath(m_jpegDirectory);
-    // 文件格式: s_1737012345_000000001.jpeg (会话前缀 + 9位序号)
-    QString location = QString("%1/%2_%09d.jpeg").arg(m_jpegDirectory).arg(m_sessionPrefix);
-    g_object_set(m_jpegSink,
-        "location", location.toUtf8().constData(),
-        "post-messages", TRUE,
-        "max-files", 0,
-        "index", 0,
-        nullptr);
-    qDebug() << "📁 JPEG 文件名模板:" << location;
-    
-    qDebug() << "📁 JPEG 保存目录:" << m_jpegDirectory;
-    
-    // ========== Bus Sync Handler（同步处理 JPEG 保存消息）==========
+    // ========== Bus Sync Handler ==========
     GstBus *bus = gst_element_get_bus(m_pipeline);
     gst_bus_set_sync_handler(bus, onBusSyncMessage, this, nullptr);
     gst_object_unref(bus);
@@ -836,36 +762,36 @@ bool GstPlayer::createPipeline()
             // 硬解：webrtcbin → rtph264depay → h264parse → queueDepay → decoder → queueDecode → download → videoscale → ...
             gst_bin_add_many(GST_BIN(m_pipeline),
                 m_webrtcbin, m_rtph264depay, m_h264parse, m_queueDepay, m_decoder, m_queueDecode,
-                m_download, m_videoScale, m_videoBalance, m_gamma, m_tee,
+                m_download, m_videoScale, m_videoBalance, m_gamma,
                 m_displayQueue, m_convert, m_appsink,
-                m_jpegQueue, m_jpegValve, m_jpegConvert, m_jpegCapsFilter, m_jpegEnc, m_jpegSink,
                 nullptr);
-            
+
             if (!gst_element_link_many(m_rtph264depay, m_h264parse, m_queueDepay, m_decoder, m_queueDecode,
-                                       m_download, m_videoScale, m_videoBalance, m_gamma, m_tee, nullptr)) {
+                                       m_download, m_videoScale, m_videoBalance, m_gamma,
+                                       m_displayQueue, m_convert, m_appsink, nullptr)) {
                 qCritical() << "❌ 链接主路径失败 (WebRTC 硬解模式)";
                 emit error("链接主路径失败");
                 destroyPipeline();
                 return false;
             }
-            qDebug() << "✅ WebRTC 硬解模式：rtph264depay → decoder → download → videoscale → tee";
+            qDebug() << "✅ WebRTC 硬解模式：rtph264depay → decoder → download → videoscale → gamma → appsink";
         } else {
             // 软解：webrtcbin → rtph264depay → h264parse → queueDepay → decoder → queueDecode → videoscale → videoBalance → ...
             gst_bin_add_many(GST_BIN(m_pipeline),
                 m_webrtcbin, m_rtph264depay, m_h264parse, m_queueDepay, m_decoder, m_queueDecode,
-                m_videoScale, m_videoBalance, m_gamma, m_tee,
+                m_videoScale, m_videoBalance, m_gamma,
                 m_displayQueue, m_convert, m_appsink,
-                m_jpegQueue, m_jpegValve, m_jpegConvert, m_jpegCapsFilter, m_jpegEnc, m_jpegSink,
                 nullptr);
-            
+
             if (!gst_element_link_many(m_rtph264depay, m_h264parse, m_queueDepay, m_decoder, m_queueDecode,
-                                       m_videoScale, m_videoBalance, m_gamma, m_tee, nullptr)) {
+                                       m_videoScale, m_videoBalance, m_gamma,
+                                       m_displayQueue, m_convert, m_appsink, nullptr)) {
                 qCritical() << "❌ 链接主路径失败 (WebRTC 软解模式)";
                 emit error("链接主路径失败");
                 destroyPipeline();
                 return false;
             }
-            qDebug() << "✅ WebRTC 软解模式：rtph264depay → decoder → videoscale → videoBalance → tee";
+            qDebug() << "✅ WebRTC 软解模式：rtph264depay → decoder → videoscale → gamma → appsink";
         }
         
         // 🔥🔥🔥 v9.3双缓冲：简化probe，只做统计，不丢帧（对齐copygstream）
@@ -896,20 +822,35 @@ bool GstPlayer::createPipeline()
             qDebug() << "✅ v9.3 简化probe（只统计不丢帧）";
         }
 
-        // 🔥 v10.4: 在 h264parse srcpad 添加 IDR 检测 probe（更可靠）
+        // 🔥 v10.4: 在 h264parse srcpad 添加 IDR 检测 + NALU 存储 probe
         GstPad *parseSrcPad = m_h264parse ? gst_element_get_static_pad(m_h264parse, "src") : nullptr;
         if (parseSrcPad) {
             m_parseProbeId = gst_pad_add_probe(parseSrcPad, GST_PAD_PROBE_TYPE_BUFFER,
                 [](GstPad*, GstPadProbeInfo* info, gpointer userData) -> GstPadProbeReturn {
                     GstPlayer* self = static_cast<GstPlayer*>(userData);
                     GstBuffer* buffer = GST_PAD_PROBE_INFO_BUFFER(info);
-                    if (buffer && hasIdrInBuffer(buffer)) {
+                    if (!buffer) return GST_PAD_PROBE_OK;
+
+                    if (hasIdrInBuffer(buffer)) {
                         self->m_preDecodeIdr.store(true);
                     }
+
+                    // 存储 NALU 到 NaluFrameStore（零额外格式转换）
+                    if (self->m_naluStore) {
+                        GstMapInfo map;
+                        if (gst_buffer_map(buffer, &map, GST_MAP_READ)) {
+                            QByteArray naluData(reinterpret_cast<const char*>(map.data), static_cast<int>(map.size));
+                            bool isKeyFrame = !GST_BUFFER_FLAG_IS_SET(buffer, GST_BUFFER_FLAG_DELTA_UNIT);
+                            qint64 idx = self->m_naluFrameIndex.fetchAndAddRelaxed(1);
+                            gst_buffer_unmap(buffer, &map);
+                            self->m_naluStore->addFrame(naluData, idx, isKeyFrame);
+                        }
+                    }
+
                     return GST_PAD_PROBE_OK;
                 }, this, nullptr);
             gst_object_unref(parseSrcPad);
-            qDebug() << "✅ v10.4 已安装 h264parse IDR 检测 probe";
+            qDebug() << "✅ h264parse probe: IDR检测 + NALU存储";
         }
         
         diagLog(QString("✅ 管道已创建, 解码器: %1").arg(m_decoderName));
@@ -919,13 +860,13 @@ bool GstPlayer::createPipeline()
             // 硬解：appsrc → h264parse → queueDepay → decoder → queueDecode → download → videoscale → ...
             gst_bin_add_many(GST_BIN(m_pipeline),
                 m_appsrc, m_h264parse, m_queueDepay, m_decoder, m_queueDecode,
-                m_download, m_videoScale, m_videoBalance, m_gamma, m_tee,
+                m_download, m_videoScale, m_videoBalance, m_gamma,
                 m_displayQueue, m_convert, m_appsink,
-                m_jpegQueue, m_jpegValve, m_jpegConvert, m_jpegCapsFilter, m_jpegEnc, m_jpegSink,
                 nullptr);
-            
+
             if (!gst_element_link_many(m_appsrc, m_h264parse, m_queueDepay, m_decoder, m_queueDecode,
-                                       m_download, m_videoScale, m_videoBalance, m_gamma, m_tee, nullptr)) {
+                                       m_download, m_videoScale, m_videoBalance, m_gamma,
+                                       m_displayQueue, m_convert, m_appsink, nullptr)) {
                 qCritical() << "❌ 链接主路径失败 (AppSrc 硬解模式)";
                 emit error("链接主路径失败");
                 destroyPipeline();
@@ -936,13 +877,13 @@ bool GstPlayer::createPipeline()
             // 软解：appsrc → h264parse → queueDepay → decoder → queueDecode → videoscale → videoBalance → ...
             gst_bin_add_many(GST_BIN(m_pipeline),
                 m_appsrc, m_h264parse, m_queueDepay, m_decoder, m_queueDecode,
-                m_videoScale, m_videoBalance, m_gamma, m_tee,
+                m_videoScale, m_videoBalance, m_gamma,
                 m_displayQueue, m_convert, m_appsink,
-                m_jpegQueue, m_jpegValve, m_jpegConvert, m_jpegCapsFilter, m_jpegEnc, m_jpegSink,
                 nullptr);
-            
+
             if (!gst_element_link_many(m_appsrc, m_h264parse, m_queueDepay, m_decoder, m_queueDecode,
-                                       m_videoScale, m_videoBalance, m_gamma, m_tee, nullptr)) {
+                                       m_videoScale, m_videoBalance, m_gamma,
+                                       m_displayQueue, m_convert, m_appsink, nullptr)) {
                 qCritical() << "❌ 链接主路径失败 (AppSrc 软解模式)";
                 emit error("链接主路径失败");
                 destroyPipeline();
@@ -950,66 +891,38 @@ bool GstPlayer::createPipeline()
             }
             qDebug() << "✅ AppSrc 软解模式（含 videoscale）";
         }
-    }
-    
-    // ========== 链接显示分支：tee → displayQueue → videorate → rateCaps → convert → appsink ==========
-    GstPad *teeSrcDisplay = gst_element_request_pad_simple(m_tee, "src_%u");
-    GstPad *displayQueueSink = gst_element_get_static_pad(m_displayQueue, "sink");
-    if (gst_pad_link(teeSrcDisplay, displayQueueSink) != GST_PAD_LINK_OK) {
-        qCritical() << "❌ 链接显示分支到 tee 失败";
-        gst_object_unref(teeSrcDisplay);
-        gst_object_unref(displayQueueSink);
-        destroyPipeline();
-        return false;
-    }
-    gst_object_unref(teeSrcDisplay);
-    gst_object_unref(displayQueueSink);
-    
-    // ⭐ 显示分支：displayQueue → convert → appsink
-    if (!gst_element_link_many(m_displayQueue, m_convert, m_appsink, nullptr)) {
-        qCritical() << "❌ 链接显示分支元素失败";
-        destroyPipeline();
-        return false;
-    }
-    qDebug() << "✅ 显示分支链接: displayQueue → convert → appsink(sync=FALSE)";
-    
-    // ========== 链接 JPEG 分支：tee → jpegQueue → valve → jpegEnc → jpegSink ==========
-    GstPad *teeSrcJpeg = gst_element_request_pad_simple(m_tee, "src_%u");
-    GstPad *jpegQueueSink = gst_element_get_static_pad(m_jpegQueue, "sink");
-    if (gst_pad_link(teeSrcJpeg, jpegQueueSink) != GST_PAD_LINK_OK) {
-        qCritical() << "❌ 链接 JPEG 分支到 tee 失败";
-        gst_object_unref(teeSrcJpeg);
-        gst_object_unref(jpegQueueSink);
-        destroyPipeline();
-        return false;
-    }
-    gst_object_unref(teeSrcJpeg);
-    gst_object_unref(jpegQueueSink);
-    
-    // ⭐ 链接 JPEG 分支（添加 videoconvert + capsfilter 确保色彩一致）：
-    // jpegQueue → valve → jpegConvert → jpegCapsFilter(RGB) → jpegEnc → jpegSink
-    if (!gst_element_link_many(m_jpegQueue, m_jpegValve, m_jpegConvert, m_jpegCapsFilter, m_jpegEnc, m_jpegSink, nullptr)) {
-        qCritical() << "❌ 链接 JPEG 分支元素失败";
-        destroyPipeline();
-        return false;
-    }
-    qDebug() << "✅ JPEG 分支链接成功（videoconvert → RGB → jpegenc）";
 
-    // P2: 240fps 截图帧计数 probe（在 jpegSink 的 sink pad 上计数每帧）
-    GstPad *jpegSinkPad = gst_element_get_static_pad(m_jpegSink, "sink");
-    if (jpegSinkPad) {
-        gst_pad_add_probe(jpegSinkPad, GST_PAD_PROBE_TYPE_BUFFER,
-            [](GstPad*, GstPadProbeInfo*, gpointer userData) -> GstPadProbeReturn {
-                GstPlayer* self = static_cast<GstPlayer*>(userData);
-                if (self->m_highSpeedMode) {
-                    self->m_hsWindowJpegCount++;
-                }
-                return GST_PAD_PROBE_OK;
-            }, this, nullptr);
-        gst_object_unref(jpegSinkPad);
+        // AppSrc 模式也安装 NALU 存储 probe
+        GstPad *parseSrcPadApp = m_h264parse ? gst_element_get_static_pad(m_h264parse, "src") : nullptr;
+        if (parseSrcPadApp && m_parseProbeId == 0) {
+            m_parseProbeId = gst_pad_add_probe(parseSrcPadApp, GST_PAD_PROBE_TYPE_BUFFER,
+                [](GstPad*, GstPadProbeInfo* info, gpointer userData) -> GstPadProbeReturn {
+                    GstPlayer* self = static_cast<GstPlayer*>(userData);
+                    GstBuffer* buffer = GST_PAD_PROBE_INFO_BUFFER(info);
+                    if (!buffer) return GST_PAD_PROBE_OK;
+                    if (hasIdrInBuffer(buffer)) {
+                        self->m_preDecodeIdr.store(true);
+                    }
+                    if (self->m_naluStore) {
+                        GstMapInfo map;
+                        if (gst_buffer_map(buffer, &map, GST_MAP_READ)) {
+                            QByteArray naluData(reinterpret_cast<const char*>(map.data), static_cast<int>(map.size));
+                            bool isKeyFrame = !GST_BUFFER_FLAG_IS_SET(buffer, GST_BUFFER_FLAG_DELTA_UNIT);
+                            qint64 idx = self->m_naluFrameIndex.fetchAndAddRelaxed(1);
+                            gst_buffer_unmap(buffer, &map);
+                            self->m_naluStore->addFrame(naluData, idx, isKeyFrame);
+                        }
+                    }
+                    return GST_PAD_PROBE_OK;
+                }, this, nullptr);
+            gst_object_unref(parseSrcPadApp);
+            qDebug() << "✅ AppSrc: h264parse NALU probe installed";
+        } else if (parseSrcPadApp) {
+            gst_object_unref(parseSrcPadApp);
+        }
     }
-    
-    qDebug() << "✅ GStreamer Pipeline 创建成功 (带 JPEG 分支)，解码器:" << m_decoderName;
+
+    qDebug() << "✅ GStreamer Pipeline 创建成功，解码器:" << m_decoderName;
     emit decoderChanged();
     return true;
 }
@@ -1054,18 +967,10 @@ void GstPlayer::destroyPipeline()
     m_videoScale = nullptr;    // ⭐ 动态分辨率处理
     m_videoBalance = nullptr;
     m_gamma = nullptr;
-    m_tee = nullptr;
     m_displayQueue = nullptr;
-    m_clockSync = nullptr;     // ⭐ clocksync（修正时间戳为系统时钟）
+    m_clockSync = nullptr;
     m_convert = nullptr;
     m_appsink = nullptr;
-    m_jpegQueue = nullptr;
-    m_jpegValve = nullptr;
-    m_jpegRate = nullptr;
-    m_jpegConvert = nullptr;
-    m_jpegCapsFilter = nullptr;
-    m_jpegEnc = nullptr;
-    m_jpegSink = nullptr;
     
     // ⭐ 重置 transceiver 标志（下次连接需要重新添加）
     m_transceiverAdded = false;
@@ -1081,199 +986,6 @@ void GstPlayer::destroyPipeline()
     m_videoHeight = 0;
     m_frameIndex = 0;
     m_firstFrame = false;
-}
-
-// ========== JPEG 相关方法 ==========
-
-void GstPlayer::setJpegEnabled(bool enabled)
-{
-    if (m_jpegEnabled != enabled) {
-        m_jpegEnabled = enabled;
-        
-        if (m_jpegValve) {
-            g_object_set(m_jpegValve, "drop", !enabled, nullptr);
-            qDebug() << "📸 JPEG 录制:" << (enabled ? "开启" : "关闭");
-        }
-        
-        emit jpegEnabledChanged();
-    }
-}
-
-void GstPlayer::setJpegDirectory(const QString &dir)
-{
-    if (m_jpegDirectory != dir) {
-        m_jpegDirectory = dir;
-        QDir().mkpath(m_jpegDirectory);
-        
-        // ⭐ 更新 multifilesink 路径（使用会话前缀）
-        if (m_jpegSink) {
-            QString location = QString("%1/%2_%09d.jpeg").arg(m_jpegDirectory).arg(m_sessionPrefix);
-            g_object_set(m_jpegSink, "location", location.toUtf8().constData(), nullptr);
-            qDebug() << "📁 JPEG 目录更新:" << m_jpegDirectory << "前缀:" << m_sessionPrefix;
-        }
-        
-        emit jpegDirectoryChanged();
-    }
-}
-
-void GstPlayer::startJpegCapture()
-{
-    if (!m_playing) {
-        qWarning() << "⚠️ 播放器未启动，无法开始 JPEG 录制";
-        return;
-    }
-    
-    // ⭐ 不再清空目录（保留之前的抓拍）
-    // 生成新会话前缀，重置索引
-    generateSessionPrefix();
-    
-    // 重置帧索引
-    m_jpegFrameIndex = 0;
-    m_oldestFrame = 0;
-    if (m_jpegSink) {
-        // ⭐ 更新 multifilesink 位置为新会话前缀
-        QString location = QString("%1/%2_%09d.jpeg").arg(m_jpegDirectory).arg(m_sessionPrefix);
-        g_object_set(m_jpegSink, 
-            "location", location.toUtf8().constData(),
-            "index", 0, 
-            nullptr);
-    }
-    
-    // 开启阀门
-    setJpegEnabled(true);
-    
-    qDebug() << "📸 JPEG 录制开始，会话前缀:" << m_sessionPrefix;
-}
-
-void GstPlayer::stopJpegCapture()
-{
-    setJpegEnabled(false);
-    qDebug() << "📸 JPEG 录制停止，已保存" << m_jpegFrameIndex << "帧";
-}
-
-void GstPlayer::clearJpegFiles()
-{
-    QDir dir(m_jpegDirectory);
-    // ⭐ 清理所有会话的 JPEG 文件（s_*.jpeg 匹配所有会话前缀）
-    QStringList files = dir.entryList(QStringList() << "s_*.jpeg", QDir::Files);
-    
-    int count = 0;
-    for (const QString &file : files) {
-        if (dir.remove(file)) {
-            count++;
-        }
-    }
-    
-    m_frameIndex = 0;
-    m_jpegFrameIndex = 0;
-    m_oldestFrame = 0;
-    
-    // 重置 multifilesink 索引
-    if (m_jpegSink) {
-        g_object_set(m_jpegSink, "index", 0, nullptr);
-    }
-    
-    emit jpegFrameIndexChanged();
-    
-    qDebug() << "🗑️ 清理 JPEG 文件:" << count << "个（所有会话）";
-}
-
-// ⭐ 生成新的会话前缀（连接成功时调用）
-void GstPlayer::generateSessionPrefix()
-{
-    // 使用毫秒时间戳作为前缀，确保唯一性
-    qint64 timestamp = QDateTime::currentMSecsSinceEpoch();
-    m_sessionPrefix = QString("s_%1").arg(timestamp);
-    qDebug() << "📌 生成新会话前缀:" << m_sessionPrefix;
-}
-
-// ========== JPEG 读取方法 ==========
-
-QString GstPlayer::frameFilePath(qint64 frameIndex) const
-{
-    // ⭐ 文件格式: s_1737012345_000000123.jpeg (会话前缀 + 9位数字)
-    return QString("%1/%2_%3.jpeg").arg(m_jpegDirectory).arg(m_sessionPrefix).arg(frameIndex, 9, 10, QChar('0'));
-}
-
-// ⭐ 使用指定的会话前缀获取文件路径
-QString GstPlayer::frameFilePathWithPrefix(qint64 frameIndex, const QString &sessionPrefix) const
-{
-    return QString("%1/%2_%3.jpeg").arg(m_jpegDirectory).arg(sessionPrefix).arg(frameIndex, 9, 10, QChar('0'));
-}
-
-QByteArray GstPlayer::getJpeg(qint64 frameIndex) const
-{
-    QString path = frameFilePath(frameIndex);
-    QFile file(path);
-    if (file.open(QIODevice::ReadOnly)) {
-        return file.readAll();
-    }
-    return QByteArray();
-}
-
-// ⭐ 使用指定的会话前缀获取 JPEG 数据
-QByteArray GstPlayer::getJpegWithPrefix(qint64 frameIndex, const QString &sessionPrefix) const
-{
-    QString path = frameFilePathWithPrefix(frameIndex, sessionPrefix);
-    QFile file(path);
-    if (file.open(QIODevice::ReadOnly)) {
-        return file.readAll();
-    }
-    return QByteArray();
-}
-
-bool GstPlayer::hasJpeg(qint64 frameIndex) const
-{
-    return QFile::exists(frameFilePath(frameIndex));
-}
-
-qint64 GstPlayer::newestFrame() const
-{
-    QMutexLocker lock(&m_indexMutex);
-    return m_jpegFrameIndex;
-}
-
-qint64 GstPlayer::oldestFrame() const
-{
-    QMutexLocker lock(&m_indexMutex);
-    return m_oldestFrame;
-}
-
-// ========== 有效范围保护（防止抓拍帧被清理）==========
-
-int GstPlayer::registerValidRange(qint64 startIndex, qint64 endIndex)
-{
-    QMutexLocker lock(&m_rangesMutex);
-    int rangeId = m_nextRangeId++;
-    m_validRanges[rangeId] = qMakePair(startIndex, endIndex);
-    qDebug() << "📌 注册有效范围: id=" << rangeId << "range:" << startIndex << "-" << endIndex;
-    return rangeId;
-}
-
-void GstPlayer::unregisterValidRange(int rangeId)
-{
-    QMutexLocker lock(&m_rangesMutex);
-    if (m_validRanges.remove(rangeId) > 0) {
-        qDebug() << "📌 注销有效范围: id=" << rangeId;
-    }
-}
-
-void GstPlayer::clearAllValidRanges()
-{
-    QMutexLocker lock(&m_rangesMutex);
-    m_validRanges.clear();
-    qDebug() << "📌 清空所有有效范围";
-}
-
-bool GstPlayer::isIndexProtected(qint64 frameIndex) const
-{
-    QMutexLocker lock(&m_rangesMutex);
-    for (auto it = m_validRanges.constBegin(); it != m_validRanges.constEnd(); ++it) {
-        if (frameIndex >= it.value().first && frameIndex <= it.value().second) {
-            return true;
-        }
-    }
-    return false;
 }
 
 void GstPlayer::start()
@@ -1389,16 +1101,7 @@ void GstPlayer::reset()
     }
     m_emergencyHold = false;
     
-    // ⭐ 不再清理 JPEG 文件（保留之前的抓拍）
-    // 只重置帧索引，新连接会使用新的会话前缀
     m_frameIndex = 0;
-    m_jpegFrameIndex = 0;
-    m_oldestFrame = 0;
-    
-    // ⭐ 生成新会话前缀（下次连接使用）
-    generateSessionPrefix();
-    
-    emit jpegFrameIndexChanged();
 }
 
 void GstPlayer::pushNalu(const QByteArray &nalu)
@@ -1843,35 +1546,6 @@ GstBusSyncReply GstPlayer::onBusSyncMessage(GstBus *bus, GstMessage *message, gp
             diagLog(QString("🎬 ELEMENT: %1").arg(name));
         }
         
-        // multifilesink 消息名是 "GstMultiFileSink" 或 "multifilesink"
-        if (gst_structure_has_name(s, "GstMultiFileSink") || 
-            gst_structure_has_name(s, "multifilesink")) {
-            // ⭐ multifilesink 保存成功回调（与 Java FileToos.jpegIndex 同步）
-            gint index = 0;
-            if (gst_structure_get_int(s, "index", &index)) {
-                // 加锁保护（清理 vs 抓拍互斥）
-                QMutexLocker lock(&self->m_indexMutex);
-                
-                // 更新 JPEG 帧索引
-                self->m_jpegFrameIndex = index;
-                
-                // 清理旧文件（跳过受保护的帧）
-                if (index >= self->m_maxJpegFiles) {
-                    qint64 cleanupTarget = index - self->m_maxJpegFiles;
-                    while (self->m_oldestFrame <= cleanupTarget) {
-                        if (!self->isIndexProtected(self->m_oldestFrame)) {
-                            QString oldPath = self->frameFilePath(self->m_oldestFrame);
-                            QFile::remove(oldPath);
-                        }
-                        self->m_oldestFrame++;
-                    }
-                }
-                
-                // ⭐ 跨线程发出 frameEncoded 信号（通知 SlowMotionPlayer）
-                QMetaObject::invokeMethod(self, "frameEncoded", Qt::QueuedConnection,
-                                          Q_ARG(qint64, static_cast<qint64>(index)));
-            }
-        }
         break;
     }
     default:
@@ -1943,15 +1617,6 @@ void GstPlayer::setAllImageParams(double brightness, double contrast, double sat
     setHue(hue);
     setGamma(gamma);
     */
-}
-
-void GstPlayer::setJpegQuality(int quality)
-{
-    if (m_jpegEnc) {
-        quality = qBound(1, quality, 100);
-        g_object_set(m_jpegEnc, "quality", quality, nullptr);
-        qDebug() << "📸 JPEG质量已调整为:" << quality;
-    }
 }
 
 void GstPlayer::setConfigFps(double fps)
@@ -3407,10 +3072,9 @@ void GstPlayer::onRenderTick()
         if (m_hsWindowStartMs == 0) m_hsWindowStartMs = now;
         qint64 elapsed = now - m_hsWindowStartMs;
         if (elapsed >= 100) {
-            qDebug() << QString("⚡ [240fps] 100ms窗口: 收=%1帧 截图=%2帧 (期望24帧) 间隔=%3ms")
-                .arg(m_hsWindowFrameCount).arg(m_hsWindowJpegCount).arg(elapsed);
+            qDebug() << QString("⚡ [240fps] 100ms窗口: 收=%1帧 (期望24帧) 间隔=%2ms")
+                .arg(m_hsWindowFrameCount).arg(elapsed);
             m_hsWindowFrameCount = 0;
-            m_hsWindowJpegCount = 0;
             m_hsWindowStartMs = now;
         }
     }

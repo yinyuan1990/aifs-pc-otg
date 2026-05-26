@@ -395,17 +395,13 @@ void JpegEncoder::run()
 
 CaptureManager::CaptureManager(QObject *parent)
     : QObject(parent)
-    , m_ringBuffer(RING_BUFFER_SIZE)
     , m_settings(new QSettings("Acard", "Aifs", this))
 {
     qDebug() << "📦 CaptureManager 构造开始...";
     loadSettings();
     ensureCapturesDir();
     qDebug() << "📦 CaptureManager 设置和目录完成";
-    
-    m_encoder = new JpegEncoder(&m_ringBuffer, this);
-    connect(m_encoder, &JpegEncoder::frameEncoded, this, &CaptureManager::onFrameEncoded);
-    
+
     // 自动注册到 ImageProvider（因为通过 Loader 加载，main.cpp 的 findChild 找不到）
     if (CaptureImageProvider::instance()) {
         CaptureImageProvider::instance()->setCaptureManager(this);
@@ -415,9 +411,7 @@ CaptureManager::CaptureManager(QObject *parent)
 
 CaptureManager::~CaptureManager()
 {
-    m_encoder->stop();
-    m_encoder->wait();
-    delete m_encoder;
+    delete m_naluDecoder;
 }
 
 void CaptureManager::ensureCapturesDir()
@@ -604,18 +598,31 @@ void CaptureManager::setGpuPipeline(GpuPipeline *pipeline)
 void CaptureManager::setGstPlayer(GstPlayer *player)
 {
     if (m_gstPlayer != player) {
+        // 断开旧连接
+        if (m_gstPlayer && m_gstPlayer->naluFrameStore()) {
+            disconnect(m_gstPlayer->naluFrameStore(), &NaluFrameStore::frameStored,
+                       this, &CaptureManager::onFrameEncoded);
+        }
+
         m_gstPlayer = player;
+
+        // 创建 NaluDecoder 并连接 frameStored 信号
+        if (m_gstPlayer && m_gstPlayer->naluFrameStore()) {
+            delete m_naluDecoder;
+            m_naluDecoder = new NaluDecoder(m_gstPlayer->naluFrameStore(), this);
+            connect(m_gstPlayer->naluFrameStore(), &NaluFrameStore::frameStored,
+                    this, &CaptureManager::onFrameEncoded, Qt::QueuedConnection);
+            qDebug() << "CaptureManager: NaluDecoder created, connected to NaluFrameStore";
+        }
+
         emit gstPlayerChanged();
-        qDebug() << "CaptureManager: GstPlayer set, framesDir:" << (player ? player->framesDir() : "null");
     }
 }
 
 void CaptureManager::onFrameReceived(const QImage &frame, qint64 frameIndex)
 {
-    if (frame.isNull()) return;
-    
-    // 提交给编码器（异步编码成 JPEG 存入 Ring Buffer）
-    m_encoder->submitFrame(frame, frameIndex);
+    Q_UNUSED(frame);
+    Q_UNUSED(frameIndex);
 }
 
 void CaptureManager::onFrameIndexReady(qint64 frameIndex)
@@ -670,20 +677,18 @@ void CaptureManager::capture()
     
     qint64 eventIndex = -1;
     
-    // 调试：打印当前状态
-    qDebug() << "📷 Capture: gpuPipeline=" << (m_gpuPipeline ? "有效" : "NULL")
+    qDebug() << "📷 Capture: naluDecoder=" << (m_naluDecoder ? "有效" : "NULL")
              << ", slowMotionActive=" << m_slowMotionActive
              << ", slowMotionPlayer=" << (m_slowMotionPlayer ? "有效" : "NULL");
-    
-    if (m_gpuPipeline) {
-        qDebug() << "📷 Capture: newestFrame=" << m_gpuPipeline->newestFrame()
-                 << ", oldestFrame=" << m_gpuPipeline->oldestFrame()
-                 << ", jpegEncoder=" << (m_gpuPipeline->jpegEncoder() ? "有效" : "NULL");
+
+    if (m_gstPlayer && m_gstPlayer->naluFrameStore()) {
+        qDebug() << "📷 Capture: naluStore count=" << m_gstPlayer->naluFrameStore()->count()
+                 << ", newest=" << m_gstPlayer->naluFrameStore()->newestIndex()
+                 << ", oldest=" << m_gstPlayer->naluFrameStore()->oldestIndex();
     }
     
     // 根据慢放模式选择事件帧来源
     if (m_slowMotionActive && m_slowMotionPlayer) {
-        // 慢放模式：使用慢放当前帧的全局索引作为事件帧
         eventIndex = m_slowMotionPlayer->currentGlobalFrameIndex();
         qDebug() << "📷 Capture (SlowMotion): eventIndex=" << eventIndex
                  << "currentFrame=" << m_slowMotionPlayer->currentFrame()
@@ -691,24 +696,20 @@ void CaptureManager::capture()
                  << "endIndex=" << m_slowMotionPlayer->endIndex()
                  << "recordedFrames=" << m_slowMotionPlayer->recordedFrames();
     } else {
-        // 实时流模式：使用最新帧作为事件帧
-        // ⭐⭐⭐ 缓冲队列修正：用户看到的是"最新帧 - 队列深度"
-        if (m_gstPlayer) {
-            qint64 newestIdx = m_gstPlayer->newestFrame();
-            int queueDepth = m_gstPlayer->bufferSize();  // 当前队列深度
-            qint64 oldestIdx = m_gstPlayer->oldestFrame();
-            
-            // 修正：用户实际看到的帧 = 最新帧 - 队列深度
+        // 实时流模式：从 NaluFrameStore 获取最新帧索引
+        if (m_gstPlayer && m_gstPlayer->naluFrameStore()) {
+            qint64 newestIdx = m_gstPlayer->naluFrameStore()->newestIndex();
+            int queueDepth = m_gstPlayer->bufferSize();
+            qint64 oldestIdx = m_gstPlayer->naluFrameStore()->oldestIndex();
+
             eventIndex = newestIdx - queueDepth;
-            eventIndex = qMax(oldestIdx, eventIndex);  // 确保不小于oldest
-            
-            qDebug() << "📷 Capture (Realtime): newest=" << newestIdx 
-                     << "队列=" << queueDepth 
-                     << "修正后eventIndex=" << eventIndex;
+            eventIndex = qMax(oldestIdx, eventIndex);
+
+            qDebug() << "📷 Capture (NALU): newest=" << newestIdx
+                     << "队列=" << queueDepth
+                     << "eventIndex=" << eventIndex;
         } else if (m_gpuPipeline) {
             eventIndex = m_gpuPipeline->newestFrame();
-        } else {
-            eventIndex = m_encoder->currentIndex();
         }
     }
     
@@ -733,24 +734,18 @@ void CaptureManager::capture()
     
     // 确保范围在可用帧内
     qint64 oldestAvailable = 0;
-    
+
     if (m_slowMotionActive && m_slowMotionPlayer) {
-        // ⭐ 慢放模式：限制在慢放录制的范围内
         oldestAvailable = m_slowMotionPlayer->startIndex();
         qint64 newestAvailable = m_slowMotionPlayer->endIndex();
         qDebug() << "📷 Capture (SlowMotion): 慢放可用范围" << oldestAvailable << "-" << newestAvailable;
         startIndex = qMax(startIndex, oldestAvailable);
-        endIndex = qMin(endIndex, newestAvailable);  // 慢放模式限制 endIndex
-    } else if (m_gstPlayer) {
-        oldestAvailable = m_gstPlayer->oldestFrame();
+        endIndex = qMin(endIndex, newestAvailable);
+    } else if (m_gstPlayer && m_gstPlayer->naluFrameStore()) {
+        oldestAvailable = m_gstPlayer->naluFrameStore()->oldestIndex();
         startIndex = qMax(startIndex, oldestAvailable);
-        // ⭐ 时时流模式：不限制 endIndex，后抓拍帧会继续保存，滚轮查看时文件已存在
     } else if (m_gpuPipeline) {
         oldestAvailable = m_gpuPipeline->oldestFrame();
-        startIndex = qMax(startIndex, oldestAvailable);
-        // 不限制 endIndex
-    } else if (m_ringBuffer.size() > 0) {
-        oldestAvailable = eventIndex - m_ringBuffer.size() + 1;
         startIndex = qMax(startIndex, oldestAvailable);
     }
     
@@ -765,18 +760,12 @@ void CaptureManager::capture()
     item.endIndex = endIndex;  // 直接设置目标结束帧
     item.currentOffset = item.eventOffset();  // 默认显示事件帧
     item.timestamp = QDateTime::currentMSecsSinceEpoch();
-    item.dirPath = "";  // 不需要单独目录
-    item.saved = true;  // 帧已经在磁盘了，直接标记为可用
-    // ⭐ 保存当前会话前缀，用于后续加载帧（断线重连后仍能找到文件）
-    if (m_gstPlayer) {
-        item.sessionPrefix = m_gstPlayer->sessionPrefix();
-    }
-    
-    // 注册有效范围（保护这些帧不被清理）
-    if (m_gstPlayer) {
-        item.validRangeId = m_gstPlayer->registerValidRange(startIndex, endIndex);
-    } else if (m_gpuPipeline && m_gpuPipeline->jpegEncoder()) {
-        item.validRangeId = m_gpuPipeline->jpegEncoder()->registerValidRange(startIndex, endIndex);
+    item.dirPath = "";
+    item.saved = true;
+
+    // 注册有效范围（保护 NALU 帧不被环形缓冲覆盖）
+    if (m_gstPlayer && m_gstPlayer->naluFrameStore()) {
+        item.validRangeId = m_gstPlayer->naluFrameStore()->registerValidRange(startIndex, endIndex);
     }
     
     m_items.append(item);
@@ -813,14 +802,9 @@ void CaptureManager::clearAll()
     QMutexLocker lock(&m_mutex);
     m_pendingCaptures.clear();
     
-    // 逐个注销每个 item 的有效范围（不影响 SlowMotionPlayer 的范围）
     for (const CaptureItem &item : m_items) {
-        if (item.validRangeId >= 0) {
-            if (m_gstPlayer) {
-                m_gstPlayer->unregisterValidRange(item.validRangeId);
-            } else if (m_gpuPipeline && m_gpuPipeline->jpegEncoder()) {
-                m_gpuPipeline->jpegEncoder()->unregisterValidRange(item.validRangeId);
-            }
+        if (item.validRangeId >= 0 && m_gstPlayer && m_gstPlayer->naluFrameStore()) {
+            m_gstPlayer->naluFrameStore()->unregisterValidRange(item.validRangeId);
         }
     }
     
@@ -838,13 +822,8 @@ void CaptureManager::removeItem(int index)
     
     CaptureItem &item = m_items[index];
     
-    // 注销有效范围（帧文件会被自动清理）
-    if (item.validRangeId >= 0) {
-        if (m_gstPlayer) {
-            m_gstPlayer->unregisterValidRange(item.validRangeId);
-        } else if (m_gpuPipeline && m_gpuPipeline->jpegEncoder()) {
-            m_gpuPipeline->jpegEncoder()->unregisterValidRange(item.validRangeId);
-        }
+    if (item.validRangeId >= 0 && m_gstPlayer && m_gstPlayer->naluFrameStore()) {
+        m_gstPlayer->naluFrameStore()->unregisterValidRange(item.validRangeId);
     }
     
     m_items.removeAt(index);
@@ -872,9 +851,9 @@ void CaptureManager::removeOldest()
 
 void CaptureManager::reset()
 {
-    m_ringBuffer.clear();
+    if (m_naluDecoder) m_naluDecoder->clearCache();
     clearAll();
-    
+
     m_nextId = 1;
     qDebug() << "CaptureManager: reset complete";
 }
@@ -973,17 +952,16 @@ QImage CaptureManager::getFrameImage(int itemIndex, int frameOffset)
         return m_cachedImage;
     }
     
-    // 计算全局帧索引：startIndex + frameOffset
     qint64 globalIndex = item.startIndex + frameOffset;
-    
+
     QImage img;
-    
-    // 使用独立的抓拍解码器（不与慢放竞争）
-    if (m_gpuPipeline) {
-        img = m_gpuPipeline->decodeFrameToImage(globalIndex);
+
+    // 使用 NaluDecoder 解码 H.264 NALU（零格式转换，原始画质）
+    if (m_naluDecoder) {
+        img = m_naluDecoder->decodeFrame(globalIndex);
     }
-    
-    // ⭐ 使用 item 的会话前缀加载帧（断线重连后仍能找到文件）
+
+    // 回退到 JPEG（兼容旧数据）
     if (img.isNull()) {
         img = loadFrameFromDisk(globalIndex, item.sessionPrefix);
     }
@@ -1095,63 +1073,35 @@ void CaptureManager::setSlowMotionPlayer(SlowMotionPlayer* player)
 
 QImage CaptureManager::loadFrameFromDisk(qint64 globalFrameIndex, const QString &sessionPrefix)
 {
-    // ⭐ 静态变量缓存最后有效帧（防止帧缺失时卡死）
+    Q_UNUSED(sessionPrefix);
     static qint64 lastValidFrame = -1;
     static QImage lastValidImage;
-    
-    // ⭐ 使用指定的会话前缀读取 JPEG（断线重连后仍能找到旧抓拍的文件）
-    if (m_gstPlayer) {
-        QByteArray jpegData;
-        if (!sessionPrefix.isEmpty()) {
-            // 使用 item 保存的会话前缀
-            jpegData = m_gstPlayer->getJpegWithPrefix(globalFrameIndex, sessionPrefix);
-        } else {
-            // 回退到当前会话前缀
-            jpegData = m_gstPlayer->getJpeg(globalFrameIndex);
-        }
-        if (!jpegData.isEmpty()) {
-            QImage img;
-            if (img.loadFromData(jpegData, "JPEG")) {
-                // ⭐ 保存有效帧
-                lastValidFrame = globalFrameIndex;
-                lastValidImage = img;
-                return img;
-            }
-        }
-    }
-    
-    // 回退到 GpuPipeline
+
     if (m_gpuPipeline) {
         QImage img = m_gpuPipeline->decodeFrameToImage(globalFrameIndex);
         if (!img.isNull()) {
-            // ⭐ 保存有效帧
             lastValidFrame = globalFrameIndex;
             lastValidImage = img;
             return img;
         }
     }
-    
-    // ⭐ 帧找不到时，尝试回退到最近的有效帧（防止卡死）
+
     if (lastValidFrame >= 0 && !lastValidImage.isNull()) {
-        qDebug() << "CaptureManager::loadFrameFromDisk: No data for frame" << globalFrameIndex 
-                 << "prefix:" << sessionPrefix << "| 使用上次有效帧:" << lastValidFrame;
         return lastValidImage;
     }
-    
-    qDebug() << "CaptureManager::loadFrameFromDisk: No data for frame" << globalFrameIndex << "prefix:" << sessionPrefix;
+
     return QImage();
 }
 
 qint64 CaptureManager::currentFrameIndex() const
 {
-    // 优先使用 GstPlayer
-    if (m_gstPlayer) {
-        return m_gstPlayer->newestFrame();
+    if (m_gstPlayer && m_gstPlayer->naluFrameStore()) {
+        return m_gstPlayer->naluFrameStore()->newestIndex();
     }
     if (m_gpuPipeline) {
         return m_gpuPipeline->newestFrame();
     }
-    return m_encoder->currentIndex();
+    return 0;
 }
 
 // ============ 相机设定 ============

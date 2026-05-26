@@ -56,7 +56,11 @@ qt_add_executable(Phoenix
     eventbus.h
     gpupipeline.cpp      # 颜色调整（亮度/对比度/饱和度/伽马）
     gpupipeline.h
-    gstplayer.cpp        # GStreamer 实时流 + JPEG 保存
+    naluframestore.cpp   # H.264 NALU 环形缓冲（替代 JPEG 文件）
+    naluframestore.h
+    naludecoder.cpp      # H.264 NALU → QImage 解码器
+    naludecoder.h
+    gstplayer.cpp        # GStreamer 实时流 + NALU 存储
     gstplayer.h
     httpclient.cpp
     httpclient.h

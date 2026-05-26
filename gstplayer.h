@@ -6,13 +6,12 @@
 #include <QVideoFrame>
 #include <QMutex>
 #include <QThread>
-#include <QMap>
-#include <QPair>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QProcess>
 #include <QTimer>
 #include <atomic>
+#include "naluframestore.h"
 #include <gst/gst.h>
 #include <gst/app/gstappsrc.h>
 #include <gst/app/gstappsink.h>
@@ -24,14 +23,9 @@ typedef struct _GstWebRTCSessionDescription GstWebRTCSessionDescription;
 
 /**
  * GStreamer 实时流播放器（WebRTCBin 版本）
- * 
- * Pipeline: webrtcbin → rtph264depay → h264parse → d3d11h264dec → d3d11download → videoconvert → appsink
- * 
- * 特点：
- * 1. 使用 GStreamer 内置 WebRTCBin，无需 libdatachannel
- * 2. 与 Java 版本使用相同的 WebRTC 实现
- * 3. d3d11h264dec: Windows 通用硬解
- * 4. 输出 BGRA 格式到 Qt QVideoSink
+ *
+ * Pipeline: webrtcbin → rtph264depay → h264parse → decoder → videoscale → gamma → displayQueue → convert → appsink
+ * h264parse pad probe → NaluFrameStore（H.264 NALU ring buffer，截图/慢放用）
  */
 class GstPlayer : public QObject
 {
@@ -41,9 +35,6 @@ class GstPlayer : public QObject
     Q_PROPERTY(int videoWidth READ videoWidth NOTIFY videoSizeChanged)
     Q_PROPERTY(int videoHeight READ videoHeight NOTIFY videoSizeChanged)
     Q_PROPERTY(QString decoderName READ decoderName NOTIFY decoderChanged)
-    Q_PROPERTY(bool jpegEnabled READ isJpegEnabled WRITE setJpegEnabled NOTIFY jpegEnabledChanged)
-    Q_PROPERTY(QString jpegDirectory READ jpegDirectory WRITE setJpegDirectory NOTIFY jpegDirectoryChanged)
-    Q_PROPERTY(qint64 jpegFrameIndex READ jpegFrameIndex NOTIFY jpegFrameIndexChanged)
     Q_PROPERTY(int receiveFps READ receiveFps NOTIFY receiveFpsChanged)
     Q_PROPERTY(int bufferSize READ bufferSize NOTIFY bufferSizeChanged)
     Q_PROPERTY(int bufferTarget READ bufferTarget NOTIFY bufferTargetChanged)
@@ -61,12 +52,6 @@ public:
     int videoHeight() const { return m_videoHeight; }
     QString decoderName() const { return m_decoderName; }
     
-    // JPEG 属性
-    bool isJpegEnabled() const { return m_jpegEnabled; }
-    void setJpegEnabled(bool enabled);
-    QString jpegDirectory() const { return m_jpegDirectory; }
-    void setJpegDirectory(const QString &dir);
-    qint64 jpegFrameIndex() const { return m_jpegFrameIndex; }
     
     // FPS 统计（EMA 平滑后的帧率，已 x4）
     int receiveFps() const { return m_receiveFps; }
@@ -75,6 +60,9 @@ public:
     int bufferSize() const { return m_bufferSize; }
     int bufferTarget() const { return m_bufferTarget; }
     
+    // NALU 帧存储（H.264 ring buffer，替代 JPEG 文件）
+    NaluFrameStore* naluFrameStore() const { return m_naluStore; }
+
     // 推送 H.264 NALU 数据（保留用于兼容，WebRTCBin 模式下不使用）
     Q_INVOKABLE void pushNalu(const QByteArray &nalu);
     
@@ -100,26 +88,9 @@ public:
     Q_INVOKABLE void handleWebRTCSignaling(const QJsonObject &message);
     Q_INVOKABLE bool isP2PMode() const { return m_useP2P; }
     
-    // JPEG 控制
-    Q_INVOKABLE void startJpegCapture();
-    Q_INVOKABLE void stopJpegCapture();
-    Q_INVOKABLE void clearJpegFiles();
-    
-    // 有效范围保护（防止抓拍帧被清理）
-    Q_INVOKABLE int registerValidRange(qint64 startIndex, qint64 endIndex);
-    Q_INVOKABLE void unregisterValidRange(int rangeId);
-    Q_INVOKABLE void clearAllValidRanges();
-    
-    // JPEG 读取（给 CaptureManager/SlowMotionPlayer 用）
-    Q_INVOKABLE QByteArray getJpeg(qint64 frameIndex) const;
-    Q_INVOKABLE QByteArray getJpegWithPrefix(qint64 frameIndex, const QString &sessionPrefix) const;  // ⭐ 使用指定前缀
-    Q_INVOKABLE bool hasJpeg(qint64 frameIndex) const;
-    Q_INVOKABLE qint64 newestFrame() const;
-    Q_INVOKABLE qint64 oldestFrame() const;
-    Q_INVOKABLE QString framesDir() const { return m_jpegDirectory; }
-    Q_INVOKABLE QString sessionPrefix() const { return m_sessionPrefix; }  // ⭐ 获取当前会话前缀
-    QString frameFilePath(qint64 frameIndex) const;
-    QString frameFilePathWithPrefix(qint64 frameIndex, const QString &sessionPrefix) const;  // ⭐ 使用指定前缀
+    // QML 兼容（JPEG 管线已移除，保留空方法避免 QML 报错）
+    Q_INVOKABLE void clearJpegFiles() {}
+    Q_INVOKABLE void setJpegQuality(int) {}
     
     // 图像调节方法（使用 GStreamer videobalance 和 gamma）
     Q_INVOKABLE void setBrightness(double value);   // -1.0 ~ 1.0
@@ -128,9 +99,6 @@ public:
     Q_INVOKABLE void setHue(double value);          // -1.0 ~ 1.0
     Q_INVOKABLE void setGamma(double value);        // 0.01 ~ 10.0
     Q_INVOKABLE void setAllImageParams(double brightness, double contrast, double saturation, double hue, double gamma);
-    
-    // JPEG 质量动态调节（不影响拉流）
-    Q_INVOKABLE void setJpegQuality(int quality);  // 1-100
     
     // ⭐ 配置fps（PC手动设置时调用，用于延迟计算）
     Q_INVOKABLE void setConfigFps(double fps);
@@ -148,12 +116,6 @@ signals:
     void error(const QString &message);
     void firstFrameReceived();
     
-    // JPEG 信号
-    void jpegEnabledChanged();
-    void jpegDirectoryChanged();
-    void jpegFrameIndexChanged();
-    void frameEncoded(qint64 frameIndex);  // 每帧保存后发出
-    
     // FPS 统计信号
     void receiveFpsChanged();
     
@@ -166,9 +128,6 @@ signals:
     // urgency: 紧急度 "critical"/"high"/"normal"/"low"
     // reason: 触发原因（调试用）
     void requestFpsChange(int targetFps, const QString &urgency, const QString &reason);
-    
-    // 帧回调（用于 JPEG 编码）
-    void frameReady(const QByteArray &bgraData, int width, int height, qint64 pts);
     
     // ⭐ WebRTC 信号
     void webrtcConnected();
@@ -236,18 +195,9 @@ private:
     GstElement *m_convert = nullptr;     // videoconvert
     GstElement *m_appsink = nullptr;
     
-    // JPEG 分支元素 (tee → queue → valve → convert1 → capsfilter → convert2 → jpegenc → multifilesink)
-    // ⭐ 双重 videoconvert 方案：确保 JPEG 色彩与显示一致
-    GstElement *m_tee = nullptr;           // 分流器
+    // 显示分支
     GstElement *m_displayQueue = nullptr;  // 显示队列
-    GstElement *m_clockSync = nullptr;     // ⭐ clocksync（修正时间戳为系统时钟，让 appsink sync=TRUE 正确工作）
-    GstElement *m_jpegQueue = nullptr;     // JPEG 队列
-    GstElement *m_jpegValve = nullptr;     // 阀门控制开关
-    GstElement *m_jpegRate = nullptr;      // 已废弃（WebRTC 流无有效时长）
-    GstElement *m_jpegConvert = nullptr;   // 格式转换：→ I420
-    GstElement *m_jpegCapsFilter = nullptr; // 强制 I420 格式
-    GstElement *m_jpegEnc = nullptr;       // JPEG 编码器
-    GstElement *m_jpegSink = nullptr;      // multifilesink
+    GstElement *m_clockSync = nullptr;
     
     // Qt 显示
     QVideoSink *m_videoSink = nullptr;
@@ -296,16 +246,6 @@ private:
     QTimer *m_keyFrameTimer = nullptr;
     bool m_autoKeyFrameEnabled = false;
     
-    // JPEG 状态
-    std::atomic<bool> m_jpegEnabled{false};
-    QString m_jpegDirectory;
-    QString m_sessionPrefix;  // ⭐ 会话前缀（连接时间戳），如 "s_1737012345"
-    std::atomic<qint64> m_jpegFrameIndex{0};
-    std::atomic<qint64> m_oldestFrame{0};
-    int m_maxJpegFiles = 5000;  // 最大保留帧数
-    
-    // ⭐ 生成新的会话前缀（连接成功时调用）
-    void generateSessionPrefix();
     
     // FPS 统计（EMA 指数移动平均，极度平滑）
     std::atomic<int> m_fpsFrameCounter{0};       // 当前秒帧计数
@@ -446,7 +386,6 @@ private:
     // P2: 240fps 验证日志（100ms窗口计数）
     qint64 m_hsWindowStartMs = 0;
     int m_hsWindowFrameCount = 0;
-    int m_hsWindowJpegCount = 0;
     double m_arrivalRateEma = 30.0;              // 实测帧到达速率EMA（用于检测网络质量）
     double m_depthEma = 6.0;                     // 队列深度EMA D(t)
     double m_intervalEma = 33.0;                 // 消费间隔EMA I(t)
@@ -531,14 +470,12 @@ private:
     void detectFpsChange();                      // ⭐ FPS变化检测（自动唤醒）
     void checkPushFpsControl(double waterLevel); // ⭐⭐⭐ 第二道防线：推流帧率控制
     
-    // 有效范围保护（key: rangeId, value: {start, end}）
-    QMap<int, QPair<qint64, qint64>> m_validRanges;
-    int m_nextRangeId = 0;
-    mutable QMutex m_rangesMutex;
-    mutable QMutex m_indexMutex;  // 保护帧索引操作（清理 vs 抓拍）
-    bool isIndexProtected(qint64 frameIndex) const;
     
     QMutex m_mutex;
+
+    // NALU 帧存储
+    NaluFrameStore *m_naluStore = nullptr;
+    std::atomic<qint64> m_naluFrameIndex{0};
 };
 
 #endif // GSTPLAYER_H

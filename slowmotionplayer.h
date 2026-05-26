@@ -16,37 +16,35 @@
 
 class GpuPipeline;
 class GstPlayer;
+class NaluFrameStore;
+class NaluDecoder;
 
-// 异步解码线程 - 避免主线程阻塞
 class SlowMotionDecodeThread : public QThread
 {
     Q_OBJECT
 public:
-    explicit SlowMotionDecodeThread(GpuPipeline *pipeline, QObject *parent = nullptr);
+    explicit SlowMotionDecodeThread(NaluFrameStore *store, QObject *parent = nullptr);
     ~SlowMotionDecodeThread();
-    
+
     void requestDecode(qint64 globalFrameIndex, int frameOffset, bool scale = false);
     void stop();
-    
-    // ⭐ 设置会话前缀（用于构建正确的JPEG文件路径）
-    void setSessionPrefix(const QString &prefix);
-    
+
 signals:
     void frameDecoded(int frameOffset, const QVideoFrame &frame);
-    
+
 protected:
     void run() override;
-    
+
 private:
-    GpuPipeline *m_pipeline;
+    NaluFrameStore *m_store;
+    NaluDecoder *m_decoder = nullptr;
     std::atomic<bool> m_running{true};
     QMutex m_queueMutex;
     QWaitCondition m_queueCondition;
-    QString m_sessionPrefix;  // ⭐ 会话前缀（如 "s_1737012345"）
     struct DecodeRequest {
         qint64 globalIndex;
         int frameOffset;
-        bool scale;  // 是否缩放（追时时流=true，回放=false）
+        bool scale;
     };
     QQueue<DecodeRequest> m_decodeQueue;
 };
@@ -193,11 +191,11 @@ private:
     
     State m_state = IDLE;
     
-    // 帧范围（全局JPEG索引）
+    // 帧范围（全局 NALU 索引）
     qint64 m_startIndex = -1;
     qint64 m_endIndex = -1;
-    int m_validRangeId = -1;  // 注册的有效范围 ID
-    QString m_sessionPrefix;  // ⭐ 录制时的会话前缀（用于读取JPEG文件）
+    int m_validRangeId = -1;
+    NaluDecoder *m_naluDecoder = nullptr;
     
     // 当前播放位置（相对于startIndex的偏移，0 ~ recordedFrames-1）
     int m_currentFrame = 0;

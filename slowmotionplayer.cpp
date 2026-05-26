@@ -2,6 +2,8 @@
 #include "gpupipeline.h"
 #include "gstplayer.h"
 #include "imageprovider.h"
+#include "naludecoder.h"
+#include "naluframestore.h"
 #include <QCoreApplication>
 #include <QFile>
 #include <QDebug>
@@ -34,14 +36,14 @@ SlowMotionPlayer::SlowMotionPlayer(QObject *parent)
 SlowMotionPlayer::~SlowMotionPlayer()
 {
     m_playbackTimer->stop();
-    
-    // 停止解码线程
+
     if (m_decodeThread) {
         m_decodeThread->stop();
         delete m_decodeThread;
         m_decodeThread = nullptr;
     }
-    
+
+    delete m_naluDecoder;
     saveSettings();
 }
 
@@ -71,25 +73,7 @@ void SlowMotionPlayer::saveSettings()
 void SlowMotionPlayer::setGpuPipeline(GpuPipeline* pipeline)
 {
     if (m_gpuPipeline != pipeline) {
-        // 停止旧的解码线程
-        if (m_decodeThread) {
-            m_decodeThread->stop();
-            delete m_decodeThread;
-            m_decodeThread = nullptr;
-        }
-        
         m_gpuPipeline = pipeline;
-        
-        // 创建新的解码线程
-        if (m_gpuPipeline) {
-            m_decodeThread = new SlowMotionDecodeThread(m_gpuPipeline, this);
-            connect(m_decodeThread, &SlowMotionDecodeThread::frameDecoded,
-                    this, &SlowMotionPlayer::onFrameDecoded, Qt::QueuedConnection);
-            m_decodeThread->start();
-            qDebug() << "SlowMotionPlayer: decode thread started";
-        }
-        
-        // 注意：jpegEncoder 可能在 init() 后才创建，所以连接在 startRecording() 中建立
         emit gpuPipelineChanged();
     }
 }
@@ -98,22 +82,38 @@ void SlowMotionPlayer::setGstPlayer(GstPlayer* player)
 {
     if (m_gstPlayer != player) {
         // 断开旧连接
-        if (m_gstPlayer) {
-            disconnect(m_gstPlayer, &GstPlayer::frameEncoded,
+        if (m_gstPlayer && m_gstPlayer->naluFrameStore()) {
+            disconnect(m_gstPlayer->naluFrameStore(), &NaluFrameStore::frameStored,
                        this, &SlowMotionPlayer::onFrameEncoded);
         }
-        
-        m_gstPlayer = player;
-        
-        // 建立新连接（JPEG 保存成功后的回调）
-        if (m_gstPlayer) {
-            connect(m_gstPlayer, &GstPlayer::frameEncoded,
-                    this, &SlowMotionPlayer::onFrameEncoded, Qt::QueuedConnection);
-            qDebug() << "SlowMotionPlayer: connected to gstPlayer.frameEncoded";
+
+        // 停止旧解码线程
+        if (m_decodeThread) {
+            m_decodeThread->stop();
+            delete m_decodeThread;
+            m_decodeThread = nullptr;
         }
-        
+
+        m_gstPlayer = player;
+
+        if (m_gstPlayer && m_gstPlayer->naluFrameStore()) {
+            // 连接 NaluFrameStore 信号
+            connect(m_gstPlayer->naluFrameStore(), &NaluFrameStore::frameStored,
+                    this, &SlowMotionPlayer::onFrameEncoded, Qt::QueuedConnection);
+
+            // 创建 NaluDecoder
+            delete m_naluDecoder;
+            m_naluDecoder = new NaluDecoder(m_gstPlayer->naluFrameStore(), this);
+
+            // 创建解码线程
+            m_decodeThread = new SlowMotionDecodeThread(m_gstPlayer->naluFrameStore(), this);
+            connect(m_decodeThread, &SlowMotionDecodeThread::frameDecoded,
+                    this, &SlowMotionPlayer::onFrameDecoded, Qt::QueuedConnection);
+            m_decodeThread->start();
+            qDebug() << "SlowMotionPlayer: NaluDecoder + decode thread created";
+        }
+
         emit gstPlayerChanged();
-        qDebug() << "SlowMotionPlayer: gstPlayer set, framesDir:" << (player ? player->framesDir() : "null");
     }
 }
 
@@ -128,19 +128,7 @@ void SlowMotionPlayer::setVideoSink(QVideoSink* sink)
 
 void SlowMotionPlayer::ensureJpegEncoderConnected()
 {
-    // 确保与 jpegEncoder 的连接已建立
-    if (m_gpuPipeline && m_gpuPipeline->jpegEncoder()) {
-        // 先断开防止重复连接
-        disconnect(m_gpuPipeline->jpegEncoder(), &GpuJpegEncoder::frameEncoded,
-                   this, &SlowMotionPlayer::onFrameEncoded);
-        // 建立连接（使用 Qt::QueuedConnection 确保跨线程安全）
-        bool ok = connect(m_gpuPipeline->jpegEncoder(), &GpuJpegEncoder::frameEncoded,
-                          this, &SlowMotionPlayer::onFrameEncoded, Qt::QueuedConnection);
-        qDebug() << "SlowMotionPlayer: connected to jpegEncoder frameEncoded signal, success:" << ok;
-    } else {
-        qWarning() << "SlowMotionPlayer: cannot connect - gpuPipeline:" << m_gpuPipeline
-                   << "jpegEncoder:" << (m_gpuPipeline ? m_gpuPipeline->jpegEncoder() : nullptr);
-    }
+    // No longer needed — using NaluFrameStore instead of JPEG encoder
 }
 
 void SlowMotionPlayer::setState(State state)
@@ -236,52 +224,32 @@ void SlowMotionPlayer::setMaxFrameRate(int fps)
 
 void SlowMotionPlayer::startRecording()
 {
-    // 优先使用 gstPlayer
     qint64 newest = -1;
-    if (m_gstPlayer) {
-        newest = m_gstPlayer->newestFrame();
-    } else if (m_gpuPipeline && m_gpuPipeline->jpegEncoder()) {
-        newest = m_gpuPipeline->newestFrame();
-        ensureJpegEncoderConnected();
+    if (m_gstPlayer && m_gstPlayer->naluFrameStore()) {
+        newest = m_gstPlayer->naluFrameStore()->newestIndex();
     }
-    
+
     if (newest < 0) {
         qWarning() << "SlowMotionPlayer: cannot start recording - no frames available";
         return;
     }
-    
-    // 如果已经有内容，先清空
+
     if (m_state != IDLE) {
         clear();
     }
-    
-    // 记录起始帧索引
-    m_startIndex = newest;  // 从当前最新帧开始
+
+    m_startIndex = newest;
     m_endIndex = m_startIndex;
     m_currentFrame = 0;
-    m_recordedFrames = 0;  // 开始时没有录制帧，等第一帧到来
-    
-    // ⭐ 保存当前会话前缀（用于后续读取JPEG文件）
-    if (m_gstPlayer) {
-        m_sessionPrefix = m_gstPlayer->sessionPrefix();
-        qDebug() << "SlowMotionPlayer: 保存会话前缀:" << m_sessionPrefix;
-        
-        // ⭐ 同步前缀到解码线程
-        if (m_decodeThread) {
-            m_decodeThread->setSessionPrefix(m_sessionPrefix);
-        }
-    }
-    
-    // 1x跟随实时流，大于1x直接慢放
+    m_recordedFrames = 0;
+
     m_followLive = (m_playbackMultiplier == 1);
-    
+
     qDebug() << "SlowMotionPlayer: startIndex:" << m_startIndex << "multiplier:" << m_playbackMultiplier << "followLive:" << m_followLive;
-    
-    // 注册有效范围（保护帧不被清理）
-    if (m_gstPlayer) {
-        m_validRangeId = m_gstPlayer->registerValidRange(m_startIndex, m_startIndex + m_maxFrames);
-    } else if (m_gpuPipeline && m_gpuPipeline->jpegEncoder()) {
-        m_validRangeId = m_gpuPipeline->jpegEncoder()->registerValidRange(m_startIndex, m_startIndex + m_maxFrames);
+
+    // 注册有效范围（保护 NALU 帧不被环形缓冲覆盖）
+    if (m_gstPlayer && m_gstPlayer->naluFrameStore()) {
+        m_validRangeId = m_gstPlayer->naluFrameStore()->registerValidRange(m_startIndex, m_startIndex + m_maxFrames);
     }
     
     setState(RECORDING);
@@ -315,15 +283,9 @@ void SlowMotionPlayer::stopRecording()
     // ⭐ 进入回放模式，使用原图（不缩放）
     m_followLive = false;
     
-    // 更新有效范围为实际录制的范围
-    if (m_validRangeId >= 0) {
-        if (m_gstPlayer) {
-            m_gstPlayer->unregisterValidRange(m_validRangeId);
-            m_validRangeId = m_gstPlayer->registerValidRange(m_startIndex, m_endIndex);
-        } else if (m_gpuPipeline && m_gpuPipeline->jpegEncoder()) {
-            m_gpuPipeline->jpegEncoder()->unregisterValidRange(m_validRangeId);
-            m_validRangeId = m_gpuPipeline->jpegEncoder()->registerValidRange(m_startIndex, m_endIndex);
-        }
+    if (m_validRangeId >= 0 && m_gstPlayer && m_gstPlayer->naluFrameStore()) {
+        m_gstPlayer->naluFrameStore()->unregisterValidRange(m_validRangeId);
+        m_validRangeId = m_gstPlayer->naluFrameStore()->registerValidRange(m_startIndex, m_endIndex);
     }
     
     setState(PLAYBACK);
@@ -339,28 +301,22 @@ void SlowMotionPlayer::clear()
 {
     pause();
     
-    // 取消注册有效范围（允许清理）
-    if (m_validRangeId >= 0) {
-        if (m_gstPlayer) {
-            m_gstPlayer->unregisterValidRange(m_validRangeId);
-        } else if (m_gpuPipeline && m_gpuPipeline->jpegEncoder()) {
-            m_gpuPipeline->jpegEncoder()->unregisterValidRange(m_validRangeId);
-        }
+    if (m_validRangeId >= 0 && m_gstPlayer && m_gstPlayer->naluFrameStore()) {
+        m_gstPlayer->naluFrameStore()->unregisterValidRange(m_validRangeId);
         m_validRangeId = -1;
     }
-    
-    // 清空帧缓存
+
     {
         QMutexLocker locker(&m_cacheMutex);
         m_frameCache.clear();
     }
-    
+    if (m_naluDecoder) m_naluDecoder->clearCache();
+
     m_startIndex = -1;
     m_endIndex = -1;
     m_currentFrame = 0;
     m_recordedFrames = 0;
     m_followLive = true;
-    m_sessionPrefix.clear();  // ⭐ 清空会话前缀
     
     setState(IDLE);
     emit recordedFramesChanged();
@@ -486,56 +442,30 @@ void SlowMotionPlayer::jumpToFrame(int frame)
 
 QImage SlowMotionPlayer::getFrameImage(int frameOffset) const
 {
-    if (m_startIndex < 0) {
-        return QImage();
-    }
-    
+    if (m_startIndex < 0) return QImage();
+
     qint64 globalIndex = m_startIndex + frameOffset;
-    
-    // 录制中时，如果请求的帧超出当前范围，使用最新帧
+
     if (m_state == RECORDING && globalIndex > m_endIndex) {
         globalIndex = m_endIndex;
     } else if (globalIndex > m_endIndex) {
         return QImage();
     }
-    
+
     QImage img;
-    
-    // ⭐ 优先使用 GstPlayer 读取 JPEG（使用录制时的会话前缀）
-    if (m_gstPlayer) {
-        QByteArray jpegData;
-        if (!m_sessionPrefix.isEmpty()) {
-            jpegData = m_gstPlayer->getJpegWithPrefix(globalIndex, m_sessionPrefix);
-        } else {
-            jpegData = m_gstPlayer->getJpeg(globalIndex);
-        }
-        if (!jpegData.isEmpty()) {
-            img.loadFromData(jpegData, "JPEG");
-        }
+
+    if (m_naluDecoder) {
+        img = const_cast<NaluDecoder*>(m_naluDecoder)->decodeFrame(globalIndex);
     }
-    
-    // 回退到 GpuPipeline
-    if (img.isNull() && m_gpuPipeline && m_gpuPipeline->jpegEncoder()) {
-        QByteArray frameData = m_gpuPipeline->jpegEncoder()->getFrameData(globalIndex);
-        if (!frameData.isEmpty()) {
-            auto decoder = m_gpuPipeline->jpegDecoder();
-            if (decoder) {
-                img = decoder->decodeToImage(frameData);
-            }
-        }
-    }
-    
-    if (img.isNull()) {
-        return QImage();
-    }
-    
-    // 追实时流时，快速缩放到640宽度（FastTransformation约5-8ms）
+
+    if (img.isNull()) return QImage();
+
     if (m_state == RECORDING && m_followLive && img.width() > 640) {
         int newWidth = 640;
         int newHeight = img.height() * 640 / img.width();
         return img.scaled(newWidth, newHeight, Qt::KeepAspectRatio, Qt::FastTransformation);
     }
-    
+
     return img;
 }
 
@@ -632,26 +562,19 @@ void SlowMotionPlayer::emitCurrentFrame()
 
 void SlowMotionPlayer::renderToVideoSink(int frameOffset)
 {
-    if (!m_videoSink || !m_gpuPipeline || m_startIndex < 0) {
-        return;
-    }
-    
+    if (!m_videoSink || m_startIndex < 0) return;
+
     qint64 globalIndex = m_startIndex + frameOffset;
-    
-    // 录制中时，如果请求的帧超出当前范围，使用最新帧
+
     if (m_state == RECORDING && globalIndex > m_endIndex) {
         globalIndex = m_endIndex;
     } else if (globalIndex > m_endIndex) {
         return;
     }
-    
-    // 异步解码：将请求发送到解码线程
-    // followLive=true 时缩放（追时时流），false 时原图（回放）
+
     if (m_decodeThread) {
-        m_pendingFrameOffset = frameOffset;  // 记录最新请求，用于跳帧
+        m_pendingFrameOffset = frameOffset;
         m_decodeThread->requestDecode(globalIndex, frameOffset, m_followLive);
-    } else {
-        qWarning() << "SlowMotionPlayer::renderToVideoSink: no decode thread!";
     }
 }
 
@@ -670,22 +593,17 @@ void SlowMotionPlayer::onFrameDecoded(int frameOffset, const QVideoFrame &frame)
 
 // ============ SlowMotionDecodeThread 实现 ============
 
-SlowMotionDecodeThread::SlowMotionDecodeThread(GpuPipeline *pipeline, QObject *parent)
+SlowMotionDecodeThread::SlowMotionDecodeThread(NaluFrameStore *store, QObject *parent)
     : QThread(parent)
-    , m_pipeline(pipeline)
+    , m_store(store)
 {
-}
-
-void SlowMotionDecodeThread::setSessionPrefix(const QString &prefix)
-{
-    QMutexLocker locker(&m_queueMutex);
-    m_sessionPrefix = prefix;
-    qDebug() << "SlowMotionDecodeThread: 设置会话前缀:" << m_sessionPrefix;
+    m_decoder = new NaluDecoder(store);
 }
 
 SlowMotionDecodeThread::~SlowMotionDecodeThread()
 {
     stop();
+    delete m_decoder;
 }
 
 void SlowMotionDecodeThread::stop()
@@ -700,11 +618,8 @@ void SlowMotionDecodeThread::stop()
 void SlowMotionDecodeThread::requestDecode(qint64 globalFrameIndex, int frameOffset, bool scale)
 {
     QMutexLocker locker(&m_queueMutex);
-    
-    // 清空队列，只保留最新请求（跳帧优化）
     m_decodeQueue.clear();
     m_decodeQueue.enqueue({globalFrameIndex, frameOffset, scale});
-    
     m_queueCondition.wakeOne();
 }
 
@@ -712,58 +627,34 @@ void SlowMotionDecodeThread::run()
 {
     while (m_running) {
         DecodeRequest request{-1, -1, false};
-        
+
         {
             QMutexLocker locker(&m_queueMutex);
             while (m_decodeQueue.isEmpty() && m_running) {
                 m_queueCondition.wait(&m_queueMutex);
             }
-            
             if (!m_running) break;
-            
-            // 取出最新的请求
             request = m_decodeQueue.dequeue();
         }
-        
-        if (request.globalIndex >= 0) {
-            // ⭐ 使用会话前缀构建正确的 JPEG 路径（如 s_1737012345_000000123.jpeg）
-            QString sessionPrefix;
-            {
-                QMutexLocker locker(&m_queueMutex);
-                sessionPrefix = m_sessionPrefix;
-            }
-            QString jpegPath = QCoreApplication::applicationDirPath() + 
-                QString("/captures/frames/%1_%2.jpeg").arg(sessionPrefix).arg(request.globalIndex, 9, 10, QChar('0'));
-            
-            QFile file(jpegPath);
-            if (file.open(QIODevice::ReadOnly)) {
-                QByteArray jpegData = file.readAll();
-                file.close();
-                
-                QImage img;
-                if (img.loadFromData(jpegData, "JPEG")) {
-                    int origW = img.width();
-                    int origH = img.height();
-                    
-                    // ⭐ 只有追时时流(scale=true)时才缩放，回放/滚轮/小键盘都用原图
-                    if (request.scale && (origW > 640 || origH > 480)) {
-                        img = img.scaled(640, 480, Qt::KeepAspectRatio, Qt::FastTransformation);
-                    }
-                    
-                    // 转换为 QVideoFrame
-                    QVideoFrame frame(QVideoFrameFormat(img.size(), QVideoFrameFormat::Format_BGRA8888));
-                    if (frame.map(QVideoFrame::WriteOnly)) {
-                        QImage converted = img.convertToFormat(QImage::Format_ARGB32);
-                        memcpy(frame.bits(0), converted.bits(), converted.sizeInBytes());
-                        frame.unmap();
-                        emit frameDecoded(request.frameOffset, frame);
-                    }
+
+        if (request.globalIndex >= 0 && m_decoder) {
+            QImage img = m_decoder->decodeFrame(request.globalIndex);
+
+            if (!img.isNull()) {
+                if (request.scale && (img.width() > 640 || img.height() > 480)) {
+                    img = img.scaled(640, 480, Qt::KeepAspectRatio, Qt::FastTransformation);
                 }
-            } else {
-                qWarning() << "❌ SlowMotion: 无法打开文件" << jpegPath;
+
+                QVideoFrame frame(QVideoFrameFormat(img.size(), QVideoFrameFormat::Format_BGRA8888));
+                if (frame.map(QVideoFrame::WriteOnly)) {
+                    QImage converted = img.convertToFormat(QImage::Format_ARGB32);
+                    memcpy(frame.bits(0), converted.bits(), converted.sizeInBytes());
+                    frame.unmap();
+                    emit frameDecoded(request.frameOffset, frame);
+                }
             }
         }
     }
-    
+
     qDebug() << "SlowMotionDecodeThread: stopped";
 }

@@ -14,6 +14,8 @@
 #include <atomic>
 #include "gpupipeline.h"
 #include "gstplayer.h"
+#include "naludecoder.h"
+#include "naluframestore.h"
 
 // 前向声明
 struct AVCodecContext;
@@ -336,10 +338,9 @@ private:
     void syncColorToJpegEncoder();  // 同步颜色参数到 JPEG 编码器
 
 private:
-    JpegRingBuffer m_ringBuffer;
-    JpegEncoder *m_encoder;
-    GpuPipeline *m_gpuPipeline = nullptr;  // GPU 管道（用于获取 JPEG 数据）
-    GstPlayer *m_gstPlayer = nullptr;      // GStreamer 播放器（JPEG 读取）
+    NaluDecoder *m_naluDecoder = nullptr;    // H.264 NALU 解码器
+    GpuPipeline *m_gpuPipeline = nullptr;  // GPU 管道（颜色调整）
+    GstPlayer *m_gstPlayer = nullptr;      // GStreamer 播放器（NALU 帧存储）
     QVector<CaptureItem> m_items;
     QList<PendingCapture> m_pendingCaptures;
     QSettings *m_settings;
