@@ -246,7 +246,7 @@ private:
     GstElement *m_jpegRate = nullptr;      // 已废弃（WebRTC 流无有效时长）
     GstElement *m_jpegConvert = nullptr;   // 格式转换：→ I420
     GstElement *m_jpegCapsFilter = nullptr; // 强制 I420 格式
-    GstElement *m_jpegEnc = nullptr;       // PNG 编码器
+    GstElement *m_jpegEnc = nullptr;       // JPEG 编码器
     GstElement *m_jpegSink = nullptr;      // multifilesink
     
     // Qt 显示

@@ -82,7 +82,7 @@ void clearFramesDirectory()
         return;
     }
     
-    QStringList files = dir.entryList(QStringList() << "*.png", QDir::Files);
+    QStringList files = dir.entryList(QStringList() << "*.jpg" << "*.jpeg", QDir::Files);
     int count = files.count();
     
     for (const QString &file : files) {
@@ -444,13 +444,13 @@ int main(int argc, char *argv[])
             qWarning() << "⚠️ d3d11h264dec 插件不可用";
         }
         
-        // 检查 pngenc 插件
-        GstElementFactory *jpegFactory = gst_element_factory_find("pngenc");
+        // 检查 jpegenc 插件
+        GstElementFactory *jpegFactory = gst_element_factory_find("jpegenc");
         if (jpegFactory) {
-            qDebug() << "✅ pngenc 插件可用（PNG 编码）";
+            qDebug() << "✅ jpegenc 插件可用（JPEG 编码）";
             gst_object_unref(jpegFactory);
         } else {
-            qWarning() << "⚠️ pngenc 插件不可用";
+            qWarning() << "⚠️ jpegenc 插件不可用";
         }
         
         // ⭐ 检查 webrtcbin 插件（替代 libdatachannel）

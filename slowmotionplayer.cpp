@@ -732,7 +732,7 @@ void SlowMotionDecodeThread::run()
                 sessionPrefix = m_sessionPrefix;
             }
             QString jpegPath = QCoreApplication::applicationDirPath() +
-                QString("/captures/frames/%1_%2.png").arg(sessionPrefix).arg(request.globalIndex, 9, 10, QChar('0'));
+                QString("/captures/frames/%1_%2.jpeg").arg(sessionPrefix).arg(request.globalIndex, 9, 10, QChar('0'));
             
             QFile file(jpegPath);
             if (file.open(QIODevice::ReadOnly)) {
