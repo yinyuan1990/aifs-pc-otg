@@ -841,7 +841,7 @@ bool GstPlayer::createPipeline()
                         if (gst_buffer_map(buffer, &map, GST_MAP_READ)) {
                             QByteArray naluData(reinterpret_cast<const char*>(map.data), static_cast<int>(map.size));
                             bool isKeyFrame = !GST_BUFFER_FLAG_IS_SET(buffer, GST_BUFFER_FLAG_DELTA_UNIT);
-                            qint64 idx = self->m_naluFrameIndex.fetchAndAddRelaxed(1);
+                            qint64 idx = self->m_naluFrameIndex.fetch_add(1, std::memory_order_relaxed);
                             gst_buffer_unmap(buffer, &map);
                             self->m_naluStore->addFrame(naluData, idx, isKeyFrame);
                         }
@@ -908,7 +908,7 @@ bool GstPlayer::createPipeline()
                         if (gst_buffer_map(buffer, &map, GST_MAP_READ)) {
                             QByteArray naluData(reinterpret_cast<const char*>(map.data), static_cast<int>(map.size));
                             bool isKeyFrame = !GST_BUFFER_FLAG_IS_SET(buffer, GST_BUFFER_FLAG_DELTA_UNIT);
-                            qint64 idx = self->m_naluFrameIndex.fetchAndAddRelaxed(1);
+                            qint64 idx = self->m_naluFrameIndex.fetch_add(1, std::memory_order_relaxed);
                             gst_buffer_unmap(buffer, &map);
                             self->m_naluStore->addFrame(naluData, idx, isKeyFrame);
                         }
