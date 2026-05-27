@@ -16,6 +16,7 @@
 #include "gstplayer.h"
 #include "naludecoder.h"
 #include "naluframestore.h"
+#include "gstcapturedecoder.h"
 
 // 前向声明
 struct AVCodecContext;
@@ -340,9 +341,9 @@ private:
     void syncColorToJpegEncoder();
 
 private:
-    // 每个 item 独立解码器（避免切换 item 时 flush 丢状态）
+    // 每个 item 独立 GStreamer 解码器（同直播链路的 d3d11h264dec）
     struct ItemDecodeState {
-        NaluDecoder *decoder = nullptr;
+        GstCaptureDecoder *decoder = nullptr;
         int lastOffset = -1;
     };
     QHash<int, ItemDecodeState> m_itemDecoders;

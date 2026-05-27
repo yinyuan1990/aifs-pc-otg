@@ -842,10 +842,10 @@ QImage CaptureManager::decodeFromDisk(int itemIndex, int frameOffset)
     const CaptureItem &item = m_items[itemIndex];
     if (frameOffset < 0 || frameOffset >= item.totalFrames()) return QImage();
 
-    // 每个 item 独立解码器（懒创建）
+    // 每个 item 独立 GStreamer 解码管线（懒创建）
     ItemDecodeState &state = m_itemDecoders[itemIndex];
     if (!state.decoder) {
-        state.decoder = new NaluDecoder(nullptr);
+        state.decoder = new GstCaptureDecoder();
     }
 
     bool sequential = (frameOffset == state.lastOffset + 1);
@@ -855,7 +855,7 @@ QImage CaptureManager::decodeFromDisk(int itemIndex, int frameOffset)
     if (sequential) {
         QByteArray data = readNaluFile(item.naluDir, frameOffset);
         if (!data.isEmpty()) {
-            result = state.decoder->decodeSingleNalu(data);
+            result = state.decoder->decodeNalu(data);
         }
     }
 
@@ -875,13 +875,12 @@ QImage CaptureManager::decodeFromDisk(int itemIndex, int frameOffset)
             QByteArray data = readNaluFile(item.naluDir, off);
             if (data.isEmpty()) continue;
 
-            QImage img = state.decoder->decodeSingleNalu(data);
+            QImage img = state.decoder->decodeNalu(data);
             if (img.isNull()) continue;
 
             if (off == frameOffset) {
                 result = img;
             } else {
-                // 缓存中间帧（旋转后存入）
                 QImage cached = img;
                 if (m_videoRotation != 0) {
                     QTransform t;

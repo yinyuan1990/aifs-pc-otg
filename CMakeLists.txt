@@ -58,8 +58,10 @@ qt_add_executable(Phoenix
     gpupipeline.h
     naluframestore.cpp   # H.264 NALU 环形缓冲（替代 JPEG 文件）
     naluframestore.h
-    naludecoder.cpp      # H.264 NALU → QImage 解码器
+    naludecoder.cpp      # H.264 NALU → QImage 解码器（FFmpeg，备用）
     naludecoder.h
+    gstcapturedecoder.cpp  # H.264 NALU → QImage（GStreamer 管线，同直播 d3d11h264dec）
+    gstcapturedecoder.h
     gstplayer.cpp        # GStreamer 实时流 + NALU 存储
     gstplayer.h
     httpclient.cpp
