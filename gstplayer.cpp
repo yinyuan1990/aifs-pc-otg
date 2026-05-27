@@ -1337,8 +1337,8 @@ void GstPlayer::storeNaluFromBuffer(GstBuffer *buffer)
             naluData.append(m_spsPpsAnnexB);
         }
         naluData.append(reinterpret_cast<const char*>(raw), rawSize);
-        if (!isKeyFrame && hasAnnexBNalType(raw, rawSize, 5)) {
-            isKeyFrame = true;
+        if (!isKeyFrame && isAnnexB) {
+            isKeyFrame = hasAnnexBNalType(raw, rawSize, 5) || hasAnnexBNalType(raw, rawSize, 7);
         }
     } else {
         static const char sc[4] = {0, 0, 0, 1};

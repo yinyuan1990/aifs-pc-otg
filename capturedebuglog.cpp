@@ -85,6 +85,37 @@ QString captureDebugNaluPreview(const QByteArray &data, int maxBytes)
         .arg(nalType);
 }
 
+bool captureDebugAnnexBHasNalType(const QByteArray &data, quint8 nalType)
+{
+    const quint8 *p = reinterpret_cast<const quint8 *>(data.constData());
+    const int size = data.size();
+    for (int i = 0; i + 4 < size; ++i) {
+        if (p[i] == 0 && p[i + 1] == 0 &&
+            ((p[i + 2] == 0 && p[i + 3] == 1) || p[i + 2] == 1)) {
+            const int nalIndex = (p[i + 2] == 1) ? (i + 3) : (i + 4);
+            if (nalIndex < size && (p[nalIndex] & 0x1F) == nalType) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+int captureDebugAnnexBFirstNalType(const QByteArray &data)
+{
+    const quint8 *p = reinterpret_cast<const quint8 *>(data.constData());
+    for (int i = 0; i + 4 < data.size(); ++i) {
+        if (p[i] == 0 && p[i + 1] == 0 &&
+            ((p[i + 2] == 0 && p[i + 3] == 1) || p[i + 2] == 1)) {
+            const int nalIndex = (p[i + 2] == 1) ? (i + 3) : (i + 4);
+            if (nalIndex < data.size()) {
+                return p[nalIndex] & 0x1F;
+            }
+        }
+    }
+    return -1;
+}
+
 CaptureDebugScope::CaptureDebugScope(const QString &tag, const QString &label, int warnThresholdMs)
     : m_tag(tag)
     , m_startLabel(label)

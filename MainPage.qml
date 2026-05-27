@@ -595,6 +595,22 @@ Rectangle {
                 console.log("[抓拍全屏] 自动全屏开关未开启")
             }
         }
+        function onFrameImageReady(itemIndex, frameOffset) {
+            if (mainPage.fullscreenViewerVisible
+                    && itemIndex === mainPage.fullscreenItemIndex
+                    && frameOffset === mainPage.fullscreenFrameIndex) {
+                mainPage.fullscreenRefreshToken = Date.now()
+            }
+            if (mainPage.columnPreviewVisible && mainPage.columnPreviewItems.length > 0) {
+                for (var i = 0; i < mainPage.columnPreviewItems.length; i++) {
+                    if (mainPage.columnPreviewItems[i] === itemIndex
+                            && mainPage.columnPreviewFrames[i] === frameOffset) {
+                        mainPage.columnPreviewRefreshToken = Date.now()
+                        break
+                    }
+                }
+            }
+        }
     }
     
     SlowMotionPlayer {
@@ -1630,6 +1646,11 @@ Rectangle {
                             function onFrameChanged(itemIndex, frameOffset) {
                                 if (itemIndex === gridCell.dataIndex) {
                                     gridCell.currentFrame = frameOffset
+                                    gridCell.frameVersion++
+                                }
+                            }
+                            function onFrameImageReady(itemIndex, frameOffset) {
+                                if (itemIndex === gridCell.dataIndex && frameOffset === gridCell.currentFrame) {
                                     gridCell.frameVersion++
                                 }
                             }

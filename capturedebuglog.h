@@ -27,5 +27,7 @@ private:
 
 QString captureDebugThreadTag();
 QString captureDebugNaluPreview(const QByteArray &data, int maxBytes = 16);
+bool captureDebugAnnexBHasNalType(const QByteArray &data, quint8 nalType);
+int captureDebugAnnexBFirstNalType(const QByteArray &data);
 
 #endif // CAPTUREDEBUGLOG_H

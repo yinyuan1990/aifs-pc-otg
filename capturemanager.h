@@ -11,6 +11,7 @@
 #include <QSettings>
 #include <QDir>
 #include <QDateTime>
+#include <QSet>
 #include <atomic>
 #include "gpupipeline.h"
 #include "gstplayer.h"
@@ -325,6 +326,7 @@ signals:
     void itemRemoved(int index);
     void captureComplete(int index);
     void frameChanged(int itemIndex, int frameOffset);
+    void frameImageReady(int itemIndex, int frameOffset);
 
 private slots:
     void onFrameEncoded(qint64 index);
@@ -333,9 +335,17 @@ private:
     void removeOldest();
     void ensureCapturesDir();
     void checkPendingCaptures(qint64 frameIndex);
-    void saveNaluFile(const QString &dir, int frameOffset, const QByteArray &data);
+    void saveNaluFile(const QString &dir, int frameOffset, const QByteArray &data,
+                      const QByteArray &spsPps = QByteArray());
     QImage decodeFromDisk(int itemIndex, int frameOffset);
     static QByteArray readNaluFile(const QString &dir, int frameOffset);
+    void buildKeyFrameOffsets(CaptureItem &item);
+    static int findNearestKeyOffset(const QString &dir, const QVector<int> &keyFrameOffsets,
+                                    int frameOffset, int totalFrames);
+    static int findFirstIdrOffset(const QString &dir, int totalFrames);
+    void scheduleFrameDecode(int itemIndex, int frameOffset);
+    bool tryGetFrameCache(int itemIndex, int frameOffset, QImage *out) const;
+    void putFrameCache(int itemIndex, int frameOffset, const QImage &img);
     void evictFrameCache();
     void syncColorToJpegEncoder();
 
@@ -344,6 +354,7 @@ private:
     struct ItemDecodeState {
         GstCaptureDecoder *decoder = nullptr;
         int lastOffset = -1;
+        QMutex mutex;
     };
     QHash<int, ItemDecodeState> m_itemDecoders;
     GpuPipeline *m_gpuPipeline = nullptr;  // GPU 管道（颜色调整）
@@ -397,10 +408,11 @@ private:
     };
     QHash<qint64, FrameCacheEntry> m_frameCache;
     qint64 m_frameCacheCounter = 0;
-    static constexpr int MAX_FRAME_CACHE = 50;
+    static constexpr int MAX_FRAME_CACHE = 300;
 
     QMutex m_mutex;
-    QMutex m_decodeMutex;  // 保护 m_itemDecoders, m_frameCache（ImageProvider 后台线程调用）
+    QMutex m_decodeMutex;
+    QSet<qint64> m_pendingDecodes;
 
     // 日志计数
     qint64 m_lastLogFrame = 0;
