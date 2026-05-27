@@ -4,6 +4,7 @@
 #include "imageprovider.h"
 #include "gstcapturedecoder.h"
 #include "naluframestore.h"
+#include "capturedebuglog.h"
 #include <QCoreApplication>
 #include <QFile>
 #include <QDebug>
@@ -391,12 +392,12 @@ void SlowMotionPlayer::togglePlay()
 
 void SlowMotionPlayer::nextFrame()
 {
-    // 用户手动操作：暂停播放，切换到手动模式
+    captureDebugLog("SLW", QString("nextFrame cur=%1 recorded=%2 followLive=%3")
+        .arg(m_currentFrame).arg(m_recordedFrames).arg(m_followLive));
+
     if (m_followLive) {
-        // 从跟随实时流切换到慢放，当前帧位置不变
         m_followLive = false;
     }
-    // 暂停定时器
     if (m_playbackTimer->isActive()) {
         m_playbackTimer->stop();
         m_isPlaying = false;
@@ -410,12 +411,12 @@ void SlowMotionPlayer::nextFrame()
 
 void SlowMotionPlayer::prevFrame()
 {
-    // 用户手动操作：暂停播放，切换到手动模式
+    captureDebugLog("SLW", QString("prevFrame cur=%1 recorded=%2 followLive=%3")
+        .arg(m_currentFrame).arg(m_recordedFrames).arg(m_followLive));
+
     if (m_followLive) {
-        // 从跟随实时流切换到慢放，当前帧位置不变
         m_followLive = false;
     }
-    // 暂停定时器
     if (m_playbackTimer->isActive()) {
         m_playbackTimer->stop();
         m_isPlaying = false;
@@ -442,13 +443,21 @@ void SlowMotionPlayer::jumpToFrame(int frame)
 
 QImage SlowMotionPlayer::getFrameImage(int frameOffset) const
 {
-    if (m_startIndex < 0) return QImage();
+    CaptureDebugScope scope("SLW", QString("getFrameImage local=%1 start=%2 end=%3 state=%4")
+        .arg(frameOffset).arg(m_startIndex).arg(m_endIndex).arg(static_cast<int>(m_state)), 80);
+
+    if (m_startIndex < 0) {
+        captureDebugLog("SLW", "getFrameImage no startIndex");
+        return QImage();
+    }
 
     qint64 globalIndex = m_startIndex + frameOffset;
 
     if (m_state == RECORDING && globalIndex > m_endIndex) {
         globalIndex = m_endIndex;
     } else if (globalIndex > m_endIndex) {
+        captureDebugLog("SLW", QString("getFrameImage out of range global=%1 end=%2")
+            .arg(globalIndex).arg(m_endIndex));
         return QImage();
     }
 
@@ -458,8 +467,19 @@ QImage SlowMotionPlayer::getFrameImage(int frameOffset) const
         NaluFrameStore *store = m_gstPlayer->naluFrameStore();
         if (store->hasFrame(globalIndex)) {
             QByteArray data = store->getFrame(globalIndex);
+            captureDebugLog("SLW", QString("decode single nalu global=%1 %2 key=%3")
+                .arg(globalIndex)
+                .arg(captureDebugNaluPreview(data))
+                .arg(store->isKeyFrame(globalIndex) ? "Y" : "N"));
             img = const_cast<GstCaptureDecoder*>(m_gstDecoder)->decodeNalu(data);
+            if (img.isNull()) {
+                captureDebugLog("SLW", "getFrameImage decodeNalu NULL (P-frame without seek?)");
+            }
+        } else {
+            captureDebugLog("SLW", QString("getFrameImage store missing global=%1").arg(globalIndex));
         }
+    } else {
+        captureDebugLog("SLW", "getFrameImage no decoder/store");
     }
 
     if (img.isNull()) return QImage();
@@ -470,6 +490,7 @@ QImage SlowMotionPlayer::getFrameImage(int frameOffset) const
         return img.scaled(newWidth, newHeight, Qt::KeepAspectRatio, Qt::FastTransformation);
     }
 
+    captureDebugLog("SLW", QString("getFrameImage OK %1x%2").arg(img.width()).arg(img.height()));
     return img;
 }
 
@@ -642,10 +663,22 @@ void SlowMotionDecodeThread::run()
         }
 
         if (request.globalIndex >= 0 && m_decoder && m_store) {
+            CaptureDebugScope scope("SLW", QString("decodeThread global=%1 local=%2")
+                .arg(request.globalIndex).arg(request.frameOffset), 80);
+
             QImage img;
             if (m_store->hasFrame(request.globalIndex)) {
                 QByteArray data = m_store->getFrame(request.globalIndex);
+                captureDebugLog("SLW", QString("decodeThread %1 key=%2")
+                    .arg(captureDebugNaluPreview(data))
+                    .arg(m_store->isKeyFrame(request.globalIndex) ? "Y" : "N"));
                 img = m_decoder->decodeNalu(data);
+            } else {
+                captureDebugLog("SLW", QString("decodeThread missing global=%1").arg(request.globalIndex));
+            }
+
+            if (img.isNull()) {
+                captureDebugLog("SLW", QString("decodeThread NULL global=%1").arg(request.globalIndex));
             }
 
             if (!img.isNull()) {

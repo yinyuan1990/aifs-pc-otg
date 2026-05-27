@@ -62,6 +62,8 @@ qt_add_executable(Phoenix
     naludecoder.h
     gstcapturedecoder.cpp  # H.264 NALU → QImage（GStreamer 管线，同直播 d3d11h264dec）
     gstcapturedecoder.h
+    capturedebuglog.cpp
+    capturedebuglog.h
     gstplayer.cpp        # GStreamer 实时流 + NALU 存储
     gstplayer.h
     httpclient.cpp

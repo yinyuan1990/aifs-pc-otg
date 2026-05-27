@@ -1,4 +1,5 @@
 #include "gstcapturedecoder.h"
+#include "capturedebuglog.h"
 #include <QDebug>
 #include <gst/gst.h>
 #include <gst/app/gstappsrc.h>
@@ -17,6 +18,8 @@ bool GstCaptureDecoder::ensurePipeline()
 {
     if (m_pipeline) return m_ready;
 
+    CaptureDebugScope scope("DEC", "ensurePipeline", 200);
+
     QString desc =
         "appsrc name=src "
         "! h264parse config-interval=-1 "
@@ -28,7 +31,7 @@ bool GstCaptureDecoder::ensurePipeline()
     GError *err = nullptr;
     m_pipeline = gst_parse_launch(desc.toUtf8().constData(), &err);
     if (err) {
-        qWarning() << "GstCaptureDecoder: pipeline failed:" << err->message;
+        captureDebugLog("DEC", QString("ensurePipeline FAIL: %1").arg(err->message));
         g_error_free(err);
         if (m_pipeline) { gst_object_unref(m_pipeline); m_pipeline = nullptr; }
         return false;
@@ -47,8 +50,6 @@ bool GstCaptureDecoder::ensurePipeline()
         nullptr);
     gst_caps_unref(caps);
 
-    // drop=TRUE + max-buffers=1：中间帧自动丢弃，只保留最新帧
-    // 避免 push 多帧时 appsink 背压导致管道死锁
     g_object_set(m_appsink,
         "sync", FALSE,
         "max-buffers", 1,
@@ -57,14 +58,14 @@ bool GstCaptureDecoder::ensurePipeline()
 
     GstStateChangeReturn ret = gst_element_set_state(m_pipeline, GST_STATE_PLAYING);
     if (ret == GST_STATE_CHANGE_FAILURE) {
-        qWarning() << "GstCaptureDecoder: avdec_h264 pipeline start failed";
+        captureDebugLog("DEC", "ensurePipeline FAIL: set_state PLAYING failed");
         cleanup();
         return false;
     }
 
     m_ready = true;
     m_pts = 0;
-    qDebug() << "GstCaptureDecoder: avdec_h264 pipeline ready";
+    captureDebugLog("DEC", "ensurePipeline OK");
     return true;
 }
 
@@ -81,10 +82,15 @@ void GstCaptureDecoder::cleanup()
 void GstCaptureDecoder::drainAppsink()
 {
     if (!m_appsink) return;
+    int drained = 0;
     while (true) {
         GstSample *s = gst_app_sink_try_pull_sample(GST_APP_SINK(m_appsink), 0);
         if (!s) break;
         gst_sample_unref(s);
+        drained++;
+    }
+    if (drained > 0) {
+        captureDebugLog("DEC", QString("drainAppsink dropped %1 samples").arg(drained));
     }
 }
 
@@ -104,19 +110,27 @@ bool GstCaptureDecoder::pushNalu(const QByteArray &naluData)
     m_pts += GST_SECOND / 30;
 
     GstFlowReturn flowRet = gst_app_src_push_buffer(GST_APP_SRC(m_appsrc), buffer);
+    if (flowRet != GST_FLOW_OK) {
+        captureDebugLog("DEC", QString("pushNalu FAIL flowRet=%1 %2")
+            .arg(flowRet).arg(captureDebugNaluPreview(naluData)));
+    }
     return (flowRet == GST_FLOW_OK);
 }
 
 QImage GstCaptureDecoder::pullLatest()
 {
     QMutexLocker lock(&m_mutex);
-
     if (!m_appsink) return QImage();
 
-    // 等最新帧（最多 500ms）
+    CaptureDebugScope scope("DEC", "pullLatest", 100);
+
     GstSample *sample = gst_app_sink_try_pull_sample(
         GST_APP_SINK(m_appsink), 500 * GST_MSECOND);
-    if (!sample) return QImage();
+
+    if (!sample) {
+        captureDebugLog("DEC", "pullLatest TIMEOUT 500ms");
+        return QImage();
+    }
 
     GstCaps *caps = gst_sample_get_caps(sample);
     GstStructure *s = gst_caps_get_structure(caps, 0);
@@ -126,6 +140,7 @@ QImage GstCaptureDecoder::pullLatest()
 
     if (w <= 0 || h <= 0) {
         gst_sample_unref(sample);
+        captureDebugLog("DEC", QString("pullLatest bad size %1x%2").arg(w).arg(h));
         return QImage();
     }
 
@@ -141,6 +156,8 @@ QImage GstCaptureDecoder::pullLatest()
 
     gst_buffer_unmap(buf, &map);
     gst_sample_unref(sample);
+
+    captureDebugLog("DEC", QString("pullLatest OK %1x%2").arg(w).arg(h));
     return result;
 }
 
@@ -151,6 +168,8 @@ QImage GstCaptureDecoder::decodeNalu(const QByteArray &naluData)
     if (naluData.isEmpty()) return QImage();
     if (!ensurePipeline()) return QImage();
 
+    CaptureDebugScope scope("DEC", "decodeNalu", 100);
+
     GstBuffer *buffer = gst_buffer_new_allocate(nullptr, naluData.size(), nullptr);
     gst_buffer_fill(buffer, 0, naluData.constData(), naluData.size());
 
@@ -160,12 +179,22 @@ QImage GstCaptureDecoder::decodeNalu(const QByteArray &naluData)
     m_pts += GST_SECOND / 30;
 
     GstFlowReturn flowRet = gst_app_src_push_buffer(GST_APP_SRC(m_appsrc), buffer);
-    if (flowRet != GST_FLOW_OK) return QImage();
+    if (flowRet != GST_FLOW_OK) {
+        captureDebugLog("DEC", QString("decodeNalu push FAIL flowRet=%1 %2")
+            .arg(flowRet).arg(captureDebugNaluPreview(naluData)));
+        return QImage();
+    }
 
-    // 等解码结果
+    scope.checkpoint("after push");
+
     GstSample *sample = gst_app_sink_try_pull_sample(
         GST_APP_SINK(m_appsink), 500 * GST_MSECOND);
-    if (!sample) return QImage();
+
+    if (!sample) {
+        captureDebugLog("DEC", QString("decodeNalu pull TIMEOUT %1")
+            .arg(captureDebugNaluPreview(naluData)));
+        return QImage();
+    }
 
     GstCaps *caps = gst_sample_get_caps(sample);
     GstStructure *s = gst_caps_get_structure(caps, 0);
@@ -175,6 +204,7 @@ QImage GstCaptureDecoder::decodeNalu(const QByteArray &naluData)
 
     if (w <= 0 || h <= 0) {
         gst_sample_unref(sample);
+        captureDebugLog("DEC", QString("decodeNalu bad size %1x%2").arg(w).arg(h));
         return QImage();
     }
 
@@ -182,6 +212,7 @@ QImage GstCaptureDecoder::decodeNalu(const QByteArray &naluData)
     GstMapInfo map;
     if (!gst_buffer_map(buf, &map, GST_MAP_READ)) {
         gst_sample_unref(sample);
+        captureDebugLog("DEC", "decodeNalu map buffer FAIL");
         return QImage();
     }
 
@@ -190,6 +221,9 @@ QImage GstCaptureDecoder::decodeNalu(const QByteArray &naluData)
 
     gst_buffer_unmap(buf, &map);
     gst_sample_unref(sample);
+
+    captureDebugLog("DEC", QString("decodeNalu OK %1x%2 %3")
+        .arg(w).arg(h).arg(captureDebugNaluPreview(naluData)));
     return result;
 }
 
@@ -199,10 +233,13 @@ void GstCaptureDecoder::flush()
 
     if (!m_pipeline || !m_ready) return;
 
+    CaptureDebugScope scope("DEC", "flush", 50);
+
     gst_element_send_event(m_pipeline,
         gst_event_new_flush_start());
     gst_element_send_event(m_pipeline,
         gst_event_new_flush_stop(TRUE));
 
+    drainAppsink();
     m_pts = 0;
 }

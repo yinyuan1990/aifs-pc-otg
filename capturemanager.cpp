@@ -2,8 +2,10 @@
 #include "gpupipeline.h"
 #include "imageprovider.h"
 #include "slowmotionplayer.h"
+#include "capturedebuglog.h"
 #include <QStandardPaths>
 #include <QCoreApplication>
+#include <QElapsedTimer>
 #include <QDir>
 #include <QFile>
 #include <QBuffer>
@@ -837,38 +839,50 @@ QByteArray CaptureManager::readNaluFile(const QString &dir, int frameOffset)
 
 QImage CaptureManager::decodeFromDisk(int itemIndex, int frameOffset)
 {
-    if (itemIndex < 0 || itemIndex >= m_items.size()) return QImage();
+    CaptureDebugScope scope("CAP", QString("decodeFromDisk item=%1 frame=%2").arg(itemIndex).arg(frameOffset), 80);
+
+    if (itemIndex < 0 || itemIndex >= m_items.size()) {
+        captureDebugLog("CAP", QString("decodeFromDisk invalid item=%1").arg(itemIndex));
+        return QImage();
+    }
 
     const CaptureItem &item = m_items[itemIndex];
-    if (frameOffset < 0 || frameOffset >= item.totalFrames()) return QImage();
+    if (frameOffset < 0 || frameOffset >= item.totalFrames()) {
+        captureDebugLog("CAP", QString("decodeFromDisk invalid frame=%1 total=%2")
+            .arg(frameOffset).arg(item.totalFrames()));
+        return QImage();
+    }
 
-    // 每个 item 独立 GStreamer 解码器（avdec_h264 软解，懒创建）
     ItemDecodeState &state = m_itemDecoders[itemIndex];
     if (!state.decoder) {
         state.decoder = new GstCaptureDecoder();
-        qDebug() << "decodeFromDisk: 创建 GStreamer 解码器 item=" << itemIndex;
+        captureDebugLog("CAP", QString("decodeFromDisk create decoder item=%1").arg(itemIndex));
     }
 
-    bool sequential = (frameOffset == state.lastOffset + 1);
+    const bool sequential = (frameOffset == state.lastOffset + 1);
+    captureDebugLog("CAP", QString("decodeFromDisk lastOffset=%1 sequential=%2 keyframes=%3 dir=%4")
+        .arg(state.lastOffset)
+        .arg(sequential ? "Y" : "N")
+        .arg(item.keyFrameOffsets.size())
+        .arg(item.naluDir));
+
     QImage result;
 
-    // 顺序解码（同 item 下一帧）
     if (sequential) {
+        scope.checkpoint("sequential path");
         QByteArray data = readNaluFile(item.naluDir, frameOffset);
         if (!data.isEmpty()) {
             result = state.decoder->decodeNalu(data);
             if (result.isNull()) {
-                qDebug() << "decodeFromDisk: 顺序解码失败 item=" << itemIndex
-                         << "offset=" << frameOffset << "dataSize=" << data.size();
+                captureDebugLog("CAP", QString("sequential decode FAIL offset=%1 %2")
+                    .arg(frameOffset).arg(captureDebugNaluPreview(data)));
             }
         } else {
-            qDebug() << "decodeFromDisk: 文件不存在 item=" << itemIndex << "offset=" << frameOffset;
+            captureDebugLog("CAP", QString("sequential missing file offset=%1").arg(frameOffset));
         }
     }
 
-    // 顺序失败 → 从最近 keyframe 开始
     if (result.isNull()) {
-        // 如果 keyFrameOffsets 为空，扫描 .nalu 文件找关键帧（SPS start code）
         int keyOffset = 0;
         if (!item.keyFrameOffsets.isEmpty()) {
             for (int i = item.keyFrameOffsets.size() - 1; i >= 0; --i) {
@@ -877,57 +891,68 @@ QImage CaptureManager::decodeFromDisk(int itemIndex, int frameOffset)
                     break;
                 }
             }
+            captureDebugLog("CAP", QString("keyframe from list keyOffset=%1").arg(keyOffset));
         } else {
-            // keyFrameOffsets 为空 → 从目标帧向前扫描，找含 SPS(0x67) 的 NALU 文件
+            bool found = false;
             for (int off = frameOffset; off >= 0; --off) {
                 QByteArray data = readNaluFile(item.naluDir, off);
                 if (data.size() >= 5) {
                     const quint8 *p = reinterpret_cast<const quint8*>(data.constData());
-                    // Annex-B: 00 00 00 01 [NAL header]，NAL type = header & 0x1F
                     for (int i = 0; i + 4 < data.size(); i++) {
                         if (p[i] == 0 && p[i+1] == 0 && p[i+2] == 0 && p[i+3] == 1) {
                             quint8 nalType = p[i+4] & 0x1F;
-                            if (nalType == 7) { // SPS
+                            if (nalType == 7) {
                                 keyOffset = off;
-                                qDebug() << "decodeFromDisk: 扫描找到 SPS keyframe at offset=" << off;
+                                found = true;
+                                captureDebugLog("CAP", QString("SPS scan found keyOffset=%1 at off=%2 %3")
+                                    .arg(keyOffset).arg(off).arg(captureDebugNaluPreview(data)));
                                 goto found_keyframe;
                             }
                         }
                     }
                 }
             }
-            found_keyframe:;
+            found_keyframe:
+            if (!found) {
+                captureDebugLog("CAP", "SPS scan found NO keyframe, using offset=0");
+            }
         }
 
-        qDebug() << "decodeFromDisk: keyframe seek item=" << itemIndex
-                 << "from=" << keyOffset << "to=" << frameOffset
-                 << "dir=" << item.naluDir;
-
+        scope.checkpoint(QString("flush+seek from key=%1").arg(keyOffset));
         state.decoder->flush();
 
-        // 中间帧用 pushNalu（只推不拉，不阻塞），目标帧用 decodeNalu（推+拉）
         int pushed = 0;
+        int pushFail = 0;
         for (int off = keyOffset; off < frameOffset; off++) {
             QByteArray data = readNaluFile(item.naluDir, off);
             if (!data.isEmpty()) {
-                state.decoder->pushNalu(data);
+                if (!state.decoder->pushNalu(data)) {
+                    pushFail++;
+                }
                 pushed++;
             }
         }
 
-        // 目标帧：推送并等待解码结果
         QByteArray targetData = readNaluFile(item.naluDir, frameOffset);
-        if (!targetData.isEmpty()) {
+        if (targetData.isEmpty()) {
+            captureDebugLog("CAP", QString("target file MISSING offset=%1").arg(frameOffset));
+        } else {
+            scope.checkpoint(QString("decode target pushed=%1 pushFail=%2").arg(pushed).arg(pushFail));
             result = state.decoder->decodeNalu(targetData);
+            if (result.isNull()) {
+                captureDebugLog("CAP", QString("target decode FAIL %1")
+                    .arg(captureDebugNaluPreview(targetData)));
+            }
         }
 
-        qDebug() << "decodeFromDisk: keyframe seek pushed=" << pushed
-                 << "result=" << (result.isNull() ? "NULL" : "OK");
+        captureDebugLog("CAP", QString("keyframe-seek key=%1->%2 pushed=%3 fail=%4 result=%5")
+            .arg(keyOffset).arg(frameOffset).arg(pushed).arg(pushFail)
+            .arg(result.isNull() ? "NULL" : "OK"));
     }
 
     if (result.isNull()) {
-        qWarning() << "decodeFromDisk: ❌ 解码失败 item=" << itemIndex
-                   << "offset=" << frameOffset << "返回兜底图";
+        captureDebugLog("CAP", QString("decodeFromDisk FAIL item=%1 frame=%2 -> will fallback liveSnapshot=%3")
+            .arg(itemIndex).arg(frameOffset).arg(item.liveSnapshot.isNull() ? "null" : "ok"));
         return QImage();
     }
 
@@ -939,6 +964,8 @@ QImage CaptureManager::decodeFromDisk(int itemIndex, int frameOffset)
         result = result.transformed(t, Qt::FastTransformation);
     }
 
+    captureDebugLog("CAP", QString("decodeFromDisk OK item=%1 frame=%2 size=%3x%4")
+        .arg(itemIndex).arg(frameOffset).arg(result.width()).arg(result.height()));
     return result;
 }
 
@@ -1069,24 +1096,21 @@ bool CaptureManager::isItemReady(int itemIndex) const
 void CaptureManager::gotoFrame(int itemIndex, int frameOffset)
 {
     if (itemIndex < 0 || itemIndex >= m_items.size()) {
-        qDebug() << "⚠️ gotoFrame: invalid itemIndex" << itemIndex << "size:" << m_items.size();
+        captureDebugLog("CAP", QString("gotoFrame invalid item=%1 count=%2").arg(itemIndex).arg(m_items.size()));
         return;
     }
-    
+
     CaptureItem &item = m_items[itemIndex];
     int oldOffset = item.currentOffset;
     int totalFrames = item.totalFrames();
     frameOffset = qBound(0, frameOffset, totalFrames - 1);
-    
-    qDebug() << "🎞️ gotoFrame: item=" << itemIndex << "old=" << oldOffset 
-             << "new=" << frameOffset << "total=" << totalFrames;
-    
+
+    captureDebugLog("CAP", QString("gotoFrame item=%1 old=%2 new=%3 total=%4")
+        .arg(itemIndex).arg(oldOffset).arg(frameOffset).arg(totalFrames));
+
     if (item.currentOffset != frameOffset) {
         item.currentOffset = frameOffset;
         emit frameChanged(itemIndex, frameOffset);
-        qDebug() << "✅ frameChanged emitted: item=" << itemIndex << "frame=" << frameOffset;
-    } else {
-        qDebug() << "⏭️ gotoFrame: no change, skip emit";
     }
 }
 
@@ -1110,22 +1134,31 @@ void CaptureManager::gotoEventFrame(int itemIndex)
 
 QImage CaptureManager::getFrameImage(int itemIndex, int frameOffset)
 {
+    CaptureDebugScope scope("CAP", QString("getFrameImage item=%1 frame=%2").arg(itemIndex).arg(frameOffset), 80);
+
     if (itemIndex < 0 || itemIndex >= m_items.size()) {
+        captureDebugLog("CAP", QString("getFrameImage invalid item=%1").arg(itemIndex));
         return QImage();
     }
 
+    QElapsedTimer lockWait;
+    lockWait.start();
     QMutexLocker decodeLock(&m_decodeMutex);
+    const qint64 lockWaitMs = lockWait.elapsed();
+    if (lockWaitMs > 5) {
+        captureDebugLog("CAP", QString("getFrameImage decodeMutex waited %1ms item=%2 frame=%3")
+            .arg(lockWaitMs).arg(itemIndex).arg(frameOffset));
+    }
 
     CaptureItem &item = m_items[itemIndex];
 
-    // 1. 单帧快速缓存
     if (m_cachedItemIndex == itemIndex && m_cachedFrameOffset == frameOffset
         && m_cachedRotation == m_videoRotation
         && !m_cachedImage.isNull()) {
+        captureDebugLog("CAP", "getFrameImage HIT single-cache");
         return m_cachedImage;
     }
 
-    // 2. LRU 缓存
     qint64 key = qint64(itemIndex) * 100000 + frameOffset;
     auto cacheIt = m_frameCache.find(key);
     if (cacheIt != m_frameCache.end()) {
@@ -1134,17 +1167,19 @@ QImage CaptureManager::getFrameImage(int itemIndex, int frameOffset)
         m_cachedFrameOffset = frameOffset;
         m_cachedRotation = m_videoRotation;
         m_cachedImage = cacheIt.value().image;
+        captureDebugLog("CAP", "getFrameImage HIT lru-cache");
         return m_cachedImage;
     }
 
-    // 3. 同步解码（per-item 解码器，含中间帧缓存）
+    scope.checkpoint("cache miss, decodeFromDisk");
     QImage img = decodeFromDisk(itemIndex, frameOffset);
 
     if (img.isNull()) {
+        captureDebugLog("CAP", QString("getFrameImage FALLBACK liveSnapshot item=%1 frame=%2 hasSnapshot=%3")
+            .arg(itemIndex).arg(frameOffset).arg(item.liveSnapshot.isNull() ? "N" : "Y"));
         return item.liveSnapshot;
     }
 
-    // 4. 存入缓存
     evictFrameCache();
     m_frameCache[key] = {img, ++m_frameCacheCounter};
     m_cachedItemIndex = itemIndex;
@@ -1152,6 +1187,7 @@ QImage CaptureManager::getFrameImage(int itemIndex, int frameOffset)
     m_cachedRotation = m_videoRotation;
     m_cachedImage = img;
 
+    captureDebugLog("CAP", QString("getFrameImage OK %1x%2").arg(img.width()).arg(img.height()));
     return img;
 }
 
