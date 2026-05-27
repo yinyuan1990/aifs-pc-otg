@@ -17,7 +17,7 @@
 class GpuPipeline;
 class GstPlayer;
 class NaluFrameStore;
-class NaluDecoder;
+class GstCaptureDecoder;
 
 class SlowMotionDecodeThread : public QThread
 {
@@ -37,7 +37,7 @@ protected:
 
 private:
     NaluFrameStore *m_store;
-    NaluDecoder *m_decoder = nullptr;
+    GstCaptureDecoder *m_decoder = nullptr;
     std::atomic<bool> m_running{true};
     QMutex m_queueMutex;
     QWaitCondition m_queueCondition;
@@ -195,7 +195,7 @@ private:
     qint64 m_startIndex = -1;
     qint64 m_endIndex = -1;
     int m_validRangeId = -1;
-    NaluDecoder *m_naluDecoder = nullptr;
+    GstCaptureDecoder *m_gstDecoder = nullptr;
     
     // 当前播放位置（相对于startIndex的偏移，0 ~ recordedFrames-1）
     int m_currentFrame = 0;

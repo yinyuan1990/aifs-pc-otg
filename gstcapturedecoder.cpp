@@ -4,13 +4,6 @@
 #include <gst/app/gstappsrc.h>
 #include <gst/app/gstappsink.h>
 
-static bool hasElement(const char *name)
-{
-    GstElementFactory *f = gst_element_factory_find(name);
-    if (f) { gst_object_unref(f); return true; }
-    return false;
-}
-
 GstCaptureDecoder::GstCaptureDecoder()
 {
 }
@@ -24,37 +17,20 @@ bool GstCaptureDecoder::ensurePipeline()
 {
     if (m_pipeline) return m_ready;
 
-    // 只用硬件解码器，软解性能不达标
-    const char *decoder = nullptr;
-    const char *extra = "";
-
-    if (hasElement("d3d11h264dec")) {
-        decoder = "d3d11h264dec";
-        extra = " ! d3d11download";
-    } else if (hasElement("nvh264dec")) {
-        decoder = "nvh264dec";
-    }
-
-    if (!decoder) {
-        qWarning() << "GstCaptureDecoder: ❌ 无硬件 H.264 解码器（需要 d3d11h264dec 或 nvh264dec）";
-        return false;
-    }
-
-    qDebug() << "GstCaptureDecoder: 尝试硬件解码器:" << decoder;
-
-    QString desc = QString(
+    // avdec_h264 软解：不占 GPU，不与实时流 d3d11h264dec 竞争
+    // h264parse config-interval=-1：自动在每个 IDR 前插入 SPS/PPS
+    QString desc =
         "appsrc name=src "
-        "! h264parse "
-        "! %1%2 "
+        "! h264parse config-interval=-1 "
+        "! avdec_h264 "
         "! videoconvert "
         "! video/x-raw,format=BGRA "
-        "! appsink name=sink"
-    ).arg(decoder, extra);
+        "! appsink name=sink";
 
     GError *err = nullptr;
     m_pipeline = gst_parse_launch(desc.toUtf8().constData(), &err);
     if (err) {
-        qWarning() << "GstCaptureDecoder: ❌ 管线创建失败:" << err->message;
+        qWarning() << "GstCaptureDecoder: pipeline failed:" << err->message;
         g_error_free(err);
         if (m_pipeline) { gst_object_unref(m_pipeline); m_pipeline = nullptr; }
         return false;
@@ -64,11 +40,11 @@ bool GstCaptureDecoder::ensurePipeline()
     m_appsink = gst_bin_get_by_name(GST_BIN(m_pipeline), "sink");
 
     GstCaps *caps = gst_caps_from_string(
-        "video/x-h264, stream-format=byte-stream, alignment=au");
+        "video/x-h264, stream-format=byte-stream, alignment=nal");
     g_object_set(m_appsrc,
         "caps", caps,
         "format", GST_FORMAT_TIME,
-        "is-live", TRUE,
+        "is-live", FALSE,
         "stream-type", 0,
         nullptr);
     gst_caps_unref(caps);
@@ -81,14 +57,14 @@ bool GstCaptureDecoder::ensurePipeline()
 
     GstStateChangeReturn ret = gst_element_set_state(m_pipeline, GST_STATE_PLAYING);
     if (ret == GST_STATE_CHANGE_FAILURE) {
-        qWarning() << "GstCaptureDecoder: ❌ 硬件解码管线启动失败:" << decoder;
+        qWarning() << "GstCaptureDecoder: avdec_h264 pipeline start failed";
         cleanup();
         return false;
     }
 
     m_ready = true;
     m_pts = 0;
-    qDebug() << "GstCaptureDecoder: ✅ 硬件解码就绪:" << decoder;
+    qDebug() << "GstCaptureDecoder: avdec_h264 pipeline ready";
     return true;
 }
 
@@ -105,7 +81,7 @@ void GstCaptureDecoder::cleanup()
 QImage GstCaptureDecoder::pullFrame()
 {
     GstSample *sample = gst_app_sink_try_pull_sample(
-        GST_APP_SINK(m_appsink), 100 * GST_MSECOND);
+        GST_APP_SINK(m_appsink), 200 * GST_MSECOND);
     if (!sample) return QImage();
 
     GstCaps *caps = gst_sample_get_caps(sample);
@@ -136,6 +112,8 @@ QImage GstCaptureDecoder::pullFrame()
 
 QImage GstCaptureDecoder::decodeNalu(const QByteArray &naluData)
 {
+    QMutexLocker lock(&m_mutex);
+
     if (naluData.isEmpty()) return QImage();
     if (!ensurePipeline()) return QImage();
 
@@ -144,8 +122,8 @@ QImage GstCaptureDecoder::decodeNalu(const QByteArray &naluData)
 
     GST_BUFFER_PTS(buffer) = m_pts;
     GST_BUFFER_DTS(buffer) = m_pts;
-    GST_BUFFER_DURATION(buffer) = GST_SECOND / 60;
-    m_pts += GST_SECOND / 60;
+    GST_BUFFER_DURATION(buffer) = GST_SECOND / 30;
+    m_pts += GST_SECOND / 30;
 
     GstFlowReturn flowRet = gst_app_src_push_buffer(GST_APP_SRC(m_appsrc), buffer);
     if (flowRet != GST_FLOW_OK) {
@@ -158,8 +136,15 @@ QImage GstCaptureDecoder::decodeNalu(const QByteArray &naluData)
 
 void GstCaptureDecoder::flush()
 {
+    QMutexLocker lock(&m_mutex);
+
     if (!m_pipeline || !m_ready) return;
-    gst_element_set_state(m_pipeline, GST_STATE_READY);
-    gst_element_set_state(m_pipeline, GST_STATE_PLAYING);
+
+    // flush 解码器状态，重新开始解码序列
+    gst_element_send_event(m_pipeline,
+        gst_event_new_flush_start());
+    gst_element_send_event(m_pipeline,
+        gst_event_new_flush_stop(TRUE));
+
     m_pts = 0;
 }

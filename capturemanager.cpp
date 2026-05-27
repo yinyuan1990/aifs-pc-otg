@@ -842,11 +842,11 @@ QImage CaptureManager::decodeFromDisk(int itemIndex, int frameOffset)
     const CaptureItem &item = m_items[itemIndex];
     if (frameOffset < 0 || frameOffset >= item.totalFrames()) return QImage();
 
-    // 每个 item 独立 FFmpeg 解码器（懒创建）
+    // 每个 item 独立 GStreamer 解码器（avdec_h264 软解，懒创建）
     ItemDecodeState &state = m_itemDecoders[itemIndex];
     if (!state.decoder) {
-        state.decoder = new NaluDecoder(nullptr);
-        qDebug() << "decodeFromDisk: 创建解码器 item=" << itemIndex;
+        state.decoder = new GstCaptureDecoder();
+        qDebug() << "decodeFromDisk: 创建 GStreamer 解码器 item=" << itemIndex;
     }
 
     bool sequential = (frameOffset == state.lastOffset + 1);
@@ -856,7 +856,7 @@ QImage CaptureManager::decodeFromDisk(int itemIndex, int frameOffset)
     if (sequential) {
         QByteArray data = readNaluFile(item.naluDir, frameOffset);
         if (!data.isEmpty()) {
-            result = state.decoder->decodeSingleNalu(data);
+            result = state.decoder->decodeNalu(data);
             if (result.isNull()) {
                 qDebug() << "decodeFromDisk: 顺序解码失败 item=" << itemIndex
                          << "offset=" << frameOffset << "dataSize=" << data.size();
@@ -888,7 +888,7 @@ QImage CaptureManager::decodeFromDisk(int itemIndex, int frameOffset)
             QByteArray data = readNaluFile(item.naluDir, off);
             if (data.isEmpty()) { failed++; continue; }
 
-            QImage img = state.decoder->decodeSingleNalu(data);
+            QImage img = state.decoder->decodeNalu(data);
             if (img.isNull()) { failed++; continue; }
             decoded++;
 

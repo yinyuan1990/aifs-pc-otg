@@ -14,7 +14,7 @@
 #include <atomic>
 #include "gpupipeline.h"
 #include "gstplayer.h"
-#include "naludecoder.h"
+#include "gstcapturedecoder.h"
 #include "naluframestore.h"
 
 // 前向声明
@@ -340,9 +340,9 @@ private:
     void syncColorToJpegEncoder();
 
 private:
-    // 每个 item 独立解码器
+    // 每个 item 独立 GStreamer 解码器（avdec_h264，不与实时流 GPU 竞争）
     struct ItemDecodeState {
-        NaluDecoder *decoder = nullptr;
+        GstCaptureDecoder *decoder = nullptr;
         int lastOffset = -1;
     };
     QHash<int, ItemDecodeState> m_itemDecoders;

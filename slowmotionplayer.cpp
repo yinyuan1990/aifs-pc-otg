@@ -2,7 +2,7 @@
 #include "gpupipeline.h"
 #include "gstplayer.h"
 #include "imageprovider.h"
-#include "naludecoder.h"
+#include "gstcapturedecoder.h"
 #include "naluframestore.h"
 #include <QCoreApplication>
 #include <QFile>
@@ -43,7 +43,7 @@ SlowMotionPlayer::~SlowMotionPlayer()
         m_decodeThread = nullptr;
     }
 
-    delete m_naluDecoder;
+    delete m_gstDecoder;
     saveSettings();
 }
 
@@ -101,16 +101,16 @@ void SlowMotionPlayer::setGstPlayer(GstPlayer* player)
             connect(m_gstPlayer->naluFrameStore(), &NaluFrameStore::frameStored,
                     this, &SlowMotionPlayer::onFrameEncoded, Qt::QueuedConnection);
 
-            // 创建 NaluDecoder
-            delete m_naluDecoder;
-            m_naluDecoder = new NaluDecoder(m_gstPlayer->naluFrameStore(), this);
+            // 创建 GStreamer 解码器（avdec_h264 软解）
+            delete m_gstDecoder;
+            m_gstDecoder = new GstCaptureDecoder();
 
             // 创建解码线程
             m_decodeThread = new SlowMotionDecodeThread(m_gstPlayer->naluFrameStore(), this);
             connect(m_decodeThread, &SlowMotionDecodeThread::frameDecoded,
                     this, &SlowMotionPlayer::onFrameDecoded, Qt::QueuedConnection);
             m_decodeThread->start();
-            qDebug() << "SlowMotionPlayer: NaluDecoder + decode thread created";
+            qDebug() << "SlowMotionPlayer: GstCaptureDecoder + decode thread created";
         }
 
         emit gstPlayerChanged();
@@ -310,7 +310,7 @@ void SlowMotionPlayer::clear()
         QMutexLocker locker(&m_cacheMutex);
         m_frameCache.clear();
     }
-    if (m_naluDecoder) m_naluDecoder->clearCache();
+    if (m_gstDecoder) m_gstDecoder->flush();
 
     m_startIndex = -1;
     m_endIndex = -1;
@@ -454,8 +454,12 @@ QImage SlowMotionPlayer::getFrameImage(int frameOffset) const
 
     QImage img;
 
-    if (m_naluDecoder) {
-        img = const_cast<NaluDecoder*>(m_naluDecoder)->decodeFrame(globalIndex);
+    if (m_gstDecoder && m_gstPlayer && m_gstPlayer->naluFrameStore()) {
+        NaluFrameStore *store = m_gstPlayer->naluFrameStore();
+        if (store->hasFrame(globalIndex)) {
+            QByteArray data = store->getFrame(globalIndex);
+            img = const_cast<GstCaptureDecoder*>(m_gstDecoder)->decodeNalu(data);
+        }
     }
 
     if (img.isNull()) return QImage();
@@ -597,7 +601,7 @@ SlowMotionDecodeThread::SlowMotionDecodeThread(NaluFrameStore *store, QObject *p
     : QThread(parent)
     , m_store(store)
 {
-    m_decoder = new NaluDecoder(store);
+    m_decoder = new GstCaptureDecoder();
 }
 
 SlowMotionDecodeThread::~SlowMotionDecodeThread()
@@ -637,8 +641,12 @@ void SlowMotionDecodeThread::run()
             request = m_decodeQueue.dequeue();
         }
 
-        if (request.globalIndex >= 0 && m_decoder) {
-            QImage img = m_decoder->decodeFrame(request.globalIndex);
+        if (request.globalIndex >= 0 && m_decoder && m_store) {
+            QImage img;
+            if (m_store->hasFrame(request.globalIndex)) {
+                QByteArray data = m_store->getFrame(request.globalIndex);
+                img = m_decoder->decodeNalu(data);
+            }
 
             if (!img.isNull()) {
                 if (request.scale && (img.width() > 640 || img.height() > 480)) {

@@ -3,6 +3,7 @@
 
 #include <QByteArray>
 #include <QImage>
+#include <QMutex>
 
 typedef struct _GstElement GstElement;
 
@@ -25,6 +26,7 @@ private:
     GstElement *m_appsink = nullptr;
     bool m_ready = false;
     quint64 m_pts = 0;
+    QMutex m_mutex;
 };
 
 #endif // GSTCAPTUREDECODER_H
