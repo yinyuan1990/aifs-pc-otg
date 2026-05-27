@@ -1847,8 +1847,9 @@ GstBusSyncReply GstPlayer::onBusSyncMessage(GstBus *bus, GstMessage *message, gp
             return GST_BUS_DROP;
         }
 
-        diagLog(QString("❌ ERROR: %1 | debug: %2").arg(err->message).arg(debug));
-        qCritical() << "❌ GStreamer 错误:" << err->message;
+        captureDebugLog("GST", QString("ERROR src=%1 msg=%2 debug=%3").arg(srcName).arg(err->message).arg(debug));
+        diagLog(QString("❌ ERROR src=%1: %2 | debug: %3").arg(srcName).arg(err->message).arg(debug));
+        qCritical() << "❌ GStreamer 错误:" << err->message << "src=" << srcName;
         g_error_free(err);
         g_free(debug);
         break;
