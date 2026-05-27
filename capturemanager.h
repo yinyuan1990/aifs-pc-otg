@@ -126,8 +126,9 @@ struct CaptureItem {
     QString dirPath;            // 保存目录
     bool saved = false;         // 是否已保存到磁盘
     int validRangeId = -1;      // 在 GpuJpegEncoder 中注册的有效范围 ID
-    QString sessionPrefix;      // ⭐ 会话前缀（抓拍时保存，用于定位 JPEG 文件）
-    QImage liveSnapshot;        // 抓拍瞬间的直播画面（NALU 解码前的占位图）
+    QString sessionPrefix;
+    QImage liveSnapshot;        // 抓拍瞬间的直播画面（永久兜底）
+    QVector<QByteArray> jpegCache; // 预解码帧的 JPEG 压缩缓存（~150KB/帧）
 
     int totalFrames() const { return static_cast<int>(endIndex - startIndex + 1); }
     int eventOffset() const { return static_cast<int>(eventIndex - startIndex); }

@@ -779,6 +779,8 @@ void CaptureManager::capture()
         item.liveSnapshot = item.liveSnapshot.transformed(transform, Qt::FastTransformation);
     }
 
+    item.jpegCache.resize(item.totalFrames());
+
     m_items.append(item);
     int newIndex = m_items.size() - 1;
 
@@ -793,12 +795,40 @@ void CaptureManager::capture()
     emit itemAdded(newIndex);
     emit captureComplete(newIndex);
 
-    // 后台预解码 NALU（用于前后帧滚动浏览）
-    qint64 preDecodeIdx = eventIndex;
-    int preDecodeItem = newIndex;
-    QtConcurrent::run([this, preDecodeIdx, preDecodeItem]() {
-        if (m_naluDecoder) {
-            m_naluDecoder->decodeFrame(preDecodeIdx);
+    // 后台预解码全部帧 → JPEG 压缩缓存（借鉴 JPEG 思路：每帧独立可读）
+    int totalFrames = item.totalFrames();
+    int rotation = m_videoRotation;
+    QtConcurrent::run([this, newIndex, startIndex, totalFrames, rotation]() {
+        if (!m_naluDecoder) return;
+
+        for (int i = 0; i < totalFrames; i++) {
+            qint64 globalIdx = startIndex + i;
+            QImage img = m_naluDecoder->decodeFrame(globalIdx);
+            if (img.isNull()) continue;
+
+            if (rotation != 0) {
+                QTransform t;
+                t.rotate(rotation);
+                img = img.transformed(t, Qt::FastTransformation);
+            }
+
+            QByteArray jpegData;
+            QBuffer buf(&jpegData);
+            buf.open(QIODevice::WriteOnly);
+            img.save(&buf, "JPEG", 92);
+
+            int itemIdx = newIndex;
+            int frameIdx = i;
+            QMetaObject::invokeMethod(this, [this, itemIdx, frameIdx, jpegData]() {
+                if (itemIdx < m_items.size()) {
+                    auto &cache = m_items[itemIdx].jpegCache;
+                    if (frameIdx < cache.size()) {
+                        cache[frameIdx] = jpegData;
+                    }
+                    m_cachedImage = QImage();
+                    emit frameChanged(itemIdx, frameIdx);
+                }
+            }, Qt::QueuedConnection);
         }
     });
 }
@@ -953,61 +983,41 @@ QImage CaptureManager::getFrameImage(int itemIndex, int frameOffset)
     
     CaptureItem &item = m_items[itemIndex];
 
-    // 检查缓存
+    // 1. 检查 QImage 缓存（最近一帧）
     if (m_cachedItemIndex == itemIndex && m_cachedFrameOffset == frameOffset
         && m_cachedRotation == m_videoRotation
         && !m_cachedImage.isNull()) {
         return m_cachedImage;
     }
 
-    qint64 globalIndex = item.startIndex + frameOffset;
     QImage img;
 
-    if (m_naluDecoder) {
+    // 2. 检查 JPEG 预解码缓存（借鉴 JPEG 思路：每帧独立可读，~1ms 解压）
+    if (frameOffset >= 0 && frameOffset < item.jpegCache.size()
+        && !item.jpegCache[frameOffset].isEmpty()) {
+        img.loadFromData(item.jpegCache[frameOffset], "JPEG");
+    }
+
+    // 3. NALU 实时解码（预解码还没完成时的 fallback）
+    if (img.isNull() && m_naluDecoder) {
+        qint64 globalIndex = item.startIndex + frameOffset;
         img = m_naluDecoder->tryCachedFrame(globalIndex);
         if (img.isNull()) {
-            if (m_naluDecoder->canDecodeQuickly(globalIndex)) {
-                img = m_naluDecoder->decodeFrame(globalIndex);
-            } else {
-                int idx = itemIndex;
-                int off = frameOffset;
-                QtConcurrent::run([this, globalIndex, idx, off]() {
-                    if (m_naluDecoder) {
-                        m_naluDecoder->decodeFrame(globalIndex);
-                    }
-                    QMetaObject::invokeMethod(this, [this, idx, off]() {
-                        m_cachedImage = QImage();
-                        if (idx < m_items.size()) {
-                            emit frameChanged(idx, off);
-                        }
-                    }, Qt::QueuedConnection);
-                });
-                // 返回上一帧缓存或直播快照，不返回空图
-                if (!m_cachedImage.isNull()) return m_cachedImage;
-                return item.liveSnapshot;
-            }
+            // 返回上一帧缓存或直播快照，不返回空图
+            if (!m_cachedImage.isNull()) return m_cachedImage;
+            return item.liveSnapshot;
+        }
+        // NALU 解码出的帧需要旋转
+        if (!img.isNull() && m_videoRotation != 0) {
+            QTransform t;
+            t.rotate(m_videoRotation);
+            img = img.transformed(t, Qt::FastTransformation);
         }
     }
 
-    if (img.isNull()) {
-        img = loadFrameFromDisk(globalIndex, item.sessionPrefix);
-    }
-
-    // 最终兜底：用直播快照
+    // 4. 最终兜底
     if (img.isNull()) {
         return item.liveSnapshot;
-    }
-
-    // 应用旋转
-    if (m_videoRotation != 0) {
-        QTransform transform;
-        transform.rotate(m_videoRotation);
-        img = img.transformed(transform, Qt::SmoothTransformation);
-    }
-
-    // NALU 解码成功后清除快照（释放内存）
-    if (!item.liveSnapshot.isNull()) {
-        item.liveSnapshot = QImage();
     }
 
     m_cachedItemIndex = itemIndex;
