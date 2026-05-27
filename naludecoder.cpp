@@ -48,12 +48,8 @@ bool NaluDecoder::ensureDecoder()
     m_hwPixFmt = -1;
 
     AVHWDeviceType hwTypes[] = {
-#ifdef _WIN32
         AV_HWDEVICE_TYPE_D3D11VA,
         AV_HWDEVICE_TYPE_DXVA2,
-#elif defined(__APPLE__)
-        AV_HWDEVICE_TYPE_VIDEOTOOLBOX,
-#endif
         AV_HWDEVICE_TYPE_NONE
     };
 
