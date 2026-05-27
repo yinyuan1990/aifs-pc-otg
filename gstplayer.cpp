@@ -929,7 +929,6 @@ bool GstPlayer::createPipeline()
 
 QImage GstPlayer::grabCurrentFrame()
 {
-    QMutexLocker lock(&m_mutex);
     if (!m_lastValidSample) return QImage();
 
     GstBuffer *buffer = gst_sample_get_buffer(m_lastValidSample);

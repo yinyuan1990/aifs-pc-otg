@@ -183,21 +183,23 @@ QImage NaluDecoder::decodeOneNalu(const QByteArray &naluData)
 
 QImage NaluDecoder::tryCachedFrame(qint64 frameIndex)
 {
-    QMutexLocker lock(&m_mutex);
+    if (!m_mutex.tryLock()) return QImage();
     auto it = m_cache.find(frameIndex);
+    QImage result;
     if (it != m_cache.end()) {
         it.value().accessOrder = ++m_accessCounter;
-        return it.value().image;
+        result = it.value().image;
     }
-    return QImage();
+    m_mutex.unlock();
+    return result;
 }
 
 bool NaluDecoder::canDecodeQuickly(qint64 frameIndex)
 {
-    QMutexLocker lock(&m_mutex);
-    if (m_cache.contains(frameIndex)) return true;
-    if (frameIndex == m_lastDecodedIndex + 1) return true;
-    return false;
+    if (!m_mutex.tryLock()) return false;
+    bool quick = m_cache.contains(frameIndex) || (frameIndex == m_lastDecodedIndex + 1);
+    m_mutex.unlock();
+    return quick;
 }
 
 QImage NaluDecoder::decodeFrame(qint64 frameIndex)

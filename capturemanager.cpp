@@ -776,7 +776,7 @@ void CaptureManager::capture()
     if (!item.liveSnapshot.isNull() && m_videoRotation != 0) {
         QTransform transform;
         transform.rotate(m_videoRotation);
-        item.liveSnapshot = item.liveSnapshot.transformed(transform, Qt::SmoothTransformation);
+        item.liveSnapshot = item.liveSnapshot.transformed(transform, Qt::FastTransformation);
     }
 
     m_items.append(item);
