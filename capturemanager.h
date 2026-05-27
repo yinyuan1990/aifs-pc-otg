@@ -335,11 +335,8 @@ private:
     void removeOldest();
     void ensureCapturesDir();
     void checkPendingCaptures(qint64 frameIndex);
-    void saveNaluFile(const QString &dir, int frameOffset, const QByteArray &data,
-                      const QByteArray &spsPps = QByteArray());
     QImage decodeFromDisk(int itemIndex, int frameOffset);
     static QByteArray readNaluFile(const QString &dir, int frameOffset);
-    void buildKeyFrameOffsets(CaptureItem &item);
     void scheduleFrameDecode(int itemIndex, int frameOffset);
     bool tryGetFrameCache(int itemIndex, int frameOffset, QImage *out) const;
     void putFrameCache(int itemIndex, int frameOffset, const QImage &img);

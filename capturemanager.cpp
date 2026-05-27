@@ -664,15 +664,10 @@ void CaptureManager::checkPendingCaptures(qint64 frameIndex)
             int offset = static_cast<int>(frameIndex - item.startIndex);
             if (offset >= 0 && offset < item.totalFrames() && store->hasFrame(frameIndex)) {
                 QByteArray data = store->getFrame(frameIndex);
-                const QByteArray spsPps = m_gstPlayer ? m_gstPlayer->spsPpsAnnexB() : QByteArray();
-                saveNaluFile(item.naluDir, offset, data, spsPps);
-                if (store->isKeyFrame(frameIndex)
-                    || captureDebugAnnexBHasNalType(data, 5)
-                    || captureDebugAnnexBHasNalType(data, 7)) {
-                    if (!item.keyFrameOffsets.contains(offset)) {
-                        item.keyFrameOffsets.append(offset);
-                        std::sort(item.keyFrameOffsets.begin(), item.keyFrameOffsets.end());
-                    }
+                QString path = item.naluDir + QString("/%1.nalu").arg(offset, 6, 10, QChar('0'));
+                QFile file(path);
+                if (file.open(QIODevice::WriteOnly)) {
+                    file.write(data);
                 }
                 item.savedFrameCount++;
             }
@@ -680,7 +675,6 @@ void CaptureManager::checkPendingCaptures(qint64 frameIndex)
 
         // 检查是否完成
         if (frameIndex >= pending.targetEndIndex) {
-            buildKeyFrameOffsets(item);
             m_pendingCaptures.removeAt(i);
         }
     }
@@ -829,27 +823,31 @@ void CaptureManager::capture()
         item.liveSnapshot = item.liveSnapshot.transformed(transform, Qt::FastTransformation);
     }
 
-    // 从环形缓冲拷贝已有帧到磁盘（零编码，纯文件拷贝）
-    const QByteArray captureSpsPps = m_gstPlayer ? m_gstPlayer->spsPpsAnnexB() : QByteArray();
+    // 从环形缓冲拷贝已有帧到磁盘（异步写入，不阻塞主线程）
     if (m_gstPlayer && m_gstPlayer->naluFrameStore()) {
         NaluFrameStore *store = m_gstPlayer->naluFrameStore();
         qint64 saveTo = qMin(endIndex, store->newestIndex());
+        QVector<QPair<int, QByteArray>> framesToSave;
         for (qint64 idx = startIndex; idx <= saveTo; idx++) {
             if (store->hasFrame(idx)) {
                 int offset = static_cast<int>(idx - startIndex);
-                QByteArray data = store->getFrame(idx);
-                saveNaluFile(item.naluDir, offset, data, captureSpsPps);
-                if (store->isKeyFrame(idx)
-                    || captureDebugAnnexBHasNalType(data, 5)
-                    || captureDebugAnnexBHasNalType(data, 7)) {
-                    item.keyFrameOffsets.append(offset);
-                }
+                framesToSave.append({offset, store->getFrame(idx)});
                 item.savedFrameCount++;
             }
         }
+        if (!framesToSave.isEmpty()) {
+            QString naluDir = item.naluDir;
+            QtConcurrent::run([naluDir, framesToSave]() {
+                for (const auto &pair : framesToSave) {
+                    QString path = naluDir + QString("/%1.nalu").arg(pair.first, 6, 10, QChar('0'));
+                    QFile file(path);
+                    if (file.open(QIODevice::WriteOnly)) {
+                        file.write(pair.second);
+                    }
+                }
+            });
+        }
     }
-
-    buildKeyFrameOffsets(item);
 
     m_items.append(item);
     int newIndex = m_items.size() - 1;
@@ -882,41 +880,6 @@ void CaptureManager::capture()
     }
 }
 
-void CaptureManager::saveNaluFile(const QString &dir, int frameOffset, const QByteArray &data,
-                                  const QByteArray &spsPps)
-{
-    if (data.isEmpty()) return;
-
-    QByteArray toWrite = data;
-    if (frameOffset == 0 && !spsPps.isEmpty()
-        && !captureDebugAnnexBHasNalType(data, 7)) {
-        toWrite = spsPps + data;
-    }
-
-    QString path = dir + QString("/%1.nalu").arg(frameOffset, 6, 10, QChar('0'));
-    QFile file(path);
-    if (file.open(QIODevice::WriteOnly)) {
-        file.write(toWrite);
-    }
-}
-
-
-void CaptureManager::buildKeyFrameOffsets(CaptureItem &item)
-{
-    item.keyFrameOffsets.clear();
-    const int total = item.totalFrames();
-    for (int off = 0; off < total; ++off) {
-        const QByteArray data = readNaluFile(item.naluDir, off);
-        if (captureDebugAnnexBHasNalType(data, 5)
-            || captureDebugAnnexBHasNalType(data, 7)) {
-            item.keyFrameOffsets.append(off);
-        }
-    }
-    captureDebugLog("CAP", QString("buildKeyFrameOffsets item=%1 count=%2 first=%3")
-        .arg(item.id)
-        .arg(item.keyFrameOffsets.size())
-        .arg(item.keyFrameOffsets.isEmpty() ? -1 : item.keyFrameOffsets.first()));
-}
 
 QByteArray CaptureManager::readNaluFile(const QString &dir, int frameOffset)
 {
@@ -1004,9 +967,10 @@ void CaptureManager::clearAll()
     QMutexLocker lock(&m_mutex);
     m_pendingCaptures.clear();
 
+    QStringList dirsToDelete;
     for (int i = 0; i < m_items.size(); i++) {
         if (!m_items[i].naluDir.isEmpty()) {
-            QDir(m_items[i].naluDir).removeRecursively();
+            dirsToDelete.append(m_items[i].naluDir);
         }
     }
 
@@ -1024,6 +988,14 @@ void CaptureManager::clearAll()
 
     emit countChanged();
     setCurrentItemIndex(-1);
+
+    if (!dirsToDelete.isEmpty()) {
+        QtConcurrent::run([dirsToDelete]() {
+            for (const QString &dir : dirsToDelete) {
+                QDir(dir).removeRecursively();
+            }
+        });
+    }
 }
 
 void CaptureManager::removeItem(int index)
@@ -1049,10 +1021,7 @@ void CaptureManager::removeItem(int index)
         }
     }
 
-    CaptureItem &item = m_items[index];
-    if (!item.naluDir.isEmpty()) {
-        QDir(item.naluDir).removeRecursively();
-    }
+    QString dirToDelete = m_items[index].naluDir;
 
     m_items.removeAt(index);
     m_cachedItemIndex = -1;
@@ -1069,6 +1038,12 @@ void CaptureManager::removeItem(int index)
     lock.unlock();
     emit itemRemoved(index);
     emit countChanged();
+
+    if (!dirToDelete.isEmpty()) {
+        QtConcurrent::run([dirToDelete]() {
+            QDir(dirToDelete).removeRecursively();
+        });
+    }
 }
 
 void CaptureManager::removeOldest()
