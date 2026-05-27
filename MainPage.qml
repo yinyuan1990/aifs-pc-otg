@@ -1760,7 +1760,7 @@ Rectangle {
                                 gridCell.itemOffsetY = 0
                             }
                             function onLiveZoomSynced() {
-                                if (!gridCell.hasData || mainPage.pcActivationLevel < 2) return
+                                if (!gridCell.hasData) return
                                 gridCell.itemZoom = mainPage.videoZoom
                                 if (mainPage.videoZoom <= 1.0) {
                                     gridCell.itemOffsetX = 0
