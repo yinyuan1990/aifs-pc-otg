@@ -23,7 +23,10 @@ NaluDecoder::~NaluDecoder()
 QImage NaluDecoder::decodeSingleNalu(const QByteArray &naluData)
 {
     QMutexLocker lock(&m_mutex);
-    if (!ensureDecoder()) return QImage();
+    if (!ensureDecoder()) {
+        qWarning() << "NaluDecoder: ensureDecoder 失败";
+        return QImage();
+    }
     return decodeOneNalu(naluData);
 }
 
@@ -226,16 +229,26 @@ QImage NaluDecoder::decodeOneNalu(const QByteArray &naluData)
     pkt->data = reinterpret_cast<uint8_t*>(feed.data());
     pkt->size = feed.size();
 
-    int ret = avcodec_send_packet(m_codecCtx, pkt);
+    int sendRet = avcodec_send_packet(m_codecCtx, pkt);
 
     pkt->data = nullptr;
     pkt->size = 0;
     av_packet_free(&pkt);
 
-    if (ret < 0) return QImage();
+    if (sendRet < 0) {
+        qWarning() << "NaluDecoder: send_packet 失败 ret=" << sendRet << "size=" << feed.size();
+        return QImage();
+    }
 
-    ret = avcodec_receive_frame(m_codecCtx, m_avFrame);
-    if (ret < 0) return QImage();
+    int recvRet = avcodec_receive_frame(m_codecCtx, m_avFrame);
+    if (recvRet < 0) {
+        if (recvRet == AVERROR(EAGAIN)) {
+            qDebug() << "NaluDecoder: EAGAIN（需要更多数据）size=" << feed.size();
+        } else {
+            qWarning() << "NaluDecoder: receive_frame 失败 ret=" << recvRet;
+        }
+        return QImage();
+    }
 
     // If hardware frame, transfer to CPU
     AVFrame *srcFrame = m_avFrame;

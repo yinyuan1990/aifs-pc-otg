@@ -842,20 +842,27 @@ QImage CaptureManager::decodeFromDisk(int itemIndex, int frameOffset)
     const CaptureItem &item = m_items[itemIndex];
     if (frameOffset < 0 || frameOffset >= item.totalFrames()) return QImage();
 
-    // 每个 item 独立 GStreamer 解码管线（懒创建）
+    // 每个 item 独立 FFmpeg 解码器（懒创建）
     ItemDecodeState &state = m_itemDecoders[itemIndex];
     if (!state.decoder) {
-        state.decoder = new GstCaptureDecoder();
+        state.decoder = new NaluDecoder(nullptr);
+        qDebug() << "decodeFromDisk: 创建解码器 item=" << itemIndex;
     }
 
     bool sequential = (frameOffset == state.lastOffset + 1);
     QImage result;
 
-    // 顺序解码（同 item 下一帧，~2ms）
+    // 顺序解码（同 item 下一帧）
     if (sequential) {
         QByteArray data = readNaluFile(item.naluDir, frameOffset);
         if (!data.isEmpty()) {
-            result = state.decoder->decodeNalu(data);
+            result = state.decoder->decodeSingleNalu(data);
+            if (result.isNull()) {
+                qDebug() << "decodeFromDisk: 顺序解码失败 item=" << itemIndex
+                         << "offset=" << frameOffset << "dataSize=" << data.size();
+            }
+        } else {
+            qDebug() << "decodeFromDisk: 文件不存在 item=" << itemIndex << "offset=" << frameOffset;
         }
     }
 
@@ -869,14 +876,21 @@ QImage CaptureManager::decodeFromDisk(int itemIndex, int frameOffset)
             }
         }
 
+        qDebug() << "decodeFromDisk: keyframe seek item=" << itemIndex
+                 << "from=" << keyOffset << "to=" << frameOffset
+                 << "dir=" << item.naluDir
+                 << "keyFrameOffsets=" << item.keyFrameOffsets;
+
         state.decoder->flush();
 
+        int decoded = 0, failed = 0;
         for (int off = keyOffset; off <= frameOffset; off++) {
             QByteArray data = readNaluFile(item.naluDir, off);
-            if (data.isEmpty()) continue;
+            if (data.isEmpty()) { failed++; continue; }
 
-            QImage img = state.decoder->decodeNalu(data);
-            if (img.isNull()) continue;
+            QImage img = state.decoder->decodeSingleNalu(data);
+            if (img.isNull()) { failed++; continue; }
+            decoded++;
 
             if (off == frameOffset) {
                 result = img;
@@ -892,9 +906,16 @@ QImage CaptureManager::decodeFromDisk(int itemIndex, int frameOffset)
                 m_frameCache[midKey] = {cached, ++m_frameCacheCounter};
             }
         }
+
+        qDebug() << "decodeFromDisk: keyframe seek 结果 decoded=" << decoded
+                 << "failed=" << failed << "result=" << (result.isNull() ? "NULL" : "OK");
     }
 
-    if (result.isNull()) return QImage();
+    if (result.isNull()) {
+        qWarning() << "decodeFromDisk: ❌ 解码失败 item=" << itemIndex
+                   << "offset=" << frameOffset << "返回兜底图";
+        return QImage();
+    }
 
     state.lastOffset = frameOffset;
 
