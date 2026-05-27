@@ -22,7 +22,7 @@ bool GstCaptureDecoder::ensurePipeline()
 
     QString desc =
         "appsrc name=src "
-        "! h264parse config-interval=-1 "
+        "! h264parse "
         "! avdec_h264 "
         "! videoconvert "
         "! video/x-raw,format=BGRA "
@@ -41,7 +41,7 @@ bool GstCaptureDecoder::ensurePipeline()
     m_appsink = gst_bin_get_by_name(GST_BIN(m_pipeline), "sink");
 
     GstCaps *caps = gst_caps_from_string(
-        "video/x-h264, stream-format=byte-stream, alignment=nal");
+        "video/x-h264, stream-format=byte-stream, alignment=au");
     g_object_set(m_appsrc,
         "caps", caps,
         "format", GST_FORMAT_TIME,
@@ -188,7 +188,18 @@ QImage GstCaptureDecoder::decodeNalu(const QByteArray &naluData)
     scope.checkpoint("after push");
 
     GstSample *sample = gst_app_sink_try_pull_sample(
-        GST_APP_SINK(m_appsink), 500 * GST_MSECOND);
+        GST_APP_SINK(m_appsink), 50 * GST_MSECOND);
+
+    if (!sample) {
+        scope.checkpoint("EOS drain");
+        gst_app_src_end_of_stream(GST_APP_SRC(m_appsrc));
+        sample = gst_app_sink_try_pull_sample(
+            GST_APP_SINK(m_appsink), 500 * GST_MSECOND);
+        gst_element_send_event(m_pipeline, gst_event_new_flush_start());
+        gst_element_send_event(m_pipeline, gst_event_new_flush_stop(TRUE));
+        drainAppsink();
+        m_pts = 0;
+    }
 
     if (!sample) {
         captureDebugLog("DEC", QString("decodeNalu pull TIMEOUT %1")

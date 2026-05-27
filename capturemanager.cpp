@@ -960,7 +960,6 @@ QImage CaptureManager::decodeFromDisk(int itemIndex, int frameOffset)
         captureDebugLog("CAP", QString("decodeFromDisk create decoder item=%1").arg(itemIndex));
     }
 
-    state.decoder->flush();
     QImage result = state.decoder->decodeNalu(data);
 
     if (result.isNull()) {
