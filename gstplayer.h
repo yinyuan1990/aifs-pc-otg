@@ -24,8 +24,9 @@ typedef struct _GstWebRTCSessionDescription GstWebRTCSessionDescription;
 /**
  * GStreamer 实时流播放器（WebRTCBin 版本）
  *
- * Pipeline: webrtcbin → rtph264depay → h264parse → decoder → videoscale → gamma → displayQueue → convert → appsink
- * h264parse pad probe → NaluFrameStore（H.264 NALU ring buffer，截图/慢放用）
+ * Pipeline: webrtcbin → rtph264depay → h264parse → tee
+ *   ├→ queueDepay → decoder → ... → appsink（直播主路径）
+ *   └→ nalu_queue(leaky) → nalu_appsink → NaluFrameStore（异步存储，不阻塞直播）
  */
 class GstPlayer : public QObject
 {
@@ -62,6 +63,7 @@ public:
     
     // NALU 帧存储（H.264 ring buffer，替代 JPEG 文件）
     NaluFrameStore* naluFrameStore() const { return m_naluStore; }
+    QByteArray spsPpsAnnexB() const { return m_spsPpsAnnexB; }
 
     QImage grabCurrentFrame();
 
@@ -169,6 +171,11 @@ private:
     
     // GStreamer 回调
     static GstFlowReturn onNewSample(GstAppSink *sink, gpointer userData);
+    static GstFlowReturn onNaluStoreSample(GstAppSink *sink, gpointer userData);
+
+    bool linkNaluTeeBranch();
+    void extractSpsPpsFromCaps();
+    void storeNaluFromBuffer(GstBuffer *buffer);
     static void onPadAdded(GstElement *element, GstPad *pad, gpointer userData);
     static GstBusSyncReply onBusSyncMessage(GstBus *bus, GstMessage *message, gpointer userData);
     
@@ -186,6 +193,11 @@ private:
     GstElement *m_webrtcbin = nullptr;    // ⭐ WebRTCBin 元素
     GstElement *m_rtph264depay = nullptr; // ⭐ RTP H264 解包
     GstElement *m_h264parse = nullptr;
+    GstElement *m_naluTee = nullptr;      // NALU 存储 tee（与直播主路径分离）
+    GstElement *m_naluQueue = nullptr;    // 存储分支 leaky queue
+    GstElement *m_naluAppsink = nullptr;  // 异步拉取 NALU 写入 ring buffer
+    GstPad *m_naluTeePadMain = nullptr;
+    GstPad *m_naluTeePadStore = nullptr;
     GstElement *m_queueDepay = nullptr;   // ⭐ 解码前缓冲队列（防马赛克关键）
     GstElement *m_decoder = nullptr;
     GstElement *m_queueDecode = nullptr;  // ⭐ 解码后缓冲队列（防马赛克关键）
@@ -407,7 +419,6 @@ private:
     qint64 m_lastKeyframeRequestMs = 0;            // 上次请求关键帧时间
     int m_pliRequestCount = 0;                     // PLI 请求计数
     gulong m_depayProbeId = 0;                     // 🔥 解码前 probe ID
-    gulong m_parseProbeId = 0;                     // 🔥 h264parse probe ID（IDR检测）
     static constexpr int PLI_INTERVAL_WEAK_MS = 200;  // 弱网 PLI 间隔 200ms
     static constexpr int PLI_INTERVAL_NORMAL_MS = 500; // 正常 PLI 间隔 500ms
     static constexpr int GOOD_FRAMES_TO_EXIT = 5;  // 🔥 连续 5 帧正常才退出等待模式

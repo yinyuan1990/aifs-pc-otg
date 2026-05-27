@@ -1,4 +1,5 @@
 #include "gstplayer.h"
+#include "capturedebuglog.h"
 #include <QDebug>
 #include <QVideoFrameFormat>
 #include <QDir>
@@ -391,6 +392,38 @@ bool GstPlayer::createPipeline()
         }
         qDebug() << "✅ h264parse: config-interval=1（关键帧前插入SPS/PPS）";
     }
+
+    // NALU 存储分支（tee + leaky queue + appsink，不阻塞直播主路径）
+    m_naluTee = gst_element_factory_make("tee", "nalu_tee");
+    m_naluQueue = gst_element_factory_make("queue", "nalu_store_queue");
+    m_naluAppsink = gst_element_factory_make("appsink", "nalu_store_sink");
+    if (m_naluQueue) {
+        g_object_set(m_naluQueue,
+            "max-size-buffers", 2,
+            "max-size-bytes", 0,
+            "max-size-time", 0,
+            "leaky", 2,   // downstream leaky：存储慢则丢旧帧
+            "silent", TRUE,
+            nullptr);
+    }
+    if (m_naluAppsink) {
+        g_object_set(m_naluAppsink,
+            "emit-signals", TRUE,
+            "sync", FALSE,
+            "async", FALSE,
+            "max-buffers", 2,
+            "drop", TRUE,
+            nullptr);
+        GstCaps *naluCaps = gst_caps_from_string(
+            "video/x-h264, stream-format=(string)byte-stream, alignment=(string)au");
+        gst_app_sink_set_caps(GST_APP_SINK(m_naluAppsink), naluCaps);
+        gst_caps_unref(naluCaps);
+        g_signal_connect(m_naluAppsink, "new-sample", G_CALLBACK(onNaluStoreSample), this);
+    }
+    if (m_naluTee && m_naluQueue && m_naluAppsink) {
+        qDebug() << "✅ NALU tee branch: nalu_queue(leaky=2) → nalu_appsink";
+        captureDebugLog("GST", "NALU tee branch created (leaky queue + async appsink)");
+    }
     
     // ⭐⭐⭐ v10超低延迟：小队列（配合 QUEUE_ABSOLUTE_MAX）
     // 方案B（平衡）：5帧缓冲，兼顾低延迟和平滑
@@ -661,7 +694,8 @@ bool GstPlayer::createPipeline()
 
     // 检查所有元素
     bool srcOk = m_useWebRTC ? (m_webrtcbin && m_rtph264depay) : (m_appsrc != nullptr);
-    if (!srcOk || !m_h264parse || !m_queueDepay || !m_decoder || !m_queueDecode ||
+    if (!srcOk || !m_h264parse || !m_naluTee || !m_naluQueue || !m_naluAppsink
+        || !m_queueDepay || !m_decoder || !m_queueDecode ||
         !m_displayQueue || !m_convert || !m_appsink ||
         !m_videoBalance || !m_gamma) {
         qCritical() << "❌ 创建 GStreamer 元素失败";
@@ -761,12 +795,14 @@ bool GstPlayer::createPipeline()
         if (m_useHardwareDecoder && m_download) {
             // 硬解：webrtcbin → rtph264depay → h264parse → queueDepay → decoder → queueDecode → download → videoscale → ...
             gst_bin_add_many(GST_BIN(m_pipeline),
-                m_webrtcbin, m_rtph264depay, m_h264parse, m_queueDepay, m_decoder, m_queueDecode,
+                m_webrtcbin, m_rtph264depay, m_h264parse, m_naluTee, m_naluQueue, m_naluAppsink,
+                m_queueDepay, m_decoder, m_queueDecode,
                 m_download, m_videoScale, m_videoBalance, m_gamma,
                 m_displayQueue, m_convert, m_appsink,
                 nullptr);
 
-            if (!gst_element_link_many(m_rtph264depay, m_h264parse, m_queueDepay, m_decoder, m_queueDecode,
+            if (!gst_element_link(m_rtph264depay, m_h264parse) || !linkNaluTeeBranch()
+                || !gst_element_link_many(m_queueDepay, m_decoder, m_queueDecode,
                                        m_download, m_videoScale, m_videoBalance, m_gamma,
                                        m_displayQueue, m_convert, m_appsink, nullptr)) {
                 qCritical() << "❌ 链接主路径失败 (WebRTC 硬解模式)";
@@ -774,16 +810,18 @@ bool GstPlayer::createPipeline()
                 destroyPipeline();
                 return false;
             }
-            qDebug() << "✅ WebRTC 硬解模式：rtph264depay → decoder → download → videoscale → gamma → appsink";
+            qDebug() << "✅ WebRTC 硬解：depay→parse→tee(main→decode, store→appsink)";
         } else {
             // 软解：webrtcbin → rtph264depay → h264parse → queueDepay → decoder → queueDecode → videoscale → videoBalance → ...
             gst_bin_add_many(GST_BIN(m_pipeline),
-                m_webrtcbin, m_rtph264depay, m_h264parse, m_queueDepay, m_decoder, m_queueDecode,
+                m_webrtcbin, m_rtph264depay, m_h264parse, m_naluTee, m_naluQueue, m_naluAppsink,
+                m_queueDepay, m_decoder, m_queueDecode,
                 m_videoScale, m_videoBalance, m_gamma,
                 m_displayQueue, m_convert, m_appsink,
                 nullptr);
 
-            if (!gst_element_link_many(m_rtph264depay, m_h264parse, m_queueDepay, m_decoder, m_queueDecode,
+            if (!gst_element_link(m_rtph264depay, m_h264parse) || !linkNaluTeeBranch()
+                || !gst_element_link_many(m_queueDepay, m_decoder, m_queueDecode,
                                        m_videoScale, m_videoBalance, m_gamma,
                                        m_displayQueue, m_convert, m_appsink, nullptr)) {
                 qCritical() << "❌ 链接主路径失败 (WebRTC 软解模式)";
@@ -791,7 +829,7 @@ bool GstPlayer::createPipeline()
                 destroyPipeline();
                 return false;
             }
-            qDebug() << "✅ WebRTC 软解模式：rtph264depay → decoder → videoscale → gamma → appsink";
+            qDebug() << "✅ WebRTC 软解：depay→parse→tee(main→decode, store→appsink)";
         }
         
         // 🔥🔥🔥 v9.3双缓冲：简化probe，只做统计，不丢帧（对齐copygstream）
@@ -822,133 +860,21 @@ bool GstPlayer::createPipeline()
             qDebug() << "✅ v9.3 简化probe（只统计不丢帧）";
         }
 
-        // 🔥 v10.4: 在 h264parse srcpad 添加 IDR 检测 + NALU 存储 probe
-        GstPad *parseSrcPad = m_h264parse ? gst_element_get_static_pad(m_h264parse, "src") : nullptr;
-        if (parseSrcPad) {
-            m_parseProbeId = gst_pad_add_probe(parseSrcPad, GST_PAD_PROBE_TYPE_BUFFER,
-                [](GstPad*, GstPadProbeInfo* info, gpointer userData) -> GstPadProbeReturn {
-                    GstPlayer* self = static_cast<GstPlayer*>(userData);
-                    GstBuffer* buffer = GST_PAD_PROBE_INFO_BUFFER(info);
-                    if (!buffer) return GST_PAD_PROBE_OK;
-
-                    if (hasIdrInBuffer(buffer)) {
-                        self->m_preDecodeIdr.store(true);
-                    }
-
-                    // 存储 NALU 到 NaluFrameStore（AVCC→Annex-B 转换）
-                    if (self->m_naluStore) {
-                        // 首次或 SPS/PPS 变更时，从 caps codec_data 提取
-                        if (self->m_spsPpsAnnexB.isEmpty()) {
-                            GstPad *pad = gst_element_get_static_pad(self->m_h264parse, "src");
-                            if (pad) {
-                                GstCaps *caps = gst_pad_get_current_caps(pad);
-                                if (caps) {
-                                    GstStructure *s = gst_caps_get_structure(caps, 0);
-                                    const GValue *cdVal = gst_structure_get_value(s, "codec_data");
-                                    if (cdVal) {
-                                        GstBuffer *cdBuf = gst_value_get_buffer(cdVal);
-                                        GstMapInfo cdMap;
-                                        if (gst_buffer_map(cdBuf, &cdMap, GST_MAP_READ)) {
-                                            const guint8 *cd = cdMap.data;
-                                            int cdSize = static_cast<int>(cdMap.size);
-                                            if (cdSize >= 7) {
-                                                static const char sc[4] = {0, 0, 0, 1};
-                                                self->m_nalLengthSize = (cd[4] & 0x03) + 1;
-                                                int numSPS = cd[5] & 0x1F;
-                                                int pos = 6;
-                                                QByteArray annexB;
-                                                for (int i = 0; i < numSPS && pos + 2 <= cdSize; i++) {
-                                                    int len = (cd[pos] << 8) | cd[pos + 1]; pos += 2;
-                                                    if (pos + len <= cdSize) {
-                                                        annexB.append(sc, 4);
-                                                        annexB.append(reinterpret_cast<const char*>(cd + pos), len);
-                                                        pos += len;
-                                                    }
-                                                }
-                                                if (pos < cdSize) {
-                                                    int numPPS = cd[pos] & 0xFF; pos++;
-                                                    for (int i = 0; i < numPPS && pos + 2 <= cdSize; i++) {
-                                                        int len = (cd[pos] << 8) | cd[pos + 1]; pos += 2;
-                                                        if (pos + len <= cdSize) {
-                                                            annexB.append(sc, 4);
-                                                            annexB.append(reinterpret_cast<const char*>(cd + pos), len);
-                                                            pos += len;
-                                                        }
-                                                    }
-                                                }
-                                                self->m_spsPpsAnnexB = annexB;
-                                                qDebug() << "h264parse probe: 提取 SPS/PPS" << annexB.size() << "bytes, nalLenSize=" << self->m_nalLengthSize;
-                                            }
-                                            gst_buffer_unmap(cdBuf, &cdMap);
-                                        }
-                                    }
-                                    gst_caps_unref(caps);
-                                }
-                                gst_object_unref(pad);
-                            }
-                        }
-
-                        GstMapInfo map;
-                        if (gst_buffer_map(buffer, &map, GST_MAP_READ)) {
-                            const guint8 *raw = map.data;
-                            int rawSize = static_cast<int>(map.size);
-                            bool isKeyFrame = !GST_BUFFER_FLAG_IS_SET(buffer, GST_BUFFER_FLAG_DELTA_UNIT);
-
-                            // 检测格式：Annex-B 还是 AVCC
-                            bool isAnnexB = (rawSize >= 4 && raw[0] == 0 && raw[1] == 0 &&
-                                             ((raw[2] == 0 && raw[3] == 1) || raw[2] == 1));
-
-                            QByteArray naluData;
-                            if (isAnnexB) {
-                                naluData = QByteArray(reinterpret_cast<const char*>(raw), rawSize);
-                            } else {
-                                // AVCC → Annex-B
-                                static const char sc[4] = {0, 0, 0, 1};
-                                int nlSize = self->m_nalLengthSize;
-                                naluData.reserve(rawSize + 128);
-
-                                // keyframe 前加 SPS/PPS
-                                if (isKeyFrame && !self->m_spsPpsAnnexB.isEmpty()) {
-                                    naluData.append(self->m_spsPpsAnnexB);
-                                }
-
-                                int pos = 0;
-                                while (pos + nlSize <= rawSize) {
-                                    quint32 nalLen = 0;
-                                    for (int i = 0; i < nlSize; i++)
-                                        nalLen = (nalLen << 8) | raw[pos + i];
-                                    pos += nlSize;
-                                    if (nalLen == 0 || pos + static_cast<int>(nalLen) > rawSize) break;
-                                    naluData.append(sc, 4);
-                                    naluData.append(reinterpret_cast<const char*>(raw + pos), static_cast<int>(nalLen));
-                                    pos += static_cast<int>(nalLen);
-                                }
-                            }
-
-                            qint64 idx = self->m_naluFrameIndex.fetch_add(1, std::memory_order_relaxed);
-                            gst_buffer_unmap(buffer, &map);
-                            self->m_naluStore->addFrame(naluData, idx, isKeyFrame);
-                        }
-                    }
-
-                    return GST_PAD_PROBE_OK;
-                }, this, nullptr);
-            gst_object_unref(parseSrcPad);
-            qDebug() << "✅ h264parse probe: IDR检测 + NALU存储";
-        }
+        captureDebugLog("GST", "WebRTC pipeline linked with NALU tee branch (no sync probe on live path)");
         
         diagLog(QString("✅ 管道已创建, 解码器: %1").arg(m_decoderName));
     } else {
         // 传统模式（AppSrc，配合 200ms + videorate 方案）
         if (m_useHardwareDecoder && m_download) {
-            // 硬解：appsrc → h264parse → queueDepay → decoder → queueDecode → download → videoscale → ...
             gst_bin_add_many(GST_BIN(m_pipeline),
-                m_appsrc, m_h264parse, m_queueDepay, m_decoder, m_queueDecode,
+                m_appsrc, m_h264parse, m_naluTee, m_naluQueue, m_naluAppsink,
+                m_queueDepay, m_decoder, m_queueDecode,
                 m_download, m_videoScale, m_videoBalance, m_gamma,
                 m_displayQueue, m_convert, m_appsink,
                 nullptr);
 
-            if (!gst_element_link_many(m_appsrc, m_h264parse, m_queueDepay, m_decoder, m_queueDecode,
+            if (!gst_element_link(m_appsrc, m_h264parse) || !linkNaluTeeBranch()
+                || !gst_element_link_many(m_queueDepay, m_decoder, m_queueDecode,
                                        m_download, m_videoScale, m_videoBalance, m_gamma,
                                        m_displayQueue, m_convert, m_appsink, nullptr)) {
                 qCritical() << "❌ 链接主路径失败 (AppSrc 硬解模式)";
@@ -956,16 +882,17 @@ bool GstPlayer::createPipeline()
                 destroyPipeline();
                 return false;
             }
-            qDebug() << "✅ AppSrc 硬解模式（含 videoscale）";
+            qDebug() << "✅ AppSrc 硬解：src→parse→tee(main→decode, store→appsink)";
         } else {
-            // 软解：appsrc → h264parse → queueDepay → decoder → queueDecode → videoscale → videoBalance → ...
             gst_bin_add_many(GST_BIN(m_pipeline),
-                m_appsrc, m_h264parse, m_queueDepay, m_decoder, m_queueDecode,
+                m_appsrc, m_h264parse, m_naluTee, m_naluQueue, m_naluAppsink,
+                m_queueDepay, m_decoder, m_queueDecode,
                 m_videoScale, m_videoBalance, m_gamma,
                 m_displayQueue, m_convert, m_appsink,
                 nullptr);
 
-            if (!gst_element_link_many(m_appsrc, m_h264parse, m_queueDepay, m_decoder, m_queueDecode,
+            if (!gst_element_link(m_appsrc, m_h264parse) || !linkNaluTeeBranch()
+                || !gst_element_link_many(m_queueDepay, m_decoder, m_queueDecode,
                                        m_videoScale, m_videoBalance, m_gamma,
                                        m_displayQueue, m_convert, m_appsink, nullptr)) {
                 qCritical() << "❌ 链接主路径失败 (AppSrc 软解模式)";
@@ -973,118 +900,9 @@ bool GstPlayer::createPipeline()
                 destroyPipeline();
                 return false;
             }
-            qDebug() << "✅ AppSrc 软解模式（含 videoscale）";
+            qDebug() << "✅ AppSrc 软解：src→parse→tee(main→decode, store→appsink)";
         }
-
-        // AppSrc 模式也安装 NALU 存储 probe
-        GstPad *parseSrcPadApp = m_h264parse ? gst_element_get_static_pad(m_h264parse, "src") : nullptr;
-        if (parseSrcPadApp && m_parseProbeId == 0) {
-            m_parseProbeId = gst_pad_add_probe(parseSrcPadApp, GST_PAD_PROBE_TYPE_BUFFER,
-                [](GstPad*, GstPadProbeInfo* info, gpointer userData) -> GstPadProbeReturn {
-                    GstPlayer* self = static_cast<GstPlayer*>(userData);
-                    GstBuffer* buffer = GST_PAD_PROBE_INFO_BUFFER(info);
-                    if (!buffer) return GST_PAD_PROBE_OK;
-                    if (hasIdrInBuffer(buffer)) {
-                        self->m_preDecodeIdr.store(true);
-                    }
-                    if (self->m_naluStore) {
-                        // 首次从 caps codec_data 提取 SPS/PPS
-                        if (self->m_spsPpsAnnexB.isEmpty()) {
-                            GstPad *pad = gst_element_get_static_pad(self->m_h264parse, "src");
-                            if (pad) {
-                                GstCaps *caps = gst_pad_get_current_caps(pad);
-                                if (caps) {
-                                    GstStructure *s = gst_caps_get_structure(caps, 0);
-                                    const GValue *cdVal = gst_structure_get_value(s, "codec_data");
-                                    if (cdVal) {
-                                        GstBuffer *cdBuf = gst_value_get_buffer(cdVal);
-                                        GstMapInfo cdMap;
-                                        if (gst_buffer_map(cdBuf, &cdMap, GST_MAP_READ)) {
-                                            const guint8 *cd = cdMap.data;
-                                            int cdSize = static_cast<int>(cdMap.size);
-                                            if (cdSize >= 7) {
-                                                static const char sc[4] = {0, 0, 0, 1};
-                                                self->m_nalLengthSize = (cd[4] & 0x03) + 1;
-                                                int numSPS = cd[5] & 0x1F;
-                                                int pos = 6;
-                                                QByteArray annexB;
-                                                for (int i = 0; i < numSPS && pos + 2 <= cdSize; i++) {
-                                                    int len = (cd[pos] << 8) | cd[pos + 1]; pos += 2;
-                                                    if (pos + len <= cdSize) {
-                                                        annexB.append(sc, 4);
-                                                        annexB.append(reinterpret_cast<const char*>(cd + pos), len);
-                                                        pos += len;
-                                                    }
-                                                }
-                                                if (pos < cdSize) {
-                                                    int numPPS = cd[pos] & 0xFF; pos++;
-                                                    for (int i = 0; i < numPPS && pos + 2 <= cdSize; i++) {
-                                                        int len = (cd[pos] << 8) | cd[pos + 1]; pos += 2;
-                                                        if (pos + len <= cdSize) {
-                                                            annexB.append(sc, 4);
-                                                            annexB.append(reinterpret_cast<const char*>(cd + pos), len);
-                                                            pos += len;
-                                                        }
-                                                    }
-                                                }
-                                                self->m_spsPpsAnnexB = annexB;
-                                                qDebug() << "AppSrc probe: 提取 SPS/PPS" << annexB.size() << "bytes, nalLenSize=" << self->m_nalLengthSize;
-                                            }
-                                            gst_buffer_unmap(cdBuf, &cdMap);
-                                        }
-                                    }
-                                    gst_caps_unref(caps);
-                                }
-                                gst_object_unref(pad);
-                            }
-                        }
-
-                        GstMapInfo map;
-                        if (gst_buffer_map(buffer, &map, GST_MAP_READ)) {
-                            const guint8 *raw = map.data;
-                            int rawSize = static_cast<int>(map.size);
-                            bool isKeyFrame = !GST_BUFFER_FLAG_IS_SET(buffer, GST_BUFFER_FLAG_DELTA_UNIT);
-
-                            bool isAnnexB = (rawSize >= 4 && raw[0] == 0 && raw[1] == 0 &&
-                                             ((raw[2] == 0 && raw[3] == 1) || raw[2] == 1));
-
-                            QByteArray naluData;
-                            if (isAnnexB) {
-                                naluData = QByteArray(reinterpret_cast<const char*>(raw), rawSize);
-                            } else {
-                                static const char sc[4] = {0, 0, 0, 1};
-                                int nlSize = self->m_nalLengthSize;
-                                naluData.reserve(rawSize + 128);
-
-                                if (isKeyFrame && !self->m_spsPpsAnnexB.isEmpty()) {
-                                    naluData.append(self->m_spsPpsAnnexB);
-                                }
-
-                                int pos = 0;
-                                while (pos + nlSize <= rawSize) {
-                                    quint32 nalLen = 0;
-                                    for (int i = 0; i < nlSize; i++)
-                                        nalLen = (nalLen << 8) | raw[pos + i];
-                                    pos += nlSize;
-                                    if (nalLen == 0 || pos + static_cast<int>(nalLen) > rawSize) break;
-                                    naluData.append(sc, 4);
-                                    naluData.append(reinterpret_cast<const char*>(raw + pos), static_cast<int>(nalLen));
-                                    pos += static_cast<int>(nalLen);
-                                }
-                            }
-
-                            qint64 idx = self->m_naluFrameIndex.fetch_add(1, std::memory_order_relaxed);
-                            gst_buffer_unmap(buffer, &map);
-                            self->m_naluStore->addFrame(naluData, idx, isKeyFrame);
-                        }
-                    }
-                    return GST_PAD_PROBE_OK;
-                }, this, nullptr);
-            gst_object_unref(parseSrcPadApp);
-            qDebug() << "✅ AppSrc: h264parse NALU probe installed";
-        } else if (parseSrcPadApp) {
-            gst_object_unref(parseSrcPadApp);
-        }
+        captureDebugLog("GST", "AppSrc pipeline linked with NALU tee branch");
     }
 
     qDebug() << "✅ GStreamer Pipeline 创建成功，解码器:" << m_decoderName;
@@ -1136,13 +954,16 @@ void GstPlayer::destroyPipeline()
         }
         m_depayProbeId = 0;
     }
-    if (m_parseProbeId != 0 && m_h264parse) {
-        GstPad *parseSrcPad = gst_element_get_static_pad(m_h264parse, "src");
-        if (parseSrcPad) {
-            gst_pad_remove_probe(parseSrcPad, m_parseProbeId);
-            gst_object_unref(parseSrcPad);
-        }
-        m_parseProbeId = 0;
+
+    if (m_naluTee && m_naluTeePadMain) {
+        gst_element_release_request_pad(m_naluTee, m_naluTeePadMain);
+        gst_object_unref(m_naluTeePadMain);
+        m_naluTeePadMain = nullptr;
+    }
+    if (m_naluTee && m_naluTeePadStore) {
+        gst_element_release_request_pad(m_naluTee, m_naluTeePadStore);
+        gst_object_unref(m_naluTeePadStore);
+        m_naluTeePadStore = nullptr;
     }
     
     if (m_pipeline) {
@@ -1156,6 +977,9 @@ void GstPlayer::destroyPipeline()
     m_webrtcbin = nullptr;     // ⭐ WebRTC 元素
     m_rtph264depay = nullptr;  // ⭐ WebRTC 元素
     m_h264parse = nullptr;
+    m_naluTee = nullptr;
+    m_naluQueue = nullptr;
+    m_naluAppsink = nullptr;
     m_queueDepay = nullptr;    // ⭐ 解码前缓冲队列
     m_decoder = nullptr;
     m_queueDecode = nullptr;   // ⭐ 解码后缓冲队列
@@ -1329,6 +1153,252 @@ void GstPlayer::pushNalu(const QByteArray &nalu)
     if (ret != GST_FLOW_OK) {
         qWarning() << "⚠️ 推送数据到 appsrc 失败:" << ret;
     }
+}
+
+static bool hasAnnexBNalType(const guint8 *raw, int rawSize, quint8 nalType)
+{
+    for (int i = 0; i + 4 < rawSize; ++i) {
+        if (raw[i] == 0 && raw[i + 1] == 0 &&
+            ((raw[i + 2] == 0 && raw[i + 3] == 1) || raw[i + 2] == 1)) {
+            const int nalIndex = (raw[i + 2] == 1) ? (i + 3) : (i + 4);
+            if (nalIndex < rawSize && (raw[nalIndex] & 0x1F) == nalType) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+static QByteArray extractSpsPpsFromAnnexB(const guint8 *raw, int rawSize)
+{
+    static const char sc[4] = {0, 0, 0, 1};
+    QByteArray result;
+    for (int i = 0; i + 5 <= rawSize; ++i) {
+        if (raw[i] == 0 && raw[i + 1] == 0 && raw[i + 2] == 0 && raw[i + 3] == 1) {
+            const quint8 nalType = raw[i + 4] & 0x1F;
+            if (nalType == 7 || nalType == 8) {
+                int j = i + 4;
+                while (j + 4 <= rawSize) {
+                    if (raw[j] == 0 && raw[j + 1] == 0 && raw[j + 2] == 0 && raw[j + 3] == 1) {
+                        break;
+                    }
+                    ++j;
+                }
+                result.append(sc, 4);
+                result.append(reinterpret_cast<const char*>(raw + i + 4), j - (i + 4));
+            }
+        }
+    }
+    return result;
+}
+
+bool GstPlayer::linkNaluTeeBranch()
+{
+    if (!m_h264parse || !m_naluTee || !m_naluQueue || !m_naluAppsink || !m_queueDepay) {
+        captureDebugLog("GST", "linkNaluTeeBranch FAIL missing elements");
+        return false;
+    }
+
+    if (!gst_element_link(m_h264parse, m_naluTee)) {
+        captureDebugLog("GST", "linkNaluTeeBranch FAIL h264parse->tee");
+        return false;
+    }
+
+    m_naluTeePadMain = gst_element_request_pad_simple(m_naluTee, "src_%u");
+    GstPad *depaySink = gst_element_get_static_pad(m_queueDepay, "sink");
+    if (!m_naluTeePadMain || !depaySink
+        || gst_pad_link(m_naluTeePadMain, depaySink) != GST_PAD_LINK_OK) {
+        captureDebugLog("GST", "linkNaluTeeBranch FAIL tee->queueDepay");
+        if (depaySink) gst_object_unref(depaySink);
+        return false;
+    }
+    gst_object_unref(depaySink);
+
+    if (!gst_element_link(m_naluQueue, m_naluAppsink)) {
+        captureDebugLog("GST", "linkNaluTeeBranch FAIL naluQueue->appsink");
+        return false;
+    }
+
+    m_naluTeePadStore = gst_element_request_pad_simple(m_naluTee, "src_%u");
+    GstPad *naluQueueSink = gst_element_get_static_pad(m_naluQueue, "sink");
+    if (!m_naluTeePadStore || !naluQueueSink
+        || gst_pad_link(m_naluTeePadStore, naluQueueSink) != GST_PAD_LINK_OK) {
+        captureDebugLog("GST", "linkNaluTeeBranch FAIL tee->naluQueue");
+        if (naluQueueSink) gst_object_unref(naluQueueSink);
+        return false;
+    }
+    gst_object_unref(naluQueueSink);
+
+    captureDebugLog("GST", "linkNaluTeeBranch OK main=queueDepay store=appsink(leaky)");
+    return true;
+}
+
+void GstPlayer::extractSpsPpsFromCaps()
+{
+    if (!m_h264parse || !m_spsPpsAnnexB.isEmpty()) {
+        return;
+    }
+
+    GstPad *pad = gst_element_get_static_pad(m_h264parse, "src");
+    if (!pad) return;
+
+    GstCaps *caps = gst_pad_get_current_caps(pad);
+    gst_object_unref(pad);
+    if (!caps) return;
+
+    GstStructure *s = gst_caps_get_structure(caps, 0);
+    const GValue *cdVal = gst_structure_get_value(s, "codec_data");
+    if (!cdVal) {
+        gst_caps_unref(caps);
+        return;
+    }
+
+    GstBuffer *cdBuf = gst_value_get_buffer(cdVal);
+    GstMapInfo cdMap;
+    if (!gst_buffer_map(cdBuf, &cdMap, GST_MAP_READ)) {
+        gst_caps_unref(caps);
+        return;
+    }
+
+    const guint8 *cd = cdMap.data;
+    const int cdSize = static_cast<int>(cdMap.size);
+    if (cdSize >= 7) {
+        static const char sc[4] = {0, 0, 0, 1};
+        m_nalLengthSize = (cd[4] & 0x03) + 1;
+        int numSPS = cd[5] & 0x1F;
+        int pos = 6;
+        QByteArray annexB;
+        for (int i = 0; i < numSPS && pos + 2 <= cdSize; i++) {
+            int len = (cd[pos] << 8) | cd[pos + 1]; pos += 2;
+            if (pos + len <= cdSize) {
+                annexB.append(sc, 4);
+                annexB.append(reinterpret_cast<const char*>(cd + pos), len);
+                pos += len;
+            }
+        }
+        if (pos < cdSize) {
+            int numPPS = cd[pos] & 0xFF; pos++;
+            for (int i = 0; i < numPPS && pos + 2 <= cdSize; i++) {
+                int len = (cd[pos] << 8) | cd[pos + 1]; pos += 2;
+                if (pos + len <= cdSize) {
+                    annexB.append(sc, 4);
+                    annexB.append(reinterpret_cast<const char*>(cd + pos), len);
+                    pos += len;
+                }
+            }
+        }
+        m_spsPpsAnnexB = annexB;
+        captureDebugLog("GST", QString("extractSpsPps OK size=%1 nalLenSize=%2")
+            .arg(annexB.size()).arg(m_nalLengthSize));
+        qDebug() << "NALU store: 提取 SPS/PPS" << annexB.size() << "bytes";
+    }
+    gst_buffer_unmap(cdBuf, &cdMap);
+    gst_caps_unref(caps);
+}
+
+void GstPlayer::storeNaluFromBuffer(GstBuffer *buffer)
+{
+    if (!buffer || !m_naluStore) {
+        return;
+    }
+
+    if (m_spsPpsAnnexB.isEmpty()) {
+        extractSpsPpsFromCaps();
+    }
+
+    GstMapInfo map;
+    if (!gst_buffer_map(buffer, &map, GST_MAP_READ)) {
+        return;
+    }
+
+    const guint8 *raw = map.data;
+    const int rawSize = static_cast<int>(map.size);
+    const bool isAnnexB = (rawSize >= 4 && raw[0] == 0 && raw[1] == 0 &&
+                           ((raw[2] == 0 && raw[3] == 1) || raw[2] == 1));
+
+    if (m_spsPpsAnnexB.isEmpty() && isAnnexB) {
+        const QByteArray ps = extractSpsPpsFromAnnexB(raw, rawSize);
+        if (!ps.isEmpty()) {
+            m_spsPpsAnnexB = ps;
+            captureDebugLog("GST", QString("extractSpsPps from Annex-B stream size=%1").arg(ps.size()));
+        }
+    }
+
+    bool isKeyFrame = !GST_BUFFER_FLAG_IS_SET(buffer, GST_BUFFER_FLAG_DELTA_UNIT);
+    if (!isKeyFrame) {
+        isKeyFrame = hasIdrInBuffer(buffer);
+    }
+
+    QByteArray naluData;
+    if (isAnnexB) {
+        naluData.reserve(rawSize + m_spsPpsAnnexB.size() + 16);
+        if (isKeyFrame && !m_spsPpsAnnexB.isEmpty()
+            && !hasAnnexBNalType(raw, rawSize, 7)) {
+            naluData.append(m_spsPpsAnnexB);
+        }
+        naluData.append(reinterpret_cast<const char*>(raw), rawSize);
+        if (!isKeyFrame && hasAnnexBNalType(raw, rawSize, 5)) {
+            isKeyFrame = true;
+        }
+    } else {
+        static const char sc[4] = {0, 0, 0, 1};
+        const int nlSize = m_nalLengthSize;
+        naluData.reserve(rawSize + 128);
+
+        if (isKeyFrame && !m_spsPpsAnnexB.isEmpty()) {
+            naluData.append(m_spsPpsAnnexB);
+        }
+
+        int pos = 0;
+        while (pos + nlSize <= rawSize) {
+            quint32 nalLen = 0;
+            for (int i = 0; i < nlSize; i++) {
+                nalLen = (nalLen << 8) | raw[pos + i];
+            }
+            pos += nlSize;
+            if (nalLen == 0 || pos + static_cast<int>(nalLen) > rawSize) {
+                break;
+            }
+            if ((raw[pos] & 0x1F) == 5) {
+                isKeyFrame = true;
+            }
+            naluData.append(sc, 4);
+            naluData.append(reinterpret_cast<const char*>(raw + pos), static_cast<int>(nalLen));
+            pos += static_cast<int>(nalLen);
+        }
+    }
+
+    const qint64 idx = m_naluFrameIndex.fetch_add(1, std::memory_order_relaxed);
+    gst_buffer_unmap(buffer, &map);
+    m_naluStore->addFrame(naluData, idx, isKeyFrame);
+
+    static std::atomic<int> s_storeLogCounter{0};
+    const int n = s_storeLogCounter.fetch_add(1) + 1;
+    if (n <= 3 || (n % 300) == 0) {
+        captureDebugLog("GST", QString("storeNalu idx=%1 key=%2 size=%3 annexB=%4")
+            .arg(idx).arg(isKeyFrame ? "Y" : "N").arg(naluData.size()).arg(isAnnexB ? "Y" : "N"));
+    }
+}
+
+GstFlowReturn GstPlayer::onNaluStoreSample(GstAppSink *sink, gpointer userData)
+{
+    GstPlayer *self = static_cast<GstPlayer*>(userData);
+    GstSample *sample = gst_app_sink_pull_sample(sink);
+    if (!sample) {
+        return GST_FLOW_OK;
+    }
+
+    if (hasIdrInBuffer(gst_sample_get_buffer(sample))) {
+        self->m_preDecodeIdr.store(true);
+    }
+
+    GstBuffer *buffer = gst_sample_get_buffer(sample);
+    if (buffer) {
+        self->storeNaluFromBuffer(buffer);
+    }
+
+    gst_sample_unref(sample);
+    return GST_FLOW_OK;
 }
 
 GstFlowReturn GstPlayer::onNewSample(GstAppSink *sink, gpointer userData)

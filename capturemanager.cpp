@@ -770,6 +770,23 @@ void CaptureManager::capture()
     item.naluDir = m_capturesDir + QString("/nalu_%1").arg(item.id, 6, 10, QChar('0'));
     QDir().mkpath(item.naluDir);
 
+    // 保存 SPS/PPS 供离线回放解码器初始化
+    if (m_gstPlayer) {
+        const QByteArray spsPps = m_gstPlayer->spsPpsAnnexB();
+        if (!spsPps.isEmpty()) {
+            QFile spsFile(item.naluDir + "/sps_pps.bin");
+            if (spsFile.open(QIODevice::WriteOnly)) {
+                spsFile.write(spsPps);
+                captureDebugLog("CAP", QString("saved sps_pps.bin size=%1 item=%2")
+                    .arg(spsPps.size()).arg(item.id));
+            } else {
+                captureDebugLog("CAP", QString("WARN sps_pps.bin write FAIL item=%1").arg(item.id));
+            }
+        } else {
+            captureDebugLog("CAP", QString("WARN no SPS/PPS at capture time item=%1").arg(item.id));
+        }
+    }
+
     // 直接抓取当前直播画面（已解码的 BGRA，零延迟兜底）
     if (m_gstPlayer) {
         item.liveSnapshot = m_gstPlayer->grabCurrentFrame();
@@ -833,6 +850,13 @@ QByteArray CaptureManager::readNaluFile(const QString &dir, int frameOffset)
 {
     QString path = dir + QString("/%1.nalu").arg(frameOffset, 6, 10, QChar('0'));
     QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) return QByteArray();
+    return file.readAll();
+}
+
+static QByteArray readSpsPpsFile(const QString &dir)
+{
+    QFile file(dir + "/sps_pps.bin");
     if (!file.open(QIODevice::ReadOnly)) return QByteArray();
     return file.readAll();
 }
@@ -901,11 +925,11 @@ QImage CaptureManager::decodeFromDisk(int itemIndex, int frameOffset)
                     for (int i = 0; i + 4 < data.size(); i++) {
                         if (p[i] == 0 && p[i+1] == 0 && p[i+2] == 0 && p[i+3] == 1) {
                             quint8 nalType = p[i+4] & 0x1F;
-                            if (nalType == 7) {
+                            if (nalType == 7 || nalType == 5) {
                                 keyOffset = off;
                                 found = true;
-                                captureDebugLog("CAP", QString("SPS scan found keyOffset=%1 at off=%2 %3")
-                                    .arg(keyOffset).arg(off).arg(captureDebugNaluPreview(data)));
+                                captureDebugLog("CAP", QString("keyframe scan found keyOffset=%1 at off=%2 nalType=%3 %4")
+                                    .arg(keyOffset).arg(off).arg(nalType).arg(captureDebugNaluPreview(data)));
                                 goto found_keyframe;
                             }
                         }
@@ -914,12 +938,23 @@ QImage CaptureManager::decodeFromDisk(int itemIndex, int frameOffset)
             }
             found_keyframe:
             if (!found) {
-                captureDebugLog("CAP", "SPS scan found NO keyframe, using offset=0");
+                captureDebugLog("CAP", "keyframe scan found NO SPS/IDR, using offset=0");
             }
         }
 
         scope.checkpoint(QString("flush+seek from key=%1").arg(keyOffset));
         state.decoder->flush();
+
+        const QByteArray spsPps = readSpsPpsFile(item.naluDir);
+        if (!spsPps.isEmpty()) {
+            if (!state.decoder->pushNalu(spsPps)) {
+                captureDebugLog("CAP", QString("push sps_pps FAIL size=%1").arg(spsPps.size()));
+            } else {
+                captureDebugLog("CAP", QString("push sps_pps OK size=%1").arg(spsPps.size()));
+            }
+        } else {
+            captureDebugLog("CAP", "WARN no sps_pps.bin for replay");
+        }
 
         int pushed = 0;
         int pushFail = 0;

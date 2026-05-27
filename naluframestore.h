@@ -15,7 +15,7 @@ class NaluFrameStore : public QObject
 {
     Q_OBJECT
 public:
-    static constexpr int DEFAULT_CAPACITY = 25000;
+    static constexpr int DEFAULT_CAPACITY = 3000;  // ~50s@60fps，降低 mmap 压力
 
     explicit NaluFrameStore(int capacity = DEFAULT_CAPACITY, QObject *parent = nullptr);
     ~NaluFrameStore();
