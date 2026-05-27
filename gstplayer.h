@@ -196,11 +196,6 @@ private:
     GstElement *m_naluTee = nullptr;      // NALU 存储 tee（与直播主路径分离）
     GstElement *m_naluQueue = nullptr;    // 存储分支 leaky queue
     GstElement *m_naluAppsink = nullptr;  // 异步拉取 NALU 写入 ring buffer
-    GstElement *m_storeDecoder = nullptr;  // avdec_h264 存储分支软解
-    GstElement *m_storeConvert = nullptr;  // videoconvert 存储分支格式转换
-    GstElement *m_storeEncoder = nullptr;  // mfh264enc intra-only 重编码（Media Foundation → GPU）
-    GstElement *m_storeParse = nullptr;    // h264parse 重编码后解析
-    bool m_useIntraEncode = false;         // 是否启用 intra-only 重编码
     GstPad *m_naluTeePadMain = nullptr;
     GstPad *m_naluTeePadStore = nullptr;
     GstElement *m_queueDepay = nullptr;   // ⭐ 解码前缓冲队列（防马赛克关键）
@@ -496,6 +491,16 @@ private:
     std::atomic<qint64> m_naluFrameIndex{0};
     QByteArray m_spsPpsAnnexB;  // SPS/PPS Annex-B（从 codec_data 提取）
     int m_nalLengthSize = 4;    // AVCC NAL 长度字段大小
+
+    // 独立 intra-only 编码管道（与直播 pipeline 完全隔离）
+    GstElement *m_encodePipeline = nullptr;
+    GstElement *m_encodeAppsrc = nullptr;
+    GstElement *m_encodeAppsink = nullptr;
+    bool m_useIntraEncode = false;
+    quint64 m_encodePts = 0;
+    void createEncodePipeline();
+    void destroyEncodePipeline();
+    static GstFlowReturn onEncodedSample(GstAppSink *sink, gpointer userData);
 };
 
 #endif // GSTPLAYER_H

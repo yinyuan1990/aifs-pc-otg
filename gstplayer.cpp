@@ -425,45 +425,6 @@ bool GstPlayer::createPipeline()
         captureDebugLog("GST", "NALU tee branch created (leaky queue + async appsink)");
     }
 
-    // H.264 Intra-only 重编码（tee存储分支：解码→重编码为全IDR）
-    m_useIntraEncode = false;
-    m_storeDecoder = gst_element_factory_make("avdec_h264", "store_dec");
-    m_storeConvert = gst_element_factory_make("videoconvert", "store_convert");
-    m_storeEncoder = gst_element_factory_make("mfh264enc", "store_enc");
-    if (m_storeEncoder) {
-        qDebug() << "✅ mfh264enc available for intra-only encode";
-        captureDebugLog("GST", "mfh264enc created OK (Media Foundation → GPU)");
-        setIntIfExists(m_storeEncoder, "gop-size", 1);
-        setIntIfExists(m_storeEncoder, "bframes", 0);
-        setIntIfExists(m_storeEncoder, "b-frames", 0);
-        setIntIfExists(m_storeEncoder, "ref", 0);
-        setBoolIfExists(m_storeEncoder, "low-latency", TRUE);
-        setIntIfExists(m_storeEncoder, "min-qp", 17);
-        setIntIfExists(m_storeEncoder, "max-qp", 17);
-        setIntIfExists(m_storeEncoder, "qp", 17);
-    } else {
-        qDebug() << "❌ mfh264enc not available, intra-only encode disabled";
-        captureDebugLog("GST", "FAIL: mfh264enc not available");
-    }
-    m_storeParse = gst_element_factory_make("h264parse", "store_parse");
-    if (m_storeParse) {
-        g_object_set(m_storeParse, "config-interval", (gint)-1, nullptr);
-        setIntIfExists(m_storeParse, "output-format", 1);
-    }
-    bool storeElementsOk = m_storeDecoder && m_storeConvert && m_storeEncoder && m_storeParse;
-    if (storeElementsOk) {
-        m_useIntraEncode = true;
-        qDebug() << "✅ H.264 intra-only storage encoder pipeline ready: mfh264enc";
-        captureDebugLog("GST", "H.264 intra-only store encoder: avdec_h264 → videoconvert → mfh264enc(gop=1) → h264parse");
-    } else {
-        qDebug() << "❌ Intra-only encode not available, store branch disabled";
-        captureDebugLog("GST", "FAIL: intra-only encode elements missing, store branch disabled");
-        if (m_storeDecoder) { gst_object_unref(m_storeDecoder); m_storeDecoder = nullptr; }
-        if (m_storeConvert) { gst_object_unref(m_storeConvert); m_storeConvert = nullptr; }
-        if (m_storeEncoder) { gst_object_unref(m_storeEncoder); m_storeEncoder = nullptr; }
-        if (m_storeParse) { gst_object_unref(m_storeParse); m_storeParse = nullptr; }
-    }
-
     // ⭐⭐⭐ v10超低延迟：小队列（配合 QUEUE_ABSOLUTE_MAX）
     // 方案B（平衡）：5帧缓冲，兼顾低延迟和平滑
     m_queueDepay = gst_element_factory_make("queue", "queue_depay");
@@ -839,11 +800,6 @@ bool GstPlayer::createPipeline()
                 m_download, m_videoScale, m_videoBalance, m_gamma,
                 m_displayQueue, m_convert, m_appsink,
                 nullptr);
-            if (m_useIntraEncode) {
-                gst_bin_add_many(GST_BIN(m_pipeline),
-                    m_storeDecoder, m_storeConvert,
-                    m_storeEncoder, m_storeParse, nullptr);
-            }
 
             if (!gst_element_link(m_rtph264depay, m_h264parse) || !linkNaluTeeBranch()
                 || !gst_element_link_many(m_queueDepay, m_decoder, m_queueDecode,
@@ -863,11 +819,6 @@ bool GstPlayer::createPipeline()
                 m_videoScale, m_videoBalance, m_gamma,
                 m_displayQueue, m_convert, m_appsink,
                 nullptr);
-            if (m_useIntraEncode) {
-                gst_bin_add_many(GST_BIN(m_pipeline),
-                    m_storeDecoder, m_storeConvert,
-                    m_storeEncoder, m_storeParse, nullptr);
-            }
 
             if (!gst_element_link(m_rtph264depay, m_h264parse) || !linkNaluTeeBranch()
                 || !gst_element_link_many(m_queueDepay, m_decoder, m_queueDecode,
@@ -921,11 +872,6 @@ bool GstPlayer::createPipeline()
                 m_download, m_videoScale, m_videoBalance, m_gamma,
                 m_displayQueue, m_convert, m_appsink,
                 nullptr);
-            if (m_useIntraEncode) {
-                gst_bin_add_many(GST_BIN(m_pipeline),
-                    m_storeDecoder, m_storeConvert,
-                    m_storeEncoder, m_storeParse, nullptr);
-            }
 
             if (!gst_element_link(m_appsrc, m_h264parse) || !linkNaluTeeBranch()
                 || !gst_element_link_many(m_queueDepay, m_decoder, m_queueDecode,
@@ -944,11 +890,6 @@ bool GstPlayer::createPipeline()
                 m_videoScale, m_videoBalance, m_gamma,
                 m_displayQueue, m_convert, m_appsink,
                 nullptr);
-            if (m_useIntraEncode) {
-                gst_bin_add_many(GST_BIN(m_pipeline),
-                    m_storeDecoder, m_storeConvert,
-                    m_storeEncoder, m_storeParse, nullptr);
-            }
 
             if (!gst_element_link(m_appsrc, m_h264parse) || !linkNaluTeeBranch()
                 || !gst_element_link_many(m_queueDepay, m_decoder, m_queueDecode,
@@ -966,6 +907,9 @@ bool GstPlayer::createPipeline()
 
     qDebug() << "✅ GStreamer Pipeline 创建成功，解码器:" << m_decoderName;
     emit decoderChanged();
+
+    createEncodePipeline();
+
     return true;
 }
 
@@ -1039,11 +983,6 @@ void GstPlayer::destroyPipeline()
     m_naluTee = nullptr;
     m_naluQueue = nullptr;
     m_naluAppsink = nullptr;
-    m_storeDecoder = nullptr;
-    m_storeConvert = nullptr;
-    m_storeEncoder = nullptr;
-    m_storeParse = nullptr;
-    m_useIntraEncode = false;
     m_queueDepay = nullptr;    // ⭐ 解码前缓冲队列
     m_decoder = nullptr;
     m_queueDecode = nullptr;   // ⭐ 解码后缓冲队列
@@ -1074,6 +1013,100 @@ void GstPlayer::destroyPipeline()
     m_videoHeight = 0;
     m_frameIndex = 0;
     m_firstFrame = false;
+
+    destroyEncodePipeline();
+}
+
+void GstPlayer::createEncodePipeline()
+{
+    if (m_encodePipeline) return;
+
+    QString desc =
+        "appsrc name=enc_src is-live=true format=3 "
+        "! h264parse "
+        "! avdec_h264 "
+        "! videoconvert "
+        "! mfh264enc gop-size=1 "
+        "! h264parse name=enc_parse config-interval=-1 "
+        "! appsink name=enc_sink emit-signals=true sync=false async=false max-buffers=2 drop=true";
+
+    GError *err = nullptr;
+    m_encodePipeline = gst_parse_launch(desc.toUtf8().constData(), &err);
+    if (err) {
+        captureDebugLog("GST", QString("createEncodePipeline FAIL: %1").arg(err->message));
+        qDebug() << "❌ Encode pipeline failed:" << err->message;
+        g_error_free(err);
+        if (m_encodePipeline) { gst_object_unref(m_encodePipeline); m_encodePipeline = nullptr; }
+        return;
+    }
+
+    m_encodeAppsrc = gst_bin_get_by_name(GST_BIN(m_encodePipeline), "enc_src");
+    m_encodeAppsink = gst_bin_get_by_name(GST_BIN(m_encodePipeline), "enc_sink");
+
+    GstCaps *srcCaps = gst_caps_from_string(
+        "video/x-h264, stream-format=byte-stream, alignment=au");
+    g_object_set(m_encodeAppsrc, "caps", srcCaps, nullptr);
+    gst_caps_unref(srcCaps);
+
+    GstCaps *sinkCaps = gst_caps_from_string(
+        "video/x-h264, stream-format=byte-stream, alignment=au");
+    gst_app_sink_set_caps(GST_APP_SINK(m_encodeAppsink), sinkCaps);
+    gst_caps_unref(sinkCaps);
+
+    g_signal_connect(m_encodeAppsink, "new-sample", G_CALLBACK(onEncodedSample), this);
+
+    GstStateChangeReturn ret = gst_element_set_state(m_encodePipeline, GST_STATE_PLAYING);
+    if (ret == GST_STATE_CHANGE_FAILURE) {
+        captureDebugLog("GST", "createEncodePipeline FAIL: set_state PLAYING failed");
+        destroyEncodePipeline();
+        return;
+    }
+
+    m_useIntraEncode = true;
+    m_encodePts = 0;
+    captureDebugLog("GST", "createEncodePipeline OK (separate pipeline: mfh264enc gop=1)");
+    qDebug() << "✅ Separate intra-encode pipeline created (mfh264enc)";
+}
+
+void GstPlayer::destroyEncodePipeline()
+{
+    m_useIntraEncode = false;
+    if (m_encodePipeline) {
+        gst_element_set_state(m_encodePipeline, GST_STATE_NULL);
+    }
+    if (m_encodeAppsrc) { gst_object_unref(m_encodeAppsrc); m_encodeAppsrc = nullptr; }
+    if (m_encodeAppsink) { gst_object_unref(m_encodeAppsink); m_encodeAppsink = nullptr; }
+    if (m_encodePipeline) { gst_object_unref(m_encodePipeline); m_encodePipeline = nullptr; }
+    m_encodePts = 0;
+}
+
+GstFlowReturn GstPlayer::onEncodedSample(GstAppSink *sink, gpointer userData)
+{
+    GstPlayer *self = static_cast<GstPlayer*>(userData);
+    GstSample *sample = gst_app_sink_pull_sample(sink);
+    if (!sample) return GST_FLOW_OK;
+
+    GstBuffer *buffer = gst_sample_get_buffer(sample);
+    if (buffer && self->m_naluStore) {
+        GstMapInfo map;
+        if (gst_buffer_map(buffer, &map, GST_MAP_READ)) {
+            QByteArray encoded(reinterpret_cast<const char*>(map.data), static_cast<int>(map.size));
+            gst_buffer_unmap(buffer, &map);
+
+            qint64 idx = self->m_naluFrameIndex.fetch_add(1, std::memory_order_relaxed);
+            self->m_naluStore->addFrame(encoded, idx, true);
+
+            static std::atomic<int> s_encLogCounter{0};
+            int n = s_encLogCounter.fetch_add(1) + 1;
+            if (n <= 3 || (n % 300) == 0) {
+                captureDebugLog("GST", QString("onEncodedSample idx=%1 size=%2 (IDR)")
+                    .arg(idx).arg(encoded.size()));
+            }
+        }
+    }
+
+    gst_sample_unref(sample);
+    return GST_FLOW_OK;
 }
 
 void GstPlayer::start()
@@ -1278,32 +1311,22 @@ bool GstPlayer::linkNaluTeeBranch()
     }
     gst_object_unref(depaySink);
 
-    if (!m_useIntraEncode) {
-        captureDebugLog("GST", "linkNaluTeeBranch SKIP: intra-encode not available, store branch disabled");
-        return true;
-    }
-
-    // naluQueue → avdec_h264 → videoconvert → mfh264enc → h264parse → appsink
-    if (!gst_element_link_many(m_naluQueue, m_storeDecoder, m_storeConvert,
-                                m_storeEncoder, m_storeParse,
-                                m_naluAppsink, nullptr)) {
-        captureDebugLog("GST", "linkNaluTeeBranch FAIL: intra-encode link failed, store branch disabled");
-        m_useIntraEncode = false;
-        return true;
+    if (!gst_element_link(m_naluQueue, m_naluAppsink)) {
+        captureDebugLog("GST", "linkNaluTeeBranch FAIL naluQueue->appsink");
+        return false;
     }
 
     m_naluTeePadStore = gst_element_request_pad_simple(m_naluTee, "src_%u");
     GstPad *naluQueueSink = gst_element_get_static_pad(m_naluQueue, "sink");
     if (!m_naluTeePadStore || !naluQueueSink
         || gst_pad_link(m_naluTeePadStore, naluQueueSink) != GST_PAD_LINK_OK) {
-        captureDebugLog("GST", "linkNaluTeeBranch FAIL tee->naluQueue, store branch disabled");
+        captureDebugLog("GST", "linkNaluTeeBranch FAIL tee->naluQueue");
         if (naluQueueSink) gst_object_unref(naluQueueSink);
-        m_useIntraEncode = false;
-        return true;
+        return false;
     }
     gst_object_unref(naluQueueSink);
 
-    captureDebugLog("GST", "linkNaluTeeBranch OK: intra-encode active (mfh264enc)");
+    captureDebugLog("GST", "linkNaluTeeBranch OK main=queueDepay store=appsink(leaky)");
     return true;
 }
 
@@ -1468,7 +1491,23 @@ GstFlowReturn GstPlayer::onNaluStoreSample(GstAppSink *sink, gpointer userData)
 
     GstBuffer *buffer = gst_sample_get_buffer(sample);
     if (buffer) {
-        self->storeNaluFromBuffer(buffer);
+        if (self->m_useIntraEncode && self->m_encodeAppsrc) {
+            // 推到独立编码管道重编码为IDR
+            GstMapInfo map;
+            if (gst_buffer_map(buffer, &map, GST_MAP_READ)) {
+                GstBuffer *encBuf = gst_buffer_new_allocate(nullptr, map.size, nullptr);
+                gst_buffer_fill(encBuf, 0, map.data, map.size);
+                GST_BUFFER_PTS(encBuf) = self->m_encodePts;
+                GST_BUFFER_DTS(encBuf) = self->m_encodePts;
+                GST_BUFFER_DURATION(encBuf) = GST_SECOND / 30;
+                self->m_encodePts += GST_SECOND / 30;
+                gst_buffer_unmap(buffer, &map);
+                gst_app_src_push_buffer(GST_APP_SRC(self->m_encodeAppsrc), encBuf);
+            }
+        } else {
+            // 无编码管道时直存原始 NALU
+            self->storeNaluFromBuffer(buffer);
+        }
     }
 
     gst_sample_unref(sample);
