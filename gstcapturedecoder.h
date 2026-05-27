@@ -5,7 +5,10 @@
 #include <QImage>
 #include <QMutex>
 
-typedef struct _GstElement GstElement;
+struct AVCodecContext;
+struct AVFrame;
+struct AVPacket;
+struct SwsContext;
 
 class GstCaptureDecoder
 {
@@ -13,27 +16,23 @@ public:
     GstCaptureDecoder();
     ~GstCaptureDecoder();
 
-    // 推送 NALU 但不等待解码结果（用于中间帧快进）
     bool pushNalu(const QByteArray &naluData);
-
-    // 推送 NALU 并拉取解码结果（用于目标帧）
     QImage decodeNalu(const QByteArray &naluData);
-
-    // 拉取最新解码帧（pushNalu 之后调用）
     QImage pullLatest();
-
     void flush();
 
 private:
-    bool ensurePipeline();
+    bool ensureDecoder();
     void cleanup();
-    void drainAppsink();
+    QImage frameToImage();
 
-    GstElement *m_pipeline = nullptr;
-    GstElement *m_appsrc = nullptr;
-    GstElement *m_appsink = nullptr;
-    bool m_ready = false;
-    quint64 m_pts = 0;
+    AVCodecContext *m_codecCtx = nullptr;
+    AVFrame *m_frame = nullptr;
+    AVPacket *m_packet = nullptr;
+    SwsContext *m_swsCtx = nullptr;
+    int m_swsWidth = 0;
+    int m_swsHeight = 0;
+    QImage m_lastDecoded;
     QMutex m_mutex;
 };
 

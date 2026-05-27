@@ -1,9 +1,12 @@
 #include "gstcapturedecoder.h"
 #include "capturedebuglog.h"
 #include <QDebug>
-#include <gst/gst.h>
-#include <gst/app/gstappsrc.h>
-#include <gst/app/gstappsink.h>
+
+extern "C" {
+#include <libavcodec/avcodec.h>
+#include <libavutil/imgutils.h>
+#include <libswscale/swscale.h>
+}
 
 GstCaptureDecoder::GstCaptureDecoder()
 {
@@ -14,243 +17,141 @@ GstCaptureDecoder::~GstCaptureDecoder()
     cleanup();
 }
 
-bool GstCaptureDecoder::ensurePipeline()
+bool GstCaptureDecoder::ensureDecoder()
 {
-    if (m_pipeline) return m_ready;
+    if (m_codecCtx) return true;
 
-    CaptureDebugScope scope("DEC", "ensurePipeline", 200);
-
-    QString desc =
-        "appsrc name=src "
-        "! h264parse "
-        "! avdec_h264 "
-        "! videoconvert "
-        "! video/x-raw,format=BGRA "
-        "! appsink name=sink";
-
-    GError *err = nullptr;
-    m_pipeline = gst_parse_launch(desc.toUtf8().constData(), &err);
-    if (err) {
-        captureDebugLog("DEC", QString("ensurePipeline FAIL: %1").arg(err->message));
-        g_error_free(err);
-        if (m_pipeline) { gst_object_unref(m_pipeline); m_pipeline = nullptr; }
+    const AVCodec *codec = avcodec_find_decoder(AV_CODEC_ID_H264);
+    if (!codec) {
+        captureDebugLog("DEC", "avcodec_find_decoder H264 FAIL");
         return false;
     }
 
-    m_appsrc = gst_bin_get_by_name(GST_BIN(m_pipeline), "src");
-    m_appsink = gst_bin_get_by_name(GST_BIN(m_pipeline), "sink");
+    m_codecCtx = avcodec_alloc_context3(codec);
+    if (!m_codecCtx) return false;
 
-    GstCaps *caps = gst_caps_from_string(
-        "video/x-h264, stream-format=byte-stream, alignment=au");
-    g_object_set(m_appsrc,
-        "caps", caps,
-        "format", GST_FORMAT_TIME,
-        "is-live", FALSE,
-        "stream-type", 0,
-        nullptr);
-    gst_caps_unref(caps);
+    m_codecCtx->flags |= AV_CODEC_FLAG_LOW_DELAY;
+    m_codecCtx->thread_count = 1;
 
-    g_object_set(m_appsink,
-        "sync", FALSE,
-        "max-buffers", 1,
-        "drop", TRUE,
-        nullptr);
-
-    GstStateChangeReturn ret = gst_element_set_state(m_pipeline, GST_STATE_PLAYING);
-    if (ret == GST_STATE_CHANGE_FAILURE) {
-        captureDebugLog("DEC", "ensurePipeline FAIL: set_state PLAYING failed");
-        cleanup();
+    if (avcodec_open2(m_codecCtx, codec, nullptr) < 0) {
+        captureDebugLog("DEC", "avcodec_open2 H264 FAIL");
+        avcodec_free_context(&m_codecCtx);
         return false;
     }
 
-    m_ready = true;
-    m_pts = 0;
-    captureDebugLog("DEC", "ensurePipeline OK");
+    m_frame = av_frame_alloc();
+    m_packet = av_packet_alloc();
+
+    captureDebugLog("DEC", "ensureDecoder OK (avcodec LOW_DELAY)");
     return true;
 }
 
 void GstCaptureDecoder::cleanup()
 {
-    if (m_pipeline) gst_element_set_state(m_pipeline, GST_STATE_NULL);
-    if (m_appsrc)   { gst_object_unref(m_appsrc);   m_appsrc = nullptr; }
-    if (m_appsink)  { gst_object_unref(m_appsink);  m_appsink = nullptr; }
-    if (m_pipeline) { gst_object_unref(m_pipeline); m_pipeline = nullptr; }
-    m_ready = false;
-    m_pts = 0;
+    if (m_swsCtx) { sws_freeContext(m_swsCtx); m_swsCtx = nullptr; }
+    if (m_frame) { av_frame_free(&m_frame); m_frame = nullptr; }
+    if (m_packet) { av_packet_free(&m_packet); m_packet = nullptr; }
+    if (m_codecCtx) { avcodec_free_context(&m_codecCtx); m_codecCtx = nullptr; }
+    m_swsWidth = 0;
+    m_swsHeight = 0;
+    m_lastDecoded = QImage();
 }
 
-void GstCaptureDecoder::drainAppsink()
+QImage GstCaptureDecoder::frameToImage()
 {
-    if (!m_appsink) return;
-    int drained = 0;
-    while (true) {
-        GstSample *s = gst_app_sink_try_pull_sample(GST_APP_SINK(m_appsink), 0);
-        if (!s) break;
-        gst_sample_unref(s);
-        drained++;
+    if (!m_frame || m_frame->width <= 0 || m_frame->height <= 0)
+        return QImage();
+
+    int w = m_frame->width;
+    int h = m_frame->height;
+
+    if (!m_swsCtx || m_swsWidth != w || m_swsHeight != h) {
+        if (m_swsCtx) sws_freeContext(m_swsCtx);
+        m_swsCtx = sws_getContext(w, h, (AVPixelFormat)m_frame->format,
+                                  w, h, AV_PIX_FMT_BGRA,
+                                  SWS_FAST_BILINEAR, nullptr, nullptr, nullptr);
+        m_swsWidth = w;
+        m_swsHeight = h;
     }
-    if (drained > 0) {
-        captureDebugLog("DEC", QString("drainAppsink dropped %1 samples").arg(drained));
-    }
+    if (!m_swsCtx) return QImage();
+
+    QImage result(w, h, QImage::Format_ARGB32);
+    uint8_t *dst[1] = { result.bits() };
+    int dstStride[1] = { static_cast<int>(result.bytesPerLine()) };
+    sws_scale(m_swsCtx, m_frame->data, m_frame->linesize, 0, h, dst, dstStride);
+
+    return result;
 }
 
 bool GstCaptureDecoder::pushNalu(const QByteArray &naluData)
 {
     QMutexLocker lock(&m_mutex);
+    if (naluData.isEmpty() || !ensureDecoder()) return false;
 
-    if (naluData.isEmpty()) return false;
-    if (!ensurePipeline()) return false;
+    m_packet->data = const_cast<uint8_t*>(
+        reinterpret_cast<const uint8_t*>(naluData.constData()));
+    m_packet->size = naluData.size();
 
-    GstBuffer *buffer = gst_buffer_new_allocate(nullptr, naluData.size(), nullptr);
-    gst_buffer_fill(buffer, 0, naluData.constData(), naluData.size());
+    int ret = avcodec_send_packet(m_codecCtx, m_packet);
+    m_packet->data = nullptr;
+    m_packet->size = 0;
+    if (ret < 0) return false;
 
-    GST_BUFFER_PTS(buffer) = m_pts;
-    GST_BUFFER_DTS(buffer) = m_pts;
-    GST_BUFFER_DURATION(buffer) = GST_SECOND / 30;
-    m_pts += GST_SECOND / 30;
-
-    GstFlowReturn flowRet = gst_app_src_push_buffer(GST_APP_SRC(m_appsrc), buffer);
-    if (flowRet != GST_FLOW_OK) {
-        captureDebugLog("DEC", QString("pushNalu FAIL flowRet=%1 %2")
-            .arg(flowRet).arg(captureDebugNaluPreview(naluData)));
+    while (avcodec_receive_frame(m_codecCtx, m_frame) == 0) {
+        m_lastDecoded = frameToImage();
     }
-    return (flowRet == GST_FLOW_OK);
+    return true;
 }
 
 QImage GstCaptureDecoder::pullLatest()
 {
     QMutexLocker lock(&m_mutex);
-    if (!m_appsink) return QImage();
-
-    CaptureDebugScope scope("DEC", "pullLatest", 100);
-
-    GstSample *sample = gst_app_sink_try_pull_sample(
-        GST_APP_SINK(m_appsink), 500 * GST_MSECOND);
-
-    if (!sample) {
-        captureDebugLog("DEC", "pullLatest TIMEOUT 500ms");
-        return QImage();
-    }
-
-    GstCaps *caps = gst_sample_get_caps(sample);
-    GstStructure *s = gst_caps_get_structure(caps, 0);
-    int w = 0, h = 0;
-    gst_structure_get_int(s, "width", &w);
-    gst_structure_get_int(s, "height", &h);
-
-    if (w <= 0 || h <= 0) {
-        gst_sample_unref(sample);
-        captureDebugLog("DEC", QString("pullLatest bad size %1x%2").arg(w).arg(h));
-        return QImage();
-    }
-
-    GstBuffer *buf = gst_sample_get_buffer(sample);
-    GstMapInfo map;
-    if (!gst_buffer_map(buf, &map, GST_MAP_READ)) {
-        gst_sample_unref(sample);
-        return QImage();
-    }
-
-    QImage img(map.data, w, h, w * 4, QImage::Format_ARGB32);
-    QImage result = img.copy();
-
-    gst_buffer_unmap(buf, &map);
-    gst_sample_unref(sample);
-
-    captureDebugLog("DEC", QString("pullLatest OK %1x%2").arg(w).arg(h));
-    return result;
+    return m_lastDecoded;
 }
 
 QImage GstCaptureDecoder::decodeNalu(const QByteArray &naluData)
 {
     QMutexLocker lock(&m_mutex);
-
-    if (naluData.isEmpty()) return QImage();
-    if (!ensurePipeline()) return QImage();
+    if (naluData.isEmpty() || !ensureDecoder()) return QImage();
 
     CaptureDebugScope scope("DEC", "decodeNalu", 100);
 
-    GstBuffer *buffer = gst_buffer_new_allocate(nullptr, naluData.size(), nullptr);
-    gst_buffer_fill(buffer, 0, naluData.constData(), naluData.size());
+    m_packet->data = const_cast<uint8_t*>(
+        reinterpret_cast<const uint8_t*>(naluData.constData()));
+    m_packet->size = naluData.size();
 
-    GST_BUFFER_PTS(buffer) = m_pts;
-    GST_BUFFER_DTS(buffer) = m_pts;
-    GST_BUFFER_DURATION(buffer) = GST_SECOND / 30;
-    m_pts += GST_SECOND / 30;
+    int ret = avcodec_send_packet(m_codecCtx, m_packet);
+    m_packet->data = nullptr;
+    m_packet->size = 0;
 
-    GstFlowReturn flowRet = gst_app_src_push_buffer(GST_APP_SRC(m_appsrc), buffer);
-    if (flowRet != GST_FLOW_OK) {
-        captureDebugLog("DEC", QString("decodeNalu push FAIL flowRet=%1 %2")
-            .arg(flowRet).arg(captureDebugNaluPreview(naluData)));
+    if (ret < 0) {
+        captureDebugLog("DEC", QString("send_packet FAIL ret=%1 %2")
+            .arg(ret).arg(captureDebugNaluPreview(naluData)));
         return QImage();
     }
 
-    scope.checkpoint("after push");
-
-    GstSample *sample = gst_app_sink_try_pull_sample(
-        GST_APP_SINK(m_appsink), 50 * GST_MSECOND);
-
-    if (!sample) {
-        scope.checkpoint("EOS drain");
-        gst_app_src_end_of_stream(GST_APP_SRC(m_appsrc));
-        sample = gst_app_sink_try_pull_sample(
-            GST_APP_SINK(m_appsink), 500 * GST_MSECOND);
-        gst_element_send_event(m_pipeline, gst_event_new_flush_start());
-        gst_element_send_event(m_pipeline, gst_event_new_flush_stop(TRUE));
-        drainAppsink();
-        m_pts = 0;
+    ret = avcodec_receive_frame(m_codecCtx, m_frame);
+    if (ret < 0) {
+        captureDebugLog("DEC", QString("receive_frame FAIL ret=%1 %2")
+            .arg(ret).arg(captureDebugNaluPreview(naluData)));
+        return QImage();
     }
 
-    if (!sample) {
-        captureDebugLog("DEC", QString("decodeNalu pull TIMEOUT %1")
+    QImage result = frameToImage();
+    if (!result.isNull()) {
+        m_lastDecoded = result;
+        captureDebugLog("DEC", QString("decodeNalu OK %1x%2 %3")
+            .arg(m_frame->width).arg(m_frame->height)
             .arg(captureDebugNaluPreview(naluData)));
-        return QImage();
     }
-
-    GstCaps *caps = gst_sample_get_caps(sample);
-    GstStructure *s = gst_caps_get_structure(caps, 0);
-    int w = 0, h = 0;
-    gst_structure_get_int(s, "width", &w);
-    gst_structure_get_int(s, "height", &h);
-
-    if (w <= 0 || h <= 0) {
-        gst_sample_unref(sample);
-        captureDebugLog("DEC", QString("decodeNalu bad size %1x%2").arg(w).arg(h));
-        return QImage();
-    }
-
-    GstBuffer *buf = gst_sample_get_buffer(sample);
-    GstMapInfo map;
-    if (!gst_buffer_map(buf, &map, GST_MAP_READ)) {
-        gst_sample_unref(sample);
-        captureDebugLog("DEC", "decodeNalu map buffer FAIL");
-        return QImage();
-    }
-
-    QImage img(map.data, w, h, w * 4, QImage::Format_ARGB32);
-    QImage result = img.copy();
-
-    gst_buffer_unmap(buf, &map);
-    gst_sample_unref(sample);
-
-    captureDebugLog("DEC", QString("decodeNalu OK %1x%2 %3")
-        .arg(w).arg(h).arg(captureDebugNaluPreview(naluData)));
     return result;
 }
 
 void GstCaptureDecoder::flush()
 {
     QMutexLocker lock(&m_mutex);
-
-    if (!m_pipeline || !m_ready) return;
-
-    CaptureDebugScope scope("DEC", "flush", 50);
-
-    gst_element_send_event(m_pipeline,
-        gst_event_new_flush_start());
-    gst_element_send_event(m_pipeline,
-        gst_event_new_flush_stop(TRUE));
-
-    drainAppsink();
-    m_pts = 0;
+    if (m_codecCtx) {
+        avcodec_flush_buffers(m_codecCtx);
+    }
+    m_lastDecoded = QImage();
 }
