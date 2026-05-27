@@ -478,6 +478,8 @@ private:
     // NALU 帧存储
     NaluFrameStore *m_naluStore = nullptr;
     std::atomic<qint64> m_naluFrameIndex{0};
+    QByteArray m_spsPpsAnnexB;  // SPS/PPS Annex-B（从 codec_data 提取）
+    int m_nalLengthSize = 4;    // AVCC NAL 长度字段大小
 };
 
 #endif // GSTPLAYER_H

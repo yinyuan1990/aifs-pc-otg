@@ -94,25 +94,12 @@ bool NaluDecoder::ensureDecoder()
     m_codecCtx->thread_count = m_useHwDecode ? 1 : 2;
 
     if (avcodec_open2(m_codecCtx, codec, nullptr) < 0) {
-        // Hardware decode failed — fallback to software
         if (m_hwDeviceCtx) { av_buffer_unref(&m_hwDeviceCtx); m_hwDeviceCtx = nullptr; }
         avcodec_free_context(&m_codecCtx);
         m_useHwDecode = false;
         m_hwPixFmt = -1;
-
-        codec = avcodec_find_decoder(AV_CODEC_ID_H264);
-        m_codecCtx = avcodec_alloc_context3(codec);
-        if (!m_codecCtx) return false;
-        m_codecCtx->flags |= AV_CODEC_FLAG_LOW_DELAY;
-        m_codecCtx->flags2 |= AV_CODEC_FLAG2_FAST;
-        m_codecCtx->thread_count = 2;
-
-        if (avcodec_open2(m_codecCtx, codec, nullptr) < 0) {
-            avcodec_free_context(&m_codecCtx);
-            qWarning() << "NaluDecoder: all decode methods failed";
-            return false;
-        }
-        qDebug() << "NaluDecoder: GPU failed, using CPU software decode";
+        qWarning() << "NaluDecoder: hardware decode failed, no fallback";
+        return false;
     }
 
     m_avFrame = av_frame_alloc();

@@ -835,12 +835,96 @@ bool GstPlayer::createPipeline()
                         self->m_preDecodeIdr.store(true);
                     }
 
-                    // 存储 NALU 到 NaluFrameStore（零额外格式转换）
+                    // 存储 NALU 到 NaluFrameStore（AVCC→Annex-B 转换）
                     if (self->m_naluStore) {
+                        // 首次或 SPS/PPS 变更时，从 caps codec_data 提取
+                        if (self->m_spsPpsAnnexB.isEmpty()) {
+                            GstPad *pad = gst_element_get_static_pad(self->m_h264parse, "src");
+                            if (pad) {
+                                GstCaps *caps = gst_pad_get_current_caps(pad);
+                                if (caps) {
+                                    GstStructure *s = gst_caps_get_structure(caps, 0);
+                                    const GValue *cdVal = gst_structure_get_value(s, "codec_data");
+                                    if (cdVal) {
+                                        GstBuffer *cdBuf = gst_value_get_buffer(cdVal);
+                                        GstMapInfo cdMap;
+                                        if (gst_buffer_map(cdBuf, &cdMap, GST_MAP_READ)) {
+                                            const guint8 *cd = cdMap.data;
+                                            int cdSize = static_cast<int>(cdMap.size);
+                                            if (cdSize >= 7) {
+                                                static const char sc[4] = {0, 0, 0, 1};
+                                                self->m_nalLengthSize = (cd[4] & 0x03) + 1;
+                                                int numSPS = cd[5] & 0x1F;
+                                                int pos = 6;
+                                                QByteArray annexB;
+                                                for (int i = 0; i < numSPS && pos + 2 <= cdSize; i++) {
+                                                    int len = (cd[pos] << 8) | cd[pos + 1]; pos += 2;
+                                                    if (pos + len <= cdSize) {
+                                                        annexB.append(sc, 4);
+                                                        annexB.append(reinterpret_cast<const char*>(cd + pos), len);
+                                                        pos += len;
+                                                    }
+                                                }
+                                                if (pos < cdSize) {
+                                                    int numPPS = cd[pos] & 0xFF; pos++;
+                                                    for (int i = 0; i < numPPS && pos + 2 <= cdSize; i++) {
+                                                        int len = (cd[pos] << 8) | cd[pos + 1]; pos += 2;
+                                                        if (pos + len <= cdSize) {
+                                                            annexB.append(sc, 4);
+                                                            annexB.append(reinterpret_cast<const char*>(cd + pos), len);
+                                                            pos += len;
+                                                        }
+                                                    }
+                                                }
+                                                self->m_spsPpsAnnexB = annexB;
+                                                qDebug() << "h264parse probe: 提取 SPS/PPS" << annexB.size() << "bytes, nalLenSize=" << self->m_nalLengthSize;
+                                            }
+                                            gst_buffer_unmap(cdBuf, &cdMap);
+                                        }
+                                    }
+                                    gst_caps_unref(caps);
+                                }
+                                gst_object_unref(pad);
+                            }
+                        }
+
                         GstMapInfo map;
                         if (gst_buffer_map(buffer, &map, GST_MAP_READ)) {
-                            QByteArray naluData(reinterpret_cast<const char*>(map.data), static_cast<int>(map.size));
+                            const guint8 *raw = map.data;
+                            int rawSize = static_cast<int>(map.size);
                             bool isKeyFrame = !GST_BUFFER_FLAG_IS_SET(buffer, GST_BUFFER_FLAG_DELTA_UNIT);
+
+                            // 检测格式：Annex-B 还是 AVCC
+                            bool isAnnexB = (rawSize >= 4 && raw[0] == 0 && raw[1] == 0 &&
+                                             ((raw[2] == 0 && raw[3] == 1) || raw[2] == 1));
+
+                            QByteArray naluData;
+                            if (isAnnexB) {
+                                naluData = QByteArray(reinterpret_cast<const char*>(raw), rawSize);
+                            } else {
+                                // AVCC → Annex-B
+                                static const char sc[4] = {0, 0, 0, 1};
+                                int nlSize = self->m_nalLengthSize;
+                                naluData.reserve(rawSize + 128);
+
+                                // keyframe 前加 SPS/PPS
+                                if (isKeyFrame && !self->m_spsPpsAnnexB.isEmpty()) {
+                                    naluData.append(self->m_spsPpsAnnexB);
+                                }
+
+                                int pos = 0;
+                                while (pos + nlSize <= rawSize) {
+                                    quint32 nalLen = 0;
+                                    for (int i = 0; i < nlSize; i++)
+                                        nalLen = (nalLen << 8) | raw[pos + i];
+                                    pos += nlSize;
+                                    if (nalLen == 0 || pos + static_cast<int>(nalLen) > rawSize) break;
+                                    naluData.append(sc, 4);
+                                    naluData.append(reinterpret_cast<const char*>(raw + pos), static_cast<int>(nalLen));
+                                    pos += static_cast<int>(nalLen);
+                                }
+                            }
+
                             qint64 idx = self->m_naluFrameIndex.fetch_add(1, std::memory_order_relaxed);
                             gst_buffer_unmap(buffer, &map);
                             self->m_naluStore->addFrame(naluData, idx, isKeyFrame);
@@ -904,10 +988,91 @@ bool GstPlayer::createPipeline()
                         self->m_preDecodeIdr.store(true);
                     }
                     if (self->m_naluStore) {
+                        // 首次从 caps codec_data 提取 SPS/PPS
+                        if (self->m_spsPpsAnnexB.isEmpty()) {
+                            GstPad *pad = gst_element_get_static_pad(self->m_h264parse, "src");
+                            if (pad) {
+                                GstCaps *caps = gst_pad_get_current_caps(pad);
+                                if (caps) {
+                                    GstStructure *s = gst_caps_get_structure(caps, 0);
+                                    const GValue *cdVal = gst_structure_get_value(s, "codec_data");
+                                    if (cdVal) {
+                                        GstBuffer *cdBuf = gst_value_get_buffer(cdVal);
+                                        GstMapInfo cdMap;
+                                        if (gst_buffer_map(cdBuf, &cdMap, GST_MAP_READ)) {
+                                            const guint8 *cd = cdMap.data;
+                                            int cdSize = static_cast<int>(cdMap.size);
+                                            if (cdSize >= 7) {
+                                                static const char sc[4] = {0, 0, 0, 1};
+                                                self->m_nalLengthSize = (cd[4] & 0x03) + 1;
+                                                int numSPS = cd[5] & 0x1F;
+                                                int pos = 6;
+                                                QByteArray annexB;
+                                                for (int i = 0; i < numSPS && pos + 2 <= cdSize; i++) {
+                                                    int len = (cd[pos] << 8) | cd[pos + 1]; pos += 2;
+                                                    if (pos + len <= cdSize) {
+                                                        annexB.append(sc, 4);
+                                                        annexB.append(reinterpret_cast<const char*>(cd + pos), len);
+                                                        pos += len;
+                                                    }
+                                                }
+                                                if (pos < cdSize) {
+                                                    int numPPS = cd[pos] & 0xFF; pos++;
+                                                    for (int i = 0; i < numPPS && pos + 2 <= cdSize; i++) {
+                                                        int len = (cd[pos] << 8) | cd[pos + 1]; pos += 2;
+                                                        if (pos + len <= cdSize) {
+                                                            annexB.append(sc, 4);
+                                                            annexB.append(reinterpret_cast<const char*>(cd + pos), len);
+                                                            pos += len;
+                                                        }
+                                                    }
+                                                }
+                                                self->m_spsPpsAnnexB = annexB;
+                                                qDebug() << "AppSrc probe: 提取 SPS/PPS" << annexB.size() << "bytes, nalLenSize=" << self->m_nalLengthSize;
+                                            }
+                                            gst_buffer_unmap(cdBuf, &cdMap);
+                                        }
+                                    }
+                                    gst_caps_unref(caps);
+                                }
+                                gst_object_unref(pad);
+                            }
+                        }
+
                         GstMapInfo map;
                         if (gst_buffer_map(buffer, &map, GST_MAP_READ)) {
-                            QByteArray naluData(reinterpret_cast<const char*>(map.data), static_cast<int>(map.size));
+                            const guint8 *raw = map.data;
+                            int rawSize = static_cast<int>(map.size);
                             bool isKeyFrame = !GST_BUFFER_FLAG_IS_SET(buffer, GST_BUFFER_FLAG_DELTA_UNIT);
+
+                            bool isAnnexB = (rawSize >= 4 && raw[0] == 0 && raw[1] == 0 &&
+                                             ((raw[2] == 0 && raw[3] == 1) || raw[2] == 1));
+
+                            QByteArray naluData;
+                            if (isAnnexB) {
+                                naluData = QByteArray(reinterpret_cast<const char*>(raw), rawSize);
+                            } else {
+                                static const char sc[4] = {0, 0, 0, 1};
+                                int nlSize = self->m_nalLengthSize;
+                                naluData.reserve(rawSize + 128);
+
+                                if (isKeyFrame && !self->m_spsPpsAnnexB.isEmpty()) {
+                                    naluData.append(self->m_spsPpsAnnexB);
+                                }
+
+                                int pos = 0;
+                                while (pos + nlSize <= rawSize) {
+                                    quint32 nalLen = 0;
+                                    for (int i = 0; i < nlSize; i++)
+                                        nalLen = (nalLen << 8) | raw[pos + i];
+                                    pos += nlSize;
+                                    if (nalLen == 0 || pos + static_cast<int>(nalLen) > rawSize) break;
+                                    naluData.append(sc, 4);
+                                    naluData.append(reinterpret_cast<const char*>(raw + pos), static_cast<int>(nalLen));
+                                    pos += static_cast<int>(nalLen);
+                                }
+                            }
+
                             qint64 idx = self->m_naluFrameIndex.fetch_add(1, std::memory_order_relaxed);
                             gst_buffer_unmap(buffer, &map);
                             self->m_naluStore->addFrame(naluData, idx, isKeyFrame);
@@ -1006,6 +1171,10 @@ void GstPlayer::destroyPipeline()
     // ⭐ 重置 transceiver 标志（下次连接需要重新添加）
     m_transceiverAdded = false;
     
+    // 重置 AVCC→Annex-B 状态（下次连接重新提取 SPS/PPS）
+    m_spsPpsAnnexB.clear();
+    m_nalLengthSize = 4;
+
     // 🔥 v10.3: 重置防花屏状态
     m_waitingForKeyframe.store(false);
     m_preDecodeDiscont.store(false);
