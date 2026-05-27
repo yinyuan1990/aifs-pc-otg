@@ -58,10 +58,13 @@ Rectangle {
     property real videoOffsetX: 0          // X轴偏移（相对于中心）
     property real videoOffsetY: 0          // Y轴偏移（相对于中心）
 
+    onVideoZoomChanged: liveZoomSynced()
+    onVideoOffsetXChanged: liveZoomSynced()
+    onVideoOffsetYChanged: liveZoomSynced()
+
     // ⭐ 慢放回放窗口的 独立 局部缩放 (S+滚轮 触发, 鼠标位置为中心)
-    //    跟实时流的 videoZoom 解耦 — 实时流缩放不再带动慢放, 慢放也不会反过来影响实时流.
-    //    需求来源: 用户希望对回放画面单独放大查看细节, 同时实时流保持原视角.
-    //    pcActivationLevel >= 2 才生效 (与原"慢放跟随放大"门槛一致).
+    //    慢放跟实时流的 videoZoom 解耦, 满放跟随实时流同步.
+    //    pcActivationLevel >= 2 才生效.
     property real slowmoZoom: 1.0          // 慢放本地缩放 1.0 - 5.0
     property real slowmoOffsetX: 0
     property real slowmoOffsetY: 0
@@ -76,6 +79,7 @@ Rectangle {
     signal gridSyncZoomDelta(real deltaZoom)                   // 同步缩放增量 (各 item 以自己中心缩放)
     signal gridSyncDrag(real dx, real dy)                      // 同步拖拽偏移
     signal gridSyncResetZoom()                                  // 同步重置缩放到 1.0
+    signal liveZoomSynced()                                      // 实时流缩放同步到满放 item
     
     // ⭐ 本地设置存储（持久化）
     Settings {
@@ -846,8 +850,9 @@ Rectangle {
                     }
                 }
                 
-                // 截图质量下拉列表
+                // 截图质量下拉列表（已改用H.264 IDR编码，JPEG质量参数不再生效，隐藏）
                 Row {
+                    visible: false
                     spacing: 4
                     height: parent.height
                     
@@ -1753,6 +1758,23 @@ Rectangle {
                                 gridCell.itemZoom = 1.0
                                 gridCell.itemOffsetX = 0
                                 gridCell.itemOffsetY = 0
+                            }
+                            function onLiveZoomSynced() {
+                                if (!gridCell.hasData || mainPage.pcActivationLevel < 2) return
+                                gridCell.itemZoom = mainPage.videoZoom
+                                if (mainPage.videoZoom <= 1.0) {
+                                    gridCell.itemOffsetX = 0
+                                    gridCell.itemOffsetY = 0
+                                } else {
+                                    var maxOffsetX = imageContainer.width * (mainPage.videoZoom - 1) / 2
+                                    var maxOffsetY = imageContainer.height * (mainPage.videoZoom - 1) / 2
+                                    var liveMaxX = captureManager.displayWidth * (mainPage.videoZoom - 1) / 2
+                                    var liveMaxY = captureManager.displayHeight * (mainPage.videoZoom - 1) / 2
+                                    var ratioX = liveMaxX > 0 ? mainPage.videoOffsetX / liveMaxX : 0
+                                    var ratioY = liveMaxY > 0 ? mainPage.videoOffsetY / liveMaxY : 0
+                                    gridCell.itemOffsetX = ratioX * maxOffsetX
+                                    gridCell.itemOffsetY = ratioY * maxOffsetY
+                                }
                             }
                         }
 
@@ -6754,7 +6776,7 @@ Rectangle {
                 // 对比列表
                 Repeater {
                     model: [
-                        { feature: "截图质量", level1: "60（固定）", level2: "60 ~ 100（可调）" },
+                        { feature: "截图质量", level1: "H.264 无损", level2: "H.264 无损" },
                         { feature: "帧率上限", level1: "≤ 120 fps", level2: "不限制" },
                         { feature: "超级帧率上限", level1: "≤ 240", level2: "不限制" },
                         { feature: "实时流局部放大", level1: "✅ 支持", level2: "✅ 支持" },
