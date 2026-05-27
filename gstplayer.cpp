@@ -1026,7 +1026,7 @@ void GstPlayer::createEncodePipeline()
         "! h264parse "
         "! avdec_h264 "
         "! videoconvert "
-        "! mfh264enc gop-size=1 "
+        "! mfh264enc gop-size=1 bitrate=30000 max-bitrate=50000 qp-i=18 "
         "! h264parse name=enc_parse config-interval=-1 "
         "! appsink name=enc_sink emit-signals=true sync=false async=false max-buffers=2 drop=true";
 
