@@ -1831,6 +1831,22 @@ GstBusSyncReply GstPlayer::onBusSyncMessage(GstBus *bus, GstMessage *message, gp
         GError *err = nullptr;
         gchar *debug = nullptr;
         gst_message_parse_error(message, &err, &debug);
+
+        const gchar *srcName = GST_MESSAGE_SRC(message) ?
+            GST_OBJECT_NAME(GST_MESSAGE_SRC(message)) : "";
+        bool isStoreBranch = (g_str_has_prefix(srcName, "store_") ||
+                              g_strcmp0(srcName, "nalu_store_queue") == 0 ||
+                              g_strcmp0(srcName, "nalu_store_sink") == 0);
+
+        if (isStoreBranch) {
+            captureDebugLog("GST", QString("Store branch error (IGNORED): %1 | src=%2 | debug=%3")
+                .arg(err->message).arg(srcName).arg(debug));
+            qDebug() << "⚠️ Store branch error (ignored):" << err->message << "src=" << srcName;
+            g_error_free(err);
+            g_free(debug);
+            return GST_BUS_DROP;
+        }
+
         diagLog(QString("❌ ERROR: %1 | debug: %2").arg(err->message).arg(debug));
         qCritical() << "❌ GStreamer 错误:" << err->message;
         g_error_free(err);
