@@ -340,16 +340,11 @@ private:
     QImage decodeFromDisk(int itemIndex, int frameOffset);
     static QByteArray readNaluFile(const QString &dir, int frameOffset);
     void buildKeyFrameOffsets(CaptureItem &item);
-    static int findNearestKeyOffset(const QString &dir, const QVector<int> &keyFrameOffsets,
-                                    int frameOffset, int totalFrames);
-    static int findFirstIdrOffset(const QString &dir, int totalFrames);
     void scheduleFrameDecode(int itemIndex, int frameOffset);
     bool tryGetFrameCache(int itemIndex, int frameOffset, QImage *out) const;
     void putFrameCache(int itemIndex, int frameOffset, const QImage &img);
     void evictFrameCache();
     void syncColorToJpegEncoder();
-    QMutex &itemDecodeMutex(int itemIndex);
-    void clearItemDecoder(int itemIndex);
 
 private:
     // 每个 item 独立 GStreamer 解码器（avdec_h264，不与实时流 GPU 竞争）
@@ -358,7 +353,6 @@ private:
         int lastOffset = -1;
     };
     QHash<int, ItemDecodeState> m_itemDecoders;
-    QHash<int, QMutex*> m_itemDecodeMutexes;
     GpuPipeline *m_gpuPipeline = nullptr;  // GPU 管道（颜色调整）
     GstPlayer *m_gstPlayer = nullptr;      // GStreamer 播放器（NALU 帧存储）
     QVector<CaptureItem> m_items;
@@ -415,6 +409,7 @@ private:
     QMutex m_mutex;
     QMutex m_decodeMutex;
     QSet<qint64> m_pendingDecodes;
+    std::atomic<int> m_clearGeneration{0};
 
     // 日志计数
     qint64 m_lastLogFrame = 0;
