@@ -69,7 +69,8 @@ QImage GstCaptureDecoder::frameToImage()
         if (m_swsCtx) sws_freeContext(m_swsCtx);
         m_swsCtx = sws_getContext(w, h, (AVPixelFormat)m_frame->format,
                                   w, h, AV_PIX_FMT_BGRA,
-                                  SWS_FAST_BILINEAR, nullptr, nullptr, nullptr);
+                                  SWS_BICUBIC | SWS_FULL_CHR_H_INT | SWS_ACCURATE_RND,
+                                  nullptr, nullptr, nullptr);
         m_swsWidth = w;
         m_swsHeight = h;
     }
