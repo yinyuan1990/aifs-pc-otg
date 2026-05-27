@@ -1598,6 +1598,7 @@ Rectangle {
                         property bool isSelected: hasData && captureManager.currentItemIndex === dataIndex
                         property int currentFrame: hasData ? captureManager.getCurrentOffset(dataIndex) : 0
                         property int totalFrames: hasData ? captureManager.getTotalFrames(dataIndex) : 0
+                        property int frameVersion: 0
                         
                         function rebindFrameProperties() {
                             gridCell.currentFrame = Qt.binding(function() {
@@ -1627,11 +1628,9 @@ Rectangle {
                                 gridCell.rebindFrameProperties()
                             }
                             function onFrameChanged(itemIndex, frameOffset) {
-                                // 调试日志
-                                console.log("📥 QML onFrameChanged: itemIndex=" + itemIndex + " frameOffset=" + frameOffset + " myDataIndex=" + gridCell.dataIndex)
                                 if (itemIndex === gridCell.dataIndex) {
-                                    console.log("✅ 匹配！设置 currentFrame=" + frameOffset)
                                     gridCell.currentFrame = frameOffset
+                                    gridCell.frameVersion++
                                 }
                             }
                         }
@@ -1910,7 +1909,7 @@ Rectangle {
                                 width: parent.width * gridCell.itemZoom
                                 height: parent.height * gridCell.itemZoom
                                 
-                                source: gridCell.hasData ? "image://capture/frame/" + gridCell.dataIndex + "/" + gridCell.currentFrame : ""
+                                source: gridCell.hasData ? "image://capture/frame/" + gridCell.dataIndex + "/" + gridCell.currentFrame + "?v=" + gridCell.frameVersion : ""
                                 fillMode: Image.Stretch  // 拉伸铺满，完全填充容器
                                 cache: false
                                 visible: gridCell.hasData

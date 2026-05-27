@@ -114,6 +114,61 @@ private:
 };
 
 /**
+ * 抓拍解码专用线程（独立链路）
+ * 拥有独立的 NaluDecoder，滑动窗口缓存解码帧
+ * 支持100个抓拍项×481帧的即时滚动浏览
+ */
+class CaptureDecodeThread : public QThread
+{
+    Q_OBJECT
+public:
+    explicit CaptureDecodeThread(NaluFrameStore *store, QObject *parent = nullptr);
+    ~CaptureDecodeThread();
+
+    QImage tryGetCached(qint64 globalIndex);
+    void requestFrame(int itemIndex, int frameOffset, qint64 globalIndex,
+                      qint64 rangeStart, qint64 rangeEnd);
+    void setRotation(int rotation);
+    void stop();
+    void clearCache();
+
+signals:
+    void frameDecoded(int itemIndex, int frameOffset);
+
+protected:
+    void run() override;
+
+private:
+    void evictCache();
+
+    NaluFrameStore *m_store;
+    NaluDecoder *m_decoder = nullptr;
+    std::atomic<bool> m_running{true};
+    std::atomic<int> m_rotation{0};
+
+    QMutex m_queueMutex;
+    QWaitCondition m_queueCondition;
+    struct DecodeRequest {
+        int itemIndex;
+        int frameOffset;
+        qint64 globalIndex;
+        bool isPrefetch;
+    };
+    QQueue<DecodeRequest> m_decodeQueue;
+
+    mutable QMutex m_cacheMutex;
+    struct CacheEntry {
+        QImage image;
+        qint64 accessOrder;
+    };
+    QHash<qint64, CacheEntry> m_cache;
+    qint64 m_accessCounter = 0;
+    static constexpr int MAX_CACHE = 50;
+
+    qint64 m_lastRequestedIndex = -1;
+};
+
+/**
  * 抓拍 Item
  */
 struct CaptureItem {
@@ -128,7 +183,6 @@ struct CaptureItem {
     int validRangeId = -1;      // 在 GpuJpegEncoder 中注册的有效范围 ID
     QString sessionPrefix;
     QImage liveSnapshot;        // 抓拍瞬间的直播画面（永久兜底）
-    QVector<QImage> decodedFrames; // 预解码帧（无损原始像素，QImage COW 共享）
 
     int totalFrames() const { return static_cast<int>(endIndex - startIndex + 1); }
     int eventOffset() const { return static_cast<int>(eventIndex - startIndex); }
@@ -330,6 +384,7 @@ signals:
 
 private slots:
     void onFrameEncoded(qint64 index);
+    void onCaptureFrameDecoded(int itemIndex, int frameOffset);
 
 private:
     void removeOldest();
@@ -340,7 +395,8 @@ private:
     void syncColorToJpegEncoder();  // 同步颜色参数到 JPEG 编码器
 
 private:
-    NaluDecoder *m_naluDecoder = nullptr;    // H.264 NALU 解码器
+    static constexpr int DECODE_THREAD_COUNT = 3;
+    CaptureDecodeThread *m_decodeThreads[DECODE_THREAD_COUNT] = {};  // 抓拍解码线程池（独立链路）
     GpuPipeline *m_gpuPipeline = nullptr;  // GPU 管道（颜色调整）
     GstPlayer *m_gstPlayer = nullptr;      // GStreamer 播放器（NALU 帧存储）
     QVector<CaptureItem> m_items;
