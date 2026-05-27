@@ -412,8 +412,10 @@ CaptureManager::CaptureManager(QObject *parent)
 
 CaptureManager::~CaptureManager()
 {
-    delete m_naluDecoder;
-    m_naluDecoder = nullptr;
+    for (auto &state : m_itemDecoders) {
+        delete state.decoder;
+    }
+    m_itemDecoders.clear();
 }
 
 void CaptureManager::ensureCapturesDir()
@@ -607,10 +609,6 @@ void CaptureManager::setGstPlayer(GstPlayer *player)
 
         m_gstPlayer = player;
 
-        if (!m_naluDecoder) {
-            m_naluDecoder = new NaluDecoder(nullptr, this);
-        }
-
         if (m_gstPlayer->naluFrameStore()) {
             connect(m_gstPlayer->naluFrameStore(), &NaluFrameStore::frameStored,
                     this, &CaptureManager::onFrameEncoded, Qt::QueuedConnection);
@@ -684,8 +682,7 @@ void CaptureManager::capture()
     
     qint64 eventIndex = -1;
     
-    qDebug() << "📷 Capture: naluDecoder=" << (m_naluDecoder ? "有效" : "NULL")
-             << ", slowMotionActive=" << m_slowMotionActive
+    qDebug() << "📷 Capture: slowMotionActive=" << m_slowMotionActive
              << ", slowMotionPlayer=" << (m_slowMotionPlayer ? "有效" : "NULL");
 
     if (m_gstPlayer && m_gstPlayer->naluFrameStore()) {
@@ -840,24 +837,29 @@ QByteArray CaptureManager::readNaluFile(const QString &dir, int frameOffset)
 
 QImage CaptureManager::decodeFromDisk(int itemIndex, int frameOffset)
 {
-    if (!m_naluDecoder) return QImage();
     if (itemIndex < 0 || itemIndex >= m_items.size()) return QImage();
 
     const CaptureItem &item = m_items[itemIndex];
     if (frameOffset < 0 || frameOffset >= item.totalFrames()) return QImage();
 
-    bool sequential = (itemIndex == m_lastDecodeItem &&
-                       frameOffset == m_lastDecodeOffset + 1);
+    // 每个 item 独立解码器（懒创建）
+    ItemDecodeState &state = m_itemDecoders[itemIndex];
+    if (!state.decoder) {
+        state.decoder = new NaluDecoder(nullptr);
+    }
 
+    bool sequential = (frameOffset == state.lastOffset + 1);
     QImage result;
 
+    // 顺序解码（同 item 下一帧，~2ms）
     if (sequential) {
         QByteArray data = readNaluFile(item.naluDir, frameOffset);
         if (!data.isEmpty()) {
-            result = m_naluDecoder->decodeSingleNalu(data);
+            result = state.decoder->decodeSingleNalu(data);
         }
     }
 
+    // 顺序失败 → 从最近 keyframe 开始，中间帧全部缓存
     if (result.isNull()) {
         int keyOffset = 0;
         for (int i = item.keyFrameOffsets.size() - 1; i >= 0; --i) {
@@ -867,23 +869,35 @@ QImage CaptureManager::decodeFromDisk(int itemIndex, int frameOffset)
             }
         }
 
-        m_naluDecoder->flush();
+        state.decoder->flush();
 
         for (int off = keyOffset; off <= frameOffset; off++) {
             QByteArray data = readNaluFile(item.naluDir, off);
-            if (!data.isEmpty()) {
-                QImage img = m_naluDecoder->decodeSingleNalu(data);
-                if (off == frameOffset && !img.isNull()) {
-                    result = img;
+            if (data.isEmpty()) continue;
+
+            QImage img = state.decoder->decodeSingleNalu(data);
+            if (img.isNull()) continue;
+
+            if (off == frameOffset) {
+                result = img;
+            } else {
+                // 缓存中间帧（旋转后存入）
+                QImage cached = img;
+                if (m_videoRotation != 0) {
+                    QTransform t;
+                    t.rotate(m_videoRotation);
+                    cached = cached.transformed(t, Qt::FastTransformation);
                 }
+                qint64 midKey = qint64(itemIndex) * 100000 + off;
+                evictFrameCache();
+                m_frameCache[midKey] = {cached, ++m_frameCacheCounter};
             }
         }
     }
 
     if (result.isNull()) return QImage();
 
-    m_lastDecodeItem = itemIndex;
-    m_lastDecodeOffset = frameOffset;
+    state.lastOffset = frameOffset;
 
     if (m_videoRotation != 0) {
         QTransform t;
@@ -924,11 +938,13 @@ void CaptureManager::clearAll()
     m_items.clear();
     m_cachedItemIndex = -1;
     m_cachedImage = QImage();
-    m_frameCache.clear();
-    m_frameCacheCounter = 0;
-    m_lastDecodeItem = -1;
-    m_lastDecodeOffset = -1;
-    if (m_naluDecoder) m_naluDecoder->flush();
+    {
+        QMutexLocker decodeLock(&m_decodeMutex);
+        m_frameCache.clear();
+        m_frameCacheCounter = 0;
+        for (auto &state : m_itemDecoders) delete state.decoder;
+        m_itemDecoders.clear();
+    }
 
     emit countChanged();
     setCurrentItemIndex(-1);
@@ -938,12 +954,20 @@ void CaptureManager::removeItem(int index)
 {
     if (index < 0 || index >= m_items.size()) return;
 
-    // 清除该 item 相关的帧缓存
-    for (auto it = m_frameCache.begin(); it != m_frameCache.end(); ) {
-        if (static_cast<int>(it.key() / 100000) == index) {
-            it = m_frameCache.erase(it);
-        } else {
-            ++it;
+    // 清除该 item 的解码器和帧缓存
+    {
+        QMutexLocker decodeLock(&m_decodeMutex);
+        auto decIt = m_itemDecoders.find(index);
+        if (decIt != m_itemDecoders.end()) {
+            delete decIt.value().decoder;
+            m_itemDecoders.erase(decIt);
+        }
+        for (auto it = m_frameCache.begin(); it != m_frameCache.end(); ) {
+            if (static_cast<int>(it.key() / 100000) == index) {
+                it = m_frameCache.erase(it);
+            } else {
+                ++it;
+            }
         }
     }
 
@@ -1056,6 +1080,8 @@ QImage CaptureManager::getFrameImage(int itemIndex, int frameOffset)
         return QImage();
     }
 
+    QMutexLocker decodeLock(&m_decodeMutex);
+
     CaptureItem &item = m_items[itemIndex];
 
     // 1. 单帧快速缓存
@@ -1077,7 +1103,7 @@ QImage CaptureManager::getFrameImage(int itemIndex, int frameOffset)
         return m_cachedImage;
     }
 
-    // 3. 同步解码
+    // 3. 同步解码（per-item 解码器，含中间帧缓存）
     QImage img = decodeFromDisk(itemIndex, frameOffset);
 
     if (img.isNull()) {
@@ -1105,8 +1131,11 @@ void CaptureManager::setVideoRotation(int rotation)
     if (m_videoRotation != rotation) {
         m_videoRotation = rotation;
         m_cachedImage = QImage();
-        m_frameCache.clear();
-        m_frameCacheCounter = 0;
+        {
+            QMutexLocker decodeLock(&m_decodeMutex);
+            m_frameCache.clear();
+            m_frameCacheCounter = 0;
+        }
         emit videoRotationChanged();
     }
 }

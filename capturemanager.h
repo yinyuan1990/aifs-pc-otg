@@ -340,7 +340,12 @@ private:
     void syncColorToJpegEncoder();
 
 private:
-    NaluDecoder *m_naluDecoder = nullptr;  // GPU 硬件解码器（同步解码，无需线程）
+    // 每个 item 独立解码器（避免切换 item 时 flush 丢状态）
+    struct ItemDecodeState {
+        NaluDecoder *decoder = nullptr;
+        int lastOffset = -1;
+    };
+    QHash<int, ItemDecodeState> m_itemDecoders;
     GpuPipeline *m_gpuPipeline = nullptr;  // GPU 管道（颜色调整）
     GstPlayer *m_gstPlayer = nullptr;      // GStreamer 播放器（NALU 帧存储）
     QVector<CaptureItem> m_items;
@@ -394,11 +399,8 @@ private:
     qint64 m_frameCacheCounter = 0;
     static constexpr int MAX_FRAME_CACHE = 50;
 
-    // 顺序解码追踪（跳过 keyframe 重置）
-    int m_lastDecodeItem = -1;
-    int m_lastDecodeOffset = -1;
-
     QMutex m_mutex;
+    QMutex m_decodeMutex;  // 保护 m_itemDecoders, m_frameCache（ImageProvider 后台线程调用）
 
     // 日志计数
     qint64 m_lastLogFrame = 0;
