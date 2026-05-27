@@ -58,9 +58,9 @@ Rectangle {
     property real videoOffsetX: 0          // X轴偏移（相对于中心）
     property real videoOffsetY: 0          // Y轴偏移（相对于中心）
 
-    onVideoZoomChanged: liveZoomSynced()
-    onVideoOffsetXChanged: liveZoomSynced()
-    onVideoOffsetYChanged: liveZoomSynced()
+    onVideoZoomChanged: { slowmoZoom = videoZoom }
+    onVideoOffsetXChanged: { slowmoOffsetX = videoOffsetX }
+    onVideoOffsetYChanged: { slowmoOffsetY = videoOffsetY }
 
     // ⭐ 慢放回放窗口的 独立 局部缩放 (S+滚轮 触发, 鼠标位置为中心)
     //    慢放跟实时流的 videoZoom 解耦, 满放跟随实时流同步.
@@ -79,7 +79,6 @@ Rectangle {
     signal gridSyncZoomDelta(real deltaZoom)                   // 同步缩放增量 (各 item 以自己中心缩放)
     signal gridSyncDrag(real dx, real dy)                      // 同步拖拽偏移
     signal gridSyncResetZoom()                                  // 同步重置缩放到 1.0
-    signal liveZoomSynced()                                      // 实时流缩放同步到满放 item
     
     // ⭐ 本地设置存储（持久化）
     Settings {
@@ -1759,23 +1758,6 @@ Rectangle {
                                 gridCell.itemOffsetX = 0
                                 gridCell.itemOffsetY = 0
                             }
-                            function onLiveZoomSynced() {
-                                if (!gridCell.hasData) return
-                                gridCell.itemZoom = mainPage.videoZoom
-                                if (mainPage.videoZoom <= 1.0) {
-                                    gridCell.itemOffsetX = 0
-                                    gridCell.itemOffsetY = 0
-                                } else {
-                                    var maxOffsetX = imageContainer.width * (mainPage.videoZoom - 1) / 2
-                                    var maxOffsetY = imageContainer.height * (mainPage.videoZoom - 1) / 2
-                                    var liveMaxX = captureManager.displayWidth * (mainPage.videoZoom - 1) / 2
-                                    var liveMaxY = captureManager.displayHeight * (mainPage.videoZoom - 1) / 2
-                                    var ratioX = liveMaxX > 0 ? mainPage.videoOffsetX / liveMaxX : 0
-                                    var ratioY = liveMaxY > 0 ? mainPage.videoOffsetY / liveMaxY : 0
-                                    gridCell.itemOffsetX = ratioX * maxOffsetX
-                                    gridCell.itemOffsetY = ratioY * maxOffsetY
-                                }
-                            }
                         }
 
                         MouseArea {
@@ -2749,10 +2731,9 @@ Rectangle {
                             fillMode: VideoOutput.Stretch
                             visible: slowMotionPlayer.hasContent
                             
-                            // ⭐ 慢放独立缩放 — 用 slowmoZoom/slowmoOffsetX/Y, 不再继承实时流的 videoZoom
-                            //    pcActivationLevel < 2 时强制 1.0 (老版逻辑保留: 低等级无局部放大)
-                            x: parent.width / 2 - width / 2 + (mainPage.pcActivationLevel >= 2 ? mainPage.slowmoOffsetX : 0)
-                            y: parent.height / 2 - height / 2 + (mainPage.pcActivationLevel >= 2 ? mainPage.slowmoOffsetY : 0)
+                            // ⭐ 满放跟随实时流 videoZoom, 通过 slowmoZoom/slowmoOffsetX/Y 同步
+                            x: parent.width / 2 - width / 2 + mainPage.slowmoOffsetX
+                            y: parent.height / 2 - height / 2 + mainPage.slowmoOffsetY
 
                             transform: [
                                 Rotation {
@@ -2763,7 +2744,7 @@ Rectangle {
                                 Scale {
                                     origin.x: slowmoVideoOutput.width / 2
                                     origin.y: slowmoVideoOutput.height / 2
-                                    property real baseZoom: mainPage.pcActivationLevel >= 2 ? mainPage.slowmoZoom : 1.0
+                                    property real baseZoom: mainPage.slowmoZoom
                                     xScale: mainPage.videoMirrorMode === "horizontal" ? -baseZoom : baseZoom
                                     yScale: mainPage.videoMirrorMode === "vertical" ? -baseZoom : baseZoom
                                 }
