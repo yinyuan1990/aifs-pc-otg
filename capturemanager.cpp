@@ -392,180 +392,6 @@ void JpegEncoder::run()
     cleanupEncoder();
 }
 
-// ============== CaptureDecodeThread ==============
-
-CaptureDecodeThread::CaptureDecodeThread(NaluFrameStore *store, QObject *parent)
-    : QThread(parent)
-    , m_store(store)
-{
-    start(QThread::NormalPriority);
-}
-
-CaptureDecodeThread::~CaptureDecodeThread()
-{
-    stop();
-    wait();
-}
-
-void CaptureDecodeThread::stop()
-{
-    m_running = false;
-    m_queueCondition.wakeAll();
-}
-
-void CaptureDecodeThread::clearCache()
-{
-    QMutexLocker lock(&m_cacheMutex);
-    m_cache.clear();
-    m_accessCounter = 0;
-}
-
-void CaptureDecodeThread::setRotation(int rotation)
-{
-    if (m_rotation.load() != rotation) {
-        m_rotation.store(rotation);
-        clearCache();
-    }
-}
-
-QImage CaptureDecodeThread::tryGetCached(qint64 globalIndex)
-{
-    QMutexLocker lock(&m_cacheMutex);
-    auto it = m_cache.find(globalIndex);
-    if (it != m_cache.end()) {
-        it.value().accessOrder = ++m_accessCounter;
-        return it.value().image;
-    }
-    return QImage();
-}
-
-void CaptureDecodeThread::requestFrame(int itemIndex, int frameOffset, qint64 globalIndex,
-                                        qint64 rangeStart, qint64 rangeEnd)
-{
-    QMutexLocker lock(&m_queueMutex);
-
-    // 只移除同一 item 的旧请求，保留其他 item 的请求（Ctrl+滚轮批量模式）
-    for (int i = m_decodeQueue.size() - 1; i >= 0; --i) {
-        if (m_decodeQueue[i].itemIndex == itemIndex) {
-            m_decodeQueue.removeAt(i);
-        }
-    }
-
-    {
-        QMutexLocker cacheLock(&m_cacheMutex);
-        if (!m_cache.contains(globalIndex)) {
-            m_decodeQueue.enqueue({itemIndex, frameOffset, globalIndex, false});
-        }
-    }
-
-    // 队列中有多个 item 请求时 = 批量模式，跳过预取
-    bool batchMode = m_decodeQueue.size() > 2;
-
-    if (!batchMode) {
-        int direction = 1;
-        if (m_lastRequestedIndex >= 0) {
-            if (globalIndex < m_lastRequestedIndex) direction = -1;
-            else if (globalIndex == m_lastRequestedIndex) direction = 0;
-        }
-        m_lastRequestedIndex = globalIndex;
-
-        static constexpr int PREFETCH_MAIN = 20;
-        static constexpr int PREFETCH_OTHER = 5;
-
-        int fwdCount = (direction >= 0) ? PREFETCH_MAIN : PREFETCH_OTHER;
-        int bwdCount = (direction <= 0) ? PREFETCH_MAIN : PREFETCH_OTHER;
-
-        for (int i = 1; i <= fwdCount; i++) {
-            qint64 idx = globalIndex + i;
-            if (idx > rangeEnd) break;
-            QMutexLocker cacheLock(&m_cacheMutex);
-            if (!m_cache.contains(idx)) {
-                m_decodeQueue.enqueue({itemIndex, frameOffset + i, idx, true});
-            }
-        }
-
-        for (int i = 1; i <= bwdCount; i++) {
-            qint64 idx = globalIndex - i;
-            if (idx < rangeStart) break;
-            QMutexLocker cacheLock(&m_cacheMutex);
-            if (!m_cache.contains(idx)) {
-                m_decodeQueue.enqueue({itemIndex, frameOffset - i, idx, true});
-            }
-        }
-    }
-
-    m_queueCondition.wakeOne();
-}
-
-void CaptureDecodeThread::evictCache()
-{
-    while (m_cache.size() >= MAX_CACHE) {
-        qint64 lruKey = -1;
-        qint64 lruOrder = INT64_MAX;
-        for (auto it = m_cache.begin(); it != m_cache.end(); ++it) {
-            if (it.value().accessOrder < lruOrder) {
-                lruOrder = it.value().accessOrder;
-                lruKey = it.key();
-            }
-        }
-        if (lruKey >= 0) {
-            m_cache.remove(lruKey);
-        } else {
-            break;
-        }
-    }
-}
-
-void CaptureDecodeThread::run()
-{
-    m_decoder = new NaluDecoder(m_store);
-
-    while (m_running) {
-        DecodeRequest req;
-        {
-            QMutexLocker lock(&m_queueMutex);
-            while (m_decodeQueue.isEmpty() && m_running) {
-                m_queueCondition.wait(&m_queueMutex);
-            }
-            if (!m_running) break;
-            req = m_decodeQueue.dequeue();
-        }
-
-        {
-            QMutexLocker cacheLock(&m_cacheMutex);
-            if (m_cache.contains(req.globalIndex)) {
-                if (!req.isPrefetch) {
-                    emit frameDecoded(req.itemIndex, req.frameOffset);
-                }
-                continue;
-            }
-        }
-
-        QImage img = m_decoder->decodeFrame(req.globalIndex);
-        if (img.isNull()) continue;
-
-        int rot = m_rotation.load();
-        if (rot != 0) {
-            QTransform t;
-            t.rotate(rot);
-            img = img.transformed(t, Qt::FastTransformation);
-        }
-
-        {
-            QMutexLocker cacheLock(&m_cacheMutex);
-            evictCache();
-            m_cache[req.globalIndex] = {img, ++m_accessCounter};
-        }
-
-        if (!req.isPrefetch) {
-            emit frameDecoded(req.itemIndex, req.frameOffset);
-        }
-    }
-
-    delete m_decoder;
-    m_decoder = nullptr;
-}
-
 // ============== CaptureManager ==============
 
 CaptureManager::CaptureManager(QObject *parent)
@@ -586,13 +412,8 @@ CaptureManager::CaptureManager(QObject *parent)
 
 CaptureManager::~CaptureManager()
 {
-    for (int i = 0; i < DECODE_THREAD_COUNT; i++) {
-        if (m_decodeThreads[i]) {
-            m_decodeThreads[i]->stop();
-            m_decodeThreads[i]->wait();
-            delete m_decodeThreads[i];
-        }
-    }
+    delete m_naluDecoder;
+    m_naluDecoder = nullptr;
 }
 
 void CaptureManager::ensureCapturesDir()
@@ -779,7 +600,6 @@ void CaptureManager::setGpuPipeline(GpuPipeline *pipeline)
 void CaptureManager::setGstPlayer(GstPlayer *player)
 {
     if (m_gstPlayer != player) {
-        // 断开旧连接
         if (m_gstPlayer && m_gstPlayer->naluFrameStore()) {
             disconnect(m_gstPlayer->naluFrameStore(), &NaluFrameStore::frameStored,
                        this, &CaptureManager::onFrameEncoded);
@@ -787,23 +607,15 @@ void CaptureManager::setGstPlayer(GstPlayer *player)
 
         m_gstPlayer = player;
 
-        // 创建解码线程池（独立链路）并连接信号
-        if (m_gstPlayer && m_gstPlayer->naluFrameStore()) {
-            for (int i = 0; i < DECODE_THREAD_COUNT; i++) {
-                if (m_decodeThreads[i]) {
-                    m_decodeThreads[i]->stop();
-                    m_decodeThreads[i]->wait();
-                    delete m_decodeThreads[i];
-                }
-                m_decodeThreads[i] = new CaptureDecodeThread(m_gstPlayer->naluFrameStore(), this);
-                m_decodeThreads[i]->setRotation(m_videoRotation);
-                connect(m_decodeThreads[i], &CaptureDecodeThread::frameDecoded,
-                        this, &CaptureManager::onCaptureFrameDecoded, Qt::QueuedConnection);
-            }
+        if (!m_naluDecoder) {
+            m_naluDecoder = new NaluDecoder(nullptr, this);
+        }
+
+        if (m_gstPlayer->naluFrameStore()) {
             connect(m_gstPlayer->naluFrameStore(), &NaluFrameStore::frameStored,
                     this, &CaptureManager::onFrameEncoded, Qt::QueuedConnection);
-            qDebug() << "CaptureManager: decode thread pool created, threads=" << DECODE_THREAD_COUNT;
         }
+        qDebug() << "CaptureManager: GPU sync decoder ready";
 
         emit gstPlayerChanged();
     }
@@ -829,42 +641,40 @@ void CaptureManager::onFrameEncoded(qint64 index)
     checkPendingCaptures(index);
 }
 
-void CaptureManager::onCaptureFrameDecoded(int itemIndex, int frameOffset)
-{
-    if (itemIndex >= 0 && itemIndex < m_items.size()) {
-        m_cachedImage = QImage();
-        emit frameChanged(itemIndex, frameOffset);
-    }
-}
-
 void CaptureManager::checkPendingCaptures(qint64 frameIndex)
 {
     QMutexLocker lock(&m_mutex);
-    
+
+    NaluFrameStore *store = (m_gstPlayer && m_gstPlayer->naluFrameStore())
+                            ? m_gstPlayer->naluFrameStore() : nullptr;
+
     for (int i = m_pendingCaptures.size() - 1; i >= 0; i--) {
         PendingCapture &pending = m_pendingCaptures[i];
-        
+
         if (pending.itemIndex < 0 || pending.itemIndex >= m_items.size()) {
             m_pendingCaptures.removeAt(i);
             continue;
         }
-        
+
         CaptureItem &item = m_items[pending.itemIndex];
-        
-        // 更新结束索引
-        if (frameIndex > item.endIndex && frameIndex <= pending.targetEndIndex) {
-            item.endIndex = frameIndex;
+
+        // 保存到达的帧到磁盘
+        if (store && frameIndex >= item.startIndex && frameIndex <= pending.targetEndIndex) {
+            int offset = static_cast<int>(frameIndex - item.startIndex);
+            if (offset >= 0 && offset < item.totalFrames() && store->hasFrame(frameIndex)) {
+                QByteArray data = store->getFrame(frameIndex);
+                saveNaluFile(item.naluDir, offset, data);
+                if (store->isKeyFrame(frameIndex)) {
+                    item.keyFrameOffsets.append(offset);
+                    std::sort(item.keyFrameOffsets.begin(), item.keyFrameOffsets.end());
+                }
+                item.savedFrameCount++;
+            }
         }
-        
+
         // 检查是否完成
-        if (item.endIndex >= pending.targetEndIndex) {
-            int idx = pending.itemIndex;
+        if (frameIndex >= pending.targetEndIndex) {
             m_pendingCaptures.removeAt(i);
-            
-            // 异步保存到磁盘
-            QMetaObject::invokeMethod(this, [this, idx]() {
-                saveItemToDisk(idx);
-            }, Qt::QueuedConnection);
         }
     }
 }
@@ -874,7 +684,7 @@ void CaptureManager::capture()
     
     qint64 eventIndex = -1;
     
-    qDebug() << "📷 Capture: decodeThreads=" << (m_decodeThreads[0] ? "有效" : "NULL")
+    qDebug() << "📷 Capture: naluDecoder=" << (m_naluDecoder ? "有效" : "NULL")
              << ", slowMotionActive=" << m_slowMotionActive
              << ", slowMotionPlayer=" << (m_slowMotionPlayer ? "有效" : "NULL");
 
@@ -949,23 +759,19 @@ void CaptureManager::capture()
     qDebug() << "📷 Capture: 最终范围" << startIndex << "-" << endIndex 
              << "总帧数=" << (endIndex - startIndex + 1);
     
-    // 创建 CaptureItem（不需要单独目录，帧文件已经在 captures/frames/ 中）
     CaptureItem item;
     item.id = m_nextId++;
     item.startIndex = startIndex;
     item.eventIndex = eventIndex;
-    item.endIndex = endIndex;  // 直接设置目标结束帧
-    item.currentOffset = item.eventOffset();  // 默认显示事件帧
+    item.endIndex = endIndex;
+    item.currentOffset = item.eventOffset();
     item.timestamp = QDateTime::currentMSecsSinceEpoch();
-    item.dirPath = "";
-    item.saved = true;
 
-    // 注册有效范围（保护 NALU 帧不被环形缓冲覆盖）
-    if (m_gstPlayer && m_gstPlayer->naluFrameStore()) {
-        item.validRangeId = m_gstPlayer->naluFrameStore()->registerValidRange(startIndex, endIndex);
-    }
+    // 创建磁盘目录存 NALU 文件
+    item.naluDir = m_capturesDir + QString("/nalu_%1").arg(item.id, 6, 10, QChar('0'));
+    QDir().mkpath(item.naluDir);
 
-    // 直接抓取当前直播画面（已解码的 BGRA，零延迟）
+    // 直接抓取当前直播画面（已解码的 BGRA，零延迟兜底）
     if (m_gstPlayer) {
         item.liveSnapshot = m_gstPlayer->grabCurrentFrame();
     }
@@ -975,51 +781,154 @@ void CaptureManager::capture()
         item.liveSnapshot = item.liveSnapshot.transformed(transform, Qt::FastTransformation);
     }
 
+    // 从环形缓冲拷贝已有帧到磁盘（零编码，纯文件拷贝）
+    if (m_gstPlayer && m_gstPlayer->naluFrameStore()) {
+        NaluFrameStore *store = m_gstPlayer->naluFrameStore();
+        qint64 saveTo = qMin(endIndex, store->newestIndex());
+        for (qint64 idx = startIndex; idx <= saveTo; idx++) {
+            if (store->hasFrame(idx)) {
+                int offset = static_cast<int>(idx - startIndex);
+                QByteArray data = store->getFrame(idx);
+                saveNaluFile(item.naluDir, offset, data);
+                if (store->isKeyFrame(idx)) {
+                    item.keyFrameOffsets.append(offset);
+                }
+                item.savedFrameCount++;
+            }
+        }
+    }
+
     m_items.append(item);
     int newIndex = m_items.size() - 1;
 
+    // 后续帧待到达后再保存
+    if (item.savedFrameCount < item.totalFrames()) {
+        PendingCapture pending;
+        pending.itemIndex = newIndex;
+        pending.targetEndIndex = endIndex;
+        m_pendingCaptures.append(pending);
+    }
+
     qDebug() << "Capture: item" << item.id
-             << "start:" << startIndex
-             << "event:" << eventIndex
-             << "end:" << endIndex
-             << "total:" << item.totalFrames()
-             << "snapshot:" << (item.liveSnapshot.isNull() ? "NULL" : "OK");
+             << "dir:" << item.naluDir
+             << "range:" << startIndex << "-" << endIndex
+             << "saved:" << item.savedFrameCount << "/" << item.totalFrames()
+             << "keyframes:" << item.keyFrameOffsets.size();
 
     emit countChanged();
     emit itemAdded(newIndex);
     emit captureComplete(newIndex);
 }
 
-void CaptureManager::saveItemToDisk(int itemIndex)
+void CaptureManager::saveNaluFile(const QString &dir, int frameOffset, const QByteArray &data)
 {
-    // 帧文件已经在 GpuJpegEncoder 的 captures/frames/ 目录中
-    // 这个函数现在只用于兼容，实际不需要复制文件
-    if (itemIndex < 0 || itemIndex >= m_items.size()) return;
-    
-    CaptureItem &item = m_items[itemIndex];
-    item.saved = true;
-    
-    qDebug() << "Item" << item.id << "ready, frames:" << item.totalFrames();
-    emit captureComplete(itemIndex);
+    if (data.isEmpty()) return;
+    QString path = dir + QString("/%1.nalu").arg(frameOffset, 6, 10, QChar('0'));
+    QFile file(path);
+    if (file.open(QIODevice::WriteOnly)) {
+        file.write(data);
+    }
+}
+
+QByteArray CaptureManager::readNaluFile(const QString &dir, int frameOffset)
+{
+    QString path = dir + QString("/%1.nalu").arg(frameOffset, 6, 10, QChar('0'));
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) return QByteArray();
+    return file.readAll();
+}
+
+QImage CaptureManager::decodeFromDisk(int itemIndex, int frameOffset)
+{
+    if (!m_naluDecoder) return QImage();
+    if (itemIndex < 0 || itemIndex >= m_items.size()) return QImage();
+
+    const CaptureItem &item = m_items[itemIndex];
+    if (frameOffset < 0 || frameOffset >= item.totalFrames()) return QImage();
+
+    bool sequential = (itemIndex == m_lastDecodeItem &&
+                       frameOffset == m_lastDecodeOffset + 1);
+
+    QImage result;
+
+    if (sequential) {
+        QByteArray data = readNaluFile(item.naluDir, frameOffset);
+        if (!data.isEmpty()) {
+            result = m_naluDecoder->decodeSingleNalu(data);
+        }
+    }
+
+    if (result.isNull()) {
+        int keyOffset = 0;
+        for (int i = item.keyFrameOffsets.size() - 1; i >= 0; --i) {
+            if (item.keyFrameOffsets[i] <= frameOffset) {
+                keyOffset = item.keyFrameOffsets[i];
+                break;
+            }
+        }
+
+        m_naluDecoder->flush();
+
+        for (int off = keyOffset; off <= frameOffset; off++) {
+            QByteArray data = readNaluFile(item.naluDir, off);
+            if (!data.isEmpty()) {
+                QImage img = m_naluDecoder->decodeSingleNalu(data);
+                if (off == frameOffset && !img.isNull()) {
+                    result = img;
+                }
+            }
+        }
+    }
+
+    if (result.isNull()) return QImage();
+
+    m_lastDecodeItem = itemIndex;
+    m_lastDecodeOffset = frameOffset;
+
+    if (m_videoRotation != 0) {
+        QTransform t;
+        t.rotate(m_videoRotation);
+        result = result.transformed(t, Qt::FastTransformation);
+    }
+
+    return result;
+}
+
+void CaptureManager::evictFrameCache()
+{
+    while (m_frameCache.size() >= MAX_FRAME_CACHE) {
+        qint64 lruKey = -1;
+        qint64 lruOrder = INT64_MAX;
+        for (auto it = m_frameCache.begin(); it != m_frameCache.end(); ++it) {
+            if (it.value().accessOrder < lruOrder) {
+                lruOrder = it.value().accessOrder;
+                lruKey = it.key();
+            }
+        }
+        if (lruKey >= 0) m_frameCache.remove(lruKey);
+        else break;
+    }
 }
 
 void CaptureManager::clearAll()
 {
     QMutexLocker lock(&m_mutex);
     m_pendingCaptures.clear();
-    
-    for (const CaptureItem &item : m_items) {
-        if (item.validRangeId >= 0 && m_gstPlayer && m_gstPlayer->naluFrameStore()) {
-            m_gstPlayer->naluFrameStore()->unregisterValidRange(item.validRangeId);
+
+    for (int i = 0; i < m_items.size(); i++) {
+        if (!m_items[i].naluDir.isEmpty()) {
+            QDir(m_items[i].naluDir).removeRecursively();
         }
     }
-    
+
     m_items.clear();
     m_cachedItemIndex = -1;
     m_cachedImage = QImage();
-    for (int i = 0; i < DECODE_THREAD_COUNT; i++) {
-        if (m_decodeThreads[i]) m_decodeThreads[i]->clearCache();
-    }
+    m_frameCache.clear();
+    m_frameCacheCounter = 0;
+    m_lastDecodeItem = -1;
+    m_lastDecodeOffset = -1;
+    if (m_naluDecoder) m_naluDecoder->flush();
 
     emit countChanged();
     setCurrentItemIndex(-1);
@@ -1028,11 +937,19 @@ void CaptureManager::clearAll()
 void CaptureManager::removeItem(int index)
 {
     if (index < 0 || index >= m_items.size()) return;
-    
+
+    // 清除该 item 相关的帧缓存
+    for (auto it = m_frameCache.begin(); it != m_frameCache.end(); ) {
+        if (static_cast<int>(it.key() / 100000) == index) {
+            it = m_frameCache.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
     CaptureItem &item = m_items[index];
-    
-    if (item.validRangeId >= 0 && m_gstPlayer && m_gstPlayer->naluFrameStore()) {
-        m_gstPlayer->naluFrameStore()->unregisterValidRange(item.validRangeId);
+    if (!item.naluDir.isEmpty()) {
+        QDir(item.naluDir).removeRecursively();
     }
     
     m_items.removeAt(index);
@@ -1060,11 +977,7 @@ void CaptureManager::removeOldest()
 
 void CaptureManager::reset()
 {
-    for (int i = 0; i < DECODE_THREAD_COUNT; i++) {
-        if (m_decodeThreads[i]) m_decodeThreads[i]->clearCache();
-    }
     clearAll();
-
     m_nextId = 1;
     qDebug() << "CaptureManager: reset complete";
 }
@@ -1142,35 +1055,38 @@ QImage CaptureManager::getFrameImage(int itemIndex, int frameOffset)
     if (itemIndex < 0 || itemIndex >= m_items.size()) {
         return QImage();
     }
-    
+
     CaptureItem &item = m_items[itemIndex];
 
-    // 1. 检查 QImage 缓存（最近一帧）
+    // 1. 单帧快速缓存
     if (m_cachedItemIndex == itemIndex && m_cachedFrameOffset == frameOffset
         && m_cachedRotation == m_videoRotation
         && !m_cachedImage.isNull()) {
         return m_cachedImage;
     }
 
-    qint64 globalIndex = item.startIndex + frameOffset;
-    CaptureDecodeThread *thread = m_decodeThreads[itemIndex % DECODE_THREAD_COUNT];
-    QImage img;
-
-    // 2. 从解码线程缓存获取（已旋转，零拷贝 COW）
-    if (thread) {
-        img = thread->tryGetCached(globalIndex);
+    // 2. LRU 缓存
+    qint64 key = qint64(itemIndex) * 100000 + frameOffset;
+    auto cacheIt = m_frameCache.find(key);
+    if (cacheIt != m_frameCache.end()) {
+        cacheIt.value().accessOrder = ++m_frameCacheCounter;
+        m_cachedItemIndex = itemIndex;
+        m_cachedFrameOffset = frameOffset;
+        m_cachedRotation = m_videoRotation;
+        m_cachedImage = cacheIt.value().image;
+        return m_cachedImage;
     }
 
-    // 3. 缓存未命中 → 请求异步解码，返回兜底图
+    // 3. 同步解码
+    QImage img = decodeFromDisk(itemIndex, frameOffset);
+
     if (img.isNull()) {
-        if (thread) {
-            thread->requestFrame(itemIndex, frameOffset, globalIndex,
-                                 item.startIndex, item.endIndex);
-        }
-        if (!m_cachedImage.isNull()) return m_cachedImage;
         return item.liveSnapshot;
     }
 
+    // 4. 存入缓存
+    evictFrameCache();
+    m_frameCache[key] = {img, ++m_frameCacheCounter};
     m_cachedItemIndex = itemIndex;
     m_cachedFrameOffset = frameOffset;
     m_cachedRotation = m_videoRotation;
@@ -1181,18 +1097,16 @@ QImage CaptureManager::getFrameImage(int itemIndex, int frameOffset)
 
 void CaptureManager::setVideoRotation(int rotation)
 {
-    // 确保角度是 0, 90, 180, 270 中的一个
     rotation = ((rotation % 360) + 360) % 360;
     if (rotation != 0 && rotation != 90 && rotation != 180 && rotation != 270) {
         rotation = 0;
     }
-    
+
     if (m_videoRotation != rotation) {
         m_videoRotation = rotation;
         m_cachedImage = QImage();
-        for (int i = 0; i < DECODE_THREAD_COUNT; i++) {
-            if (m_decodeThreads[i]) m_decodeThreads[i]->setRotation(rotation);
-        }
+        m_frameCache.clear();
+        m_frameCacheCounter = 0;
         emit videoRotationChanged();
     }
 }
@@ -1258,28 +1172,6 @@ void CaptureManager::setSlowMotionPlayer(SlowMotionPlayer* player)
         m_slowMotionPlayer = player;
         emit slowMotionPlayerChanged();
     }
-}
-
-QImage CaptureManager::loadFrameFromDisk(qint64 globalFrameIndex, const QString &sessionPrefix)
-{
-    Q_UNUSED(sessionPrefix);
-    static qint64 lastValidFrame = -1;
-    static QImage lastValidImage;
-
-    if (m_gpuPipeline) {
-        QImage img = m_gpuPipeline->decodeFrameToImage(globalFrameIndex);
-        if (!img.isNull()) {
-            lastValidFrame = globalFrameIndex;
-            lastValidImage = img;
-            return img;
-        }
-    }
-
-    if (lastValidFrame >= 0 && !lastValidImage.isNull()) {
-        return lastValidImage;
-    }
-
-    return QImage();
 }
 
 qint64 CaptureManager::currentFrameIndex() const

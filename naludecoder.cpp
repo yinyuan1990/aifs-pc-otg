@@ -20,6 +20,13 @@ NaluDecoder::~NaluDecoder()
     cleanupDecoder();
 }
 
+QImage NaluDecoder::decodeSingleNalu(const QByteArray &naluData)
+{
+    QMutexLocker lock(&m_mutex);
+    if (!ensureDecoder()) return QImage();
+    return decodeOneNalu(naluData);
+}
+
 static enum AVPixelFormat naluDecoderHwGetFormat(AVCodecContext *ctx, const enum AVPixelFormat *pix_fmts)
 {
     NaluDecoder *self = static_cast<NaluDecoder*>(ctx->opaque);

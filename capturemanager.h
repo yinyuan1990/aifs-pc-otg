@@ -114,61 +114,6 @@ private:
 };
 
 /**
- * 抓拍解码专用线程（独立链路）
- * 拥有独立的 NaluDecoder，滑动窗口缓存解码帧
- * 支持100个抓拍项×481帧的即时滚动浏览
- */
-class CaptureDecodeThread : public QThread
-{
-    Q_OBJECT
-public:
-    explicit CaptureDecodeThread(NaluFrameStore *store, QObject *parent = nullptr);
-    ~CaptureDecodeThread();
-
-    QImage tryGetCached(qint64 globalIndex);
-    void requestFrame(int itemIndex, int frameOffset, qint64 globalIndex,
-                      qint64 rangeStart, qint64 rangeEnd);
-    void setRotation(int rotation);
-    void stop();
-    void clearCache();
-
-signals:
-    void frameDecoded(int itemIndex, int frameOffset);
-
-protected:
-    void run() override;
-
-private:
-    void evictCache();
-
-    NaluFrameStore *m_store;
-    NaluDecoder *m_decoder = nullptr;
-    std::atomic<bool> m_running{true};
-    std::atomic<int> m_rotation{0};
-
-    QMutex m_queueMutex;
-    QWaitCondition m_queueCondition;
-    struct DecodeRequest {
-        int itemIndex;
-        int frameOffset;
-        qint64 globalIndex;
-        bool isPrefetch;
-    };
-    QQueue<DecodeRequest> m_decodeQueue;
-
-    mutable QMutex m_cacheMutex;
-    struct CacheEntry {
-        QImage image;
-        qint64 accessOrder;
-    };
-    QHash<qint64, CacheEntry> m_cache;
-    qint64 m_accessCounter = 0;
-    static constexpr int MAX_CACHE = 50;
-
-    qint64 m_lastRequestedIndex = -1;
-};
-
-/**
  * 抓拍 Item
  */
 struct CaptureItem {
@@ -178,10 +123,9 @@ struct CaptureItem {
     qint64 endIndex = 0;        // 结束帧索引
     int currentOffset = 0;      // 当前显示偏移
     qint64 timestamp = 0;
-    QString dirPath;            // 保存目录
-    bool saved = false;         // 是否已保存到磁盘
-    int validRangeId = -1;      // 在 GpuJpegEncoder 中注册的有效范围 ID
-    QString sessionPrefix;
+    QString naluDir;            // NALU 文件磁盘目录
+    QVector<int> keyFrameOffsets; // 关键帧偏移列表（相对于 startIndex）
+    int savedFrameCount = 0;    // 已保存到磁盘的帧数
     QImage liveSnapshot;        // 抓拍瞬间的直播画面（永久兜底）
 
     int totalFrames() const { return static_cast<int>(endIndex - startIndex + 1); }
@@ -384,19 +328,19 @@ signals:
 
 private slots:
     void onFrameEncoded(qint64 index);
-    void onCaptureFrameDecoded(int itemIndex, int frameOffset);
 
 private:
     void removeOldest();
     void ensureCapturesDir();
     void checkPendingCaptures(qint64 frameIndex);
-    void saveItemToDisk(int itemIndex);
-    QImage loadFrameFromDisk(qint64 globalFrameIndex, const QString &sessionPrefix = QString());
-    void syncColorToJpegEncoder();  // 同步颜色参数到 JPEG 编码器
+    void saveNaluFile(const QString &dir, int frameOffset, const QByteArray &data);
+    QImage decodeFromDisk(int itemIndex, int frameOffset);
+    static QByteArray readNaluFile(const QString &dir, int frameOffset);
+    void evictFrameCache();
+    void syncColorToJpegEncoder();
 
 private:
-    static constexpr int DECODE_THREAD_COUNT = 3;
-    CaptureDecodeThread *m_decodeThreads[DECODE_THREAD_COUNT] = {};  // 抓拍解码线程池（独立链路）
+    NaluDecoder *m_naluDecoder = nullptr;  // GPU 硬件解码器（同步解码，无需线程）
     GpuPipeline *m_gpuPipeline = nullptr;  // GPU 管道（颜色调整）
     GstPlayer *m_gstPlayer = nullptr;      // GStreamer 播放器（NALU 帧存储）
     QVector<CaptureItem> m_items;
@@ -435,14 +379,27 @@ private:
     bool m_slowMotionActive = false;
     SlowMotionPlayer *m_slowMotionPlayer = nullptr;
     
-    // 缓存
+    // 单帧快速缓存（最近一帧）
     mutable int m_cachedItemIndex = -1;
     mutable int m_cachedFrameOffset = -1;
     mutable int m_cachedRotation = 0;
     mutable QImage m_cachedImage;
-    
+
+    // LRU 帧缓存（同步解码后缓存）
+    struct FrameCacheEntry {
+        QImage image;
+        qint64 accessOrder = 0;
+    };
+    QHash<qint64, FrameCacheEntry> m_frameCache;
+    qint64 m_frameCacheCounter = 0;
+    static constexpr int MAX_FRAME_CACHE = 50;
+
+    // 顺序解码追踪（跳过 keyframe 重置）
+    int m_lastDecodeItem = -1;
+    int m_lastDecodeOffset = -1;
+
     QMutex m_mutex;
-    
+
     // 日志计数
     qint64 m_lastLogFrame = 0;
 };

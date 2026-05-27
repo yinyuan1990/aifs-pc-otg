@@ -21,6 +21,7 @@ public:
     ~NaluDecoder();
 
     QImage decodeFrame(qint64 frameIndex);
+    QImage decodeSingleNalu(const QByteArray &naluData);
     QImage tryCachedFrame(qint64 frameIndex);
     bool canDecodeQuickly(qint64 frameIndex);
     void clearCache();
