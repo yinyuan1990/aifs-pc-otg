@@ -1073,8 +1073,8 @@ QImage CaptureManager::decodeFromDisk(int itemIndex, int frameOffset)
     }
 
     if (result.isNull()) {
-        captureDebugLog("CAP", QString("decodeFromDisk FAIL item=%1 frame=%2 -> will fallback liveSnapshot=%3")
-            .arg(itemIndex).arg(frameOffset).arg(item.liveSnapshot.isNull() ? "null" : "ok"));
+        captureDebugLog("CAP", QString("decodeFromDisk FAIL item=%1 frame=%2")
+            .arg(itemIndex).arg(frameOffset));
         return QImage();
     }
 
