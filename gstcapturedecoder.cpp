@@ -24,34 +24,23 @@ bool GstCaptureDecoder::ensurePipeline()
 {
     if (m_pipeline) return m_ready;
 
-    struct DecoderInfo {
-        const char *name;
-        const char *extra;
-    };
-
-    DecoderInfo decoders[] = {
-        {"d3d11h264dec", " ! d3d11download"},
-        {"nvh264dec",    ""},
-        {"vtdec",        ""},
-        {"avdec_h264",   ""},
-        {nullptr, nullptr}
-    };
-
+    // 只用硬件解码器，软解性能不达标
     const char *decoder = nullptr;
     const char *extra = "";
 
-    for (int i = 0; decoders[i].name; i++) {
-        if (hasElement(decoders[i].name)) {
-            decoder = decoders[i].name;
-            extra = decoders[i].extra;
-            break;
-        }
+    if (hasElement("d3d11h264dec")) {
+        decoder = "d3d11h264dec";
+        extra = " ! d3d11download";
+    } else if (hasElement("nvh264dec")) {
+        decoder = "nvh264dec";
     }
 
     if (!decoder) {
-        qWarning() << "GstCaptureDecoder: no H.264 decoder available";
+        qWarning() << "GstCaptureDecoder: ❌ 无硬件 H.264 解码器（需要 d3d11h264dec 或 nvh264dec）";
         return false;
     }
+
+    qDebug() << "GstCaptureDecoder: 尝试硬件解码器:" << decoder;
 
     QString desc = QString(
         "appsrc name=src "
@@ -65,7 +54,7 @@ bool GstCaptureDecoder::ensurePipeline()
     GError *err = nullptr;
     m_pipeline = gst_parse_launch(desc.toUtf8().constData(), &err);
     if (err) {
-        qWarning() << "GstCaptureDecoder: parse error:" << err->message;
+        qWarning() << "GstCaptureDecoder: ❌ 管线创建失败:" << err->message;
         g_error_free(err);
         if (m_pipeline) { gst_object_unref(m_pipeline); m_pipeline = nullptr; }
         return false;
@@ -92,51 +81,14 @@ bool GstCaptureDecoder::ensurePipeline()
 
     GstStateChangeReturn ret = gst_element_set_state(m_pipeline, GST_STATE_PLAYING);
     if (ret == GST_STATE_CHANGE_FAILURE) {
-        qWarning() << "GstCaptureDecoder: pipeline start failed for" << decoder;
+        qWarning() << "GstCaptureDecoder: ❌ 硬件解码管线启动失败:" << decoder;
         cleanup();
-
-        // Fallback: try software decoder
-        if (QString(decoder) != "avdec_h264" && hasElement("avdec_h264")) {
-            qDebug() << "GstCaptureDecoder: retrying with avdec_h264";
-            desc = "appsrc name=src "
-                   "! h264parse "
-                   "! avdec_h264 "
-                   "! videoconvert "
-                   "! video/x-raw,format=BGRA "
-                   "! appsink name=sink";
-            m_pipeline = gst_parse_launch(desc.toUtf8().constData(), nullptr);
-            if (!m_pipeline) return false;
-
-            m_appsrc = gst_bin_get_by_name(GST_BIN(m_pipeline), "src");
-            m_appsink = gst_bin_get_by_name(GST_BIN(m_pipeline), "sink");
-
-            caps = gst_caps_from_string(
-                "video/x-h264, stream-format=byte-stream, alignment=au");
-            g_object_set(m_appsrc,
-                "caps", caps,
-                "format", GST_FORMAT_TIME,
-                "is-live", TRUE,
-                "stream-type", 0,
-                nullptr);
-            gst_caps_unref(caps);
-
-            g_object_set(m_appsink, "sync", FALSE, "max-buffers", 2, "drop", FALSE, nullptr);
-
-            ret = gst_element_set_state(m_pipeline, GST_STATE_PLAYING);
-            if (ret == GST_STATE_CHANGE_FAILURE) {
-                qWarning() << "GstCaptureDecoder: software fallback also failed";
-                cleanup();
-                return false;
-            }
-            decoder = "avdec_h264";
-        } else {
-            return false;
-        }
+        return false;
     }
 
     m_ready = true;
     m_pts = 0;
-    qDebug() << "GstCaptureDecoder: ready, decoder=" << decoder;
+    qDebug() << "GstCaptureDecoder: ✅ 硬件解码就绪:" << decoder;
     return true;
 }
 
