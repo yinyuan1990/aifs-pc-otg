@@ -427,25 +427,23 @@ bool GstPlayer::createPipeline()
 
     // H.264 Intra-only 重编码（tee存储分支：解码→重编码为全IDR）
     m_useIntraEncode = false;
-    m_storeUpload = nullptr;
     m_storeDecoder = gst_element_factory_make("avdec_h264", "store_dec");
     m_storeConvert = gst_element_factory_make("videoconvert", "store_convert");
-    m_storeEncoder = gst_element_factory_make("d3d11h264enc", "store_enc");
+    m_storeEncoder = gst_element_factory_make("mfh264enc", "store_enc");
     if (m_storeEncoder) {
-        qDebug() << "✅ d3d11h264enc available for intra-only encode";
-        captureDebugLog("GST", "d3d11h264enc created OK");
-        m_storeUpload = gst_element_factory_make("d3d11upload", "store_upload");
+        qDebug() << "✅ mfh264enc available for intra-only encode";
+        captureDebugLog("GST", "mfh264enc created OK (Media Foundation → GPU)");
         setIntIfExists(m_storeEncoder, "gop-size", 1);
-        setIntIfExists(m_storeEncoder, "b-frames", 0);
         setIntIfExists(m_storeEncoder, "bframes", 0);
-        setIntIfExists(m_storeEncoder, "ref-frames", 0);
-        setIntIfExists(m_storeEncoder, "qp-i", 17);
-        setIntIfExists(m_storeEncoder, "qp-p", 17);
+        setIntIfExists(m_storeEncoder, "b-frames", 0);
+        setIntIfExists(m_storeEncoder, "ref", 0);
+        setBoolIfExists(m_storeEncoder, "low-latency", TRUE);
         setIntIfExists(m_storeEncoder, "min-qp", 17);
         setIntIfExists(m_storeEncoder, "max-qp", 17);
+        setIntIfExists(m_storeEncoder, "qp", 17);
     } else {
-        qDebug() << "❌ d3d11h264enc not available, intra-only encode disabled";
-        captureDebugLog("GST", "FAIL: d3d11h264enc not available on this GPU");
+        qDebug() << "❌ mfh264enc not available, intra-only encode disabled";
+        captureDebugLog("GST", "FAIL: mfh264enc not available");
     }
     m_storeParse = gst_element_factory_make("h264parse", "store_parse");
     if (m_storeParse) {
@@ -455,14 +453,13 @@ bool GstPlayer::createPipeline()
     bool storeElementsOk = m_storeDecoder && m_storeConvert && m_storeEncoder && m_storeParse;
     if (storeElementsOk) {
         m_useIntraEncode = true;
-        qDebug() << "✅ H.264 intra-only storage encoder pipeline ready: d3d11h264enc";
-        captureDebugLog("GST", "H.264 intra-only store encoder: avdec_h264 → videoconvert → d3d11upload → d3d11h264enc(gop=1) → h264parse");
+        qDebug() << "✅ H.264 intra-only storage encoder pipeline ready: mfh264enc";
+        captureDebugLog("GST", "H.264 intra-only store encoder: avdec_h264 → videoconvert → mfh264enc(gop=1) → h264parse");
     } else {
-        qDebug() << "⚠️ Intra-only encode not available, fallback to raw NALU store";
-        captureDebugLog("GST", "WARN: intra-only encode elements missing, raw NALU fallback");
+        qDebug() << "❌ Intra-only encode not available, store branch disabled";
+        captureDebugLog("GST", "FAIL: intra-only encode elements missing, store branch disabled");
         if (m_storeDecoder) { gst_object_unref(m_storeDecoder); m_storeDecoder = nullptr; }
         if (m_storeConvert) { gst_object_unref(m_storeConvert); m_storeConvert = nullptr; }
-        if (m_storeUpload) { gst_object_unref(m_storeUpload); m_storeUpload = nullptr; }
         if (m_storeEncoder) { gst_object_unref(m_storeEncoder); m_storeEncoder = nullptr; }
         if (m_storeParse) { gst_object_unref(m_storeParse); m_storeParse = nullptr; }
     }
@@ -844,7 +841,7 @@ bool GstPlayer::createPipeline()
                 nullptr);
             if (m_useIntraEncode) {
                 gst_bin_add_many(GST_BIN(m_pipeline),
-                    m_storeDecoder, m_storeConvert, m_storeUpload,
+                    m_storeDecoder, m_storeConvert,
                     m_storeEncoder, m_storeParse, nullptr);
             }
 
@@ -868,7 +865,7 @@ bool GstPlayer::createPipeline()
                 nullptr);
             if (m_useIntraEncode) {
                 gst_bin_add_many(GST_BIN(m_pipeline),
-                    m_storeDecoder, m_storeConvert, m_storeUpload,
+                    m_storeDecoder, m_storeConvert,
                     m_storeEncoder, m_storeParse, nullptr);
             }
 
@@ -926,7 +923,7 @@ bool GstPlayer::createPipeline()
                 nullptr);
             if (m_useIntraEncode) {
                 gst_bin_add_many(GST_BIN(m_pipeline),
-                    m_storeDecoder, m_storeConvert, m_storeUpload,
+                    m_storeDecoder, m_storeConvert,
                     m_storeEncoder, m_storeParse, nullptr);
             }
 
@@ -949,7 +946,7 @@ bool GstPlayer::createPipeline()
                 nullptr);
             if (m_useIntraEncode) {
                 gst_bin_add_many(GST_BIN(m_pipeline),
-                    m_storeDecoder, m_storeConvert, m_storeUpload,
+                    m_storeDecoder, m_storeConvert,
                     m_storeEncoder, m_storeParse, nullptr);
             }
 
@@ -1044,7 +1041,6 @@ void GstPlayer::destroyPipeline()
     m_naluAppsink = nullptr;
     m_storeDecoder = nullptr;
     m_storeConvert = nullptr;
-    m_storeUpload = nullptr;
     m_storeEncoder = nullptr;
     m_storeParse = nullptr;
     m_useIntraEncode = false;
@@ -1287,9 +1283,9 @@ bool GstPlayer::linkNaluTeeBranch()
         return true;
     }
 
-    // naluQueue → avdec_h264 → videoconvert → d3d11upload → d3d11h264enc → h264parse → appsink
+    // naluQueue → avdec_h264 → videoconvert → mfh264enc → h264parse → appsink
     if (!gst_element_link_many(m_naluQueue, m_storeDecoder, m_storeConvert,
-                                m_storeUpload, m_storeEncoder, m_storeParse,
+                                m_storeEncoder, m_storeParse,
                                 m_naluAppsink, nullptr)) {
         captureDebugLog("GST", "linkNaluTeeBranch FAIL: intra-encode link failed, store branch disabled");
         m_useIntraEncode = false;
@@ -1307,7 +1303,7 @@ bool GstPlayer::linkNaluTeeBranch()
     }
     gst_object_unref(naluQueueSink);
 
-    captureDebugLog("GST", "linkNaluTeeBranch OK: intra-encode active (d3d11h264enc)");
+    captureDebugLog("GST", "linkNaluTeeBranch OK: intra-encode active (mfh264enc)");
     return true;
 }
 
