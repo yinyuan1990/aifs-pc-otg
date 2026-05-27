@@ -776,11 +776,11 @@ bool GstPlayer::createPipeline()
     
     GstCaps *sinkCaps = gst_caps_new_simple("video/x-raw",
         "format", G_TYPE_STRING, "BGRA",
-        "colorimetry", G_TYPE_STRING, "bt709",
+        "colorimetry", G_TYPE_STRING, "4:4:7:1",
         nullptr);
     gst_app_sink_set_caps(GST_APP_SINK(m_appsink), sinkCaps);
     gst_caps_unref(sinkCaps);
-    qDebug() << "✅ appsink caps: BGRA + bt709 (修复发黄: 强制 BT.709 矩阵 + full-range 输出)";
+    qDebug() << "✅ appsink caps: BGRA + BT.709 full-range (4:4:7:1)";
     
     g_signal_connect(m_appsink, "new-sample", G_CALLBACK(onNewSample), this);
     
