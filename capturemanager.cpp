@@ -779,7 +779,7 @@ void CaptureManager::capture()
         item.liveSnapshot = item.liveSnapshot.transformed(transform, Qt::FastTransformation);
     }
 
-    item.jpegCache.resize(item.totalFrames());
+    item.decodedFrames.resize(item.totalFrames());
 
     m_items.append(item);
     int newIndex = m_items.size() - 1;
@@ -795,7 +795,7 @@ void CaptureManager::capture()
     emit itemAdded(newIndex);
     emit captureComplete(newIndex);
 
-    // 后台预解码全部帧 → JPEG 压缩缓存（借鉴 JPEG 思路：每帧独立可读）
+    // 后台预解码全部帧 → 存原始 QImage（无损，COW 共享内存）
     int totalFrames = item.totalFrames();
     int rotation = m_videoRotation;
     QtConcurrent::run([this, newIndex, startIndex, totalFrames, rotation]() {
@@ -812,18 +812,13 @@ void CaptureManager::capture()
                 img = img.transformed(t, Qt::FastTransformation);
             }
 
-            QByteArray jpegData;
-            QBuffer buf(&jpegData);
-            buf.open(QIODevice::WriteOnly);
-            img.save(&buf, "JPEG", 92);
-
             int itemIdx = newIndex;
             int frameIdx = i;
-            QMetaObject::invokeMethod(this, [this, itemIdx, frameIdx, jpegData]() {
+            QMetaObject::invokeMethod(this, [this, itemIdx, frameIdx, img]() {
                 if (itemIdx < m_items.size()) {
-                    auto &cache = m_items[itemIdx].jpegCache;
-                    if (frameIdx < cache.size()) {
-                        cache[frameIdx] = jpegData;
+                    auto &frames = m_items[itemIdx].decodedFrames;
+                    if (frameIdx < frames.size()) {
+                        frames[frameIdx] = img;
                     }
                     m_cachedImage = QImage();
                     emit frameChanged(itemIdx, frameIdx);
@@ -992,10 +987,10 @@ QImage CaptureManager::getFrameImage(int itemIndex, int frameOffset)
 
     QImage img;
 
-    // 2. 检查 JPEG 预解码缓存（借鉴 JPEG 思路：每帧独立可读，~1ms 解压）
-    if (frameOffset >= 0 && frameOffset < item.jpegCache.size()
-        && !item.jpegCache[frameOffset].isEmpty()) {
-        img.loadFromData(item.jpegCache[frameOffset], "JPEG");
+    // 2. 检查预解码缓存（无损原始像素，零拷贝 COW）
+    if (frameOffset >= 0 && frameOffset < item.decodedFrames.size()
+        && !item.decodedFrames[frameOffset].isNull()) {
+        img = item.decodedFrames[frameOffset];
     }
 
     // 3. NALU 实时解码（预解码还没完成时的 fallback）

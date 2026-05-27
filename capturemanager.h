@@ -128,7 +128,7 @@ struct CaptureItem {
     int validRangeId = -1;      // 在 GpuJpegEncoder 中注册的有效范围 ID
     QString sessionPrefix;
     QImage liveSnapshot;        // 抓拍瞬间的直播画面（永久兜底）
-    QVector<QByteArray> jpegCache; // 预解码帧的 JPEG 压缩缓存（~150KB/帧）
+    QVector<QImage> decodedFrames; // 预解码帧（无损原始像素，QImage COW 共享）
 
     int totalFrames() const { return static_cast<int>(endIndex - startIndex + 1); }
     int eventOffset() const { return static_cast<int>(eventIndex - startIndex); }
