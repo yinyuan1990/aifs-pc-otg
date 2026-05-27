@@ -196,6 +196,12 @@ private:
     GstElement *m_naluTee = nullptr;      // NALU 存储 tee（与直播主路径分离）
     GstElement *m_naluQueue = nullptr;    // 存储分支 leaky queue
     GstElement *m_naluAppsink = nullptr;  // 异步拉取 NALU 写入 ring buffer
+    GstElement *m_storeDecoder = nullptr;  // avdec_h264 存储分支软解
+    GstElement *m_storeConvert = nullptr;  // videoconvert 存储分支格式转换
+    GstElement *m_storeUpload = nullptr;   // d3d11upload（d3d11h264enc需要GPU内存）
+    GstElement *m_storeEncoder = nullptr;  // d3d11h264enc/x264enc intra-only 重编码
+    GstElement *m_storeParse = nullptr;    // h264parse 重编码后解析
+    bool m_useIntraEncode = false;         // 是否启用 intra-only 重编码
     GstPad *m_naluTeePadMain = nullptr;
     GstPad *m_naluTeePadStore = nullptr;
     GstElement *m_queueDepay = nullptr;   // ⭐ 解码前缓冲队列（防马赛克关键）

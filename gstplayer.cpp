@@ -399,7 +399,7 @@ bool GstPlayer::createPipeline()
     m_naluAppsink = gst_element_factory_make("appsink", "nalu_store_sink");
     if (m_naluQueue) {
         g_object_set(m_naluQueue,
-            "max-size-buffers", 2,
+            "max-size-buffers", 5,
             "max-size-bytes", 0,
             "max-size-time", 0,
             "leaky", 2,   // downstream leaky：存储慢则丢旧帧
@@ -424,7 +424,49 @@ bool GstPlayer::createPipeline()
         qDebug() << "✅ NALU tee branch: nalu_queue(leaky=2) → nalu_appsink";
         captureDebugLog("GST", "NALU tee branch created (leaky queue + async appsink)");
     }
-    
+
+    // H.264 Intra-only 重编码（tee存储分支：解码→重编码为全IDR）
+    m_useIntraEncode = false;
+    m_storeUpload = nullptr;
+    m_storeDecoder = gst_element_factory_make("avdec_h264", "store_dec");
+    m_storeConvert = gst_element_factory_make("videoconvert", "store_convert");
+    m_storeEncoder = gst_element_factory_make("d3d11h264enc", "store_enc");
+    if (m_storeEncoder) {
+        qDebug() << "✅ d3d11h264enc available for intra-only encode";
+        captureDebugLog("GST", "d3d11h264enc created OK");
+        m_storeUpload = gst_element_factory_make("d3d11upload", "store_upload");
+        setIntIfExists(m_storeEncoder, "gop-size", 1);
+        setIntIfExists(m_storeEncoder, "b-frames", 0);
+        setIntIfExists(m_storeEncoder, "bframes", 0);
+        setIntIfExists(m_storeEncoder, "ref-frames", 0);
+        setIntIfExists(m_storeEncoder, "qp-i", 17);
+        setIntIfExists(m_storeEncoder, "qp-p", 17);
+        setIntIfExists(m_storeEncoder, "min-qp", 17);
+        setIntIfExists(m_storeEncoder, "max-qp", 17);
+    } else {
+        qDebug() << "❌ d3d11h264enc not available, intra-only encode disabled";
+        captureDebugLog("GST", "FAIL: d3d11h264enc not available on this GPU");
+    }
+    m_storeParse = gst_element_factory_make("h264parse", "store_parse");
+    if (m_storeParse) {
+        g_object_set(m_storeParse, "config-interval", (gint)-1, nullptr);
+        setIntIfExists(m_storeParse, "output-format", 1);
+    }
+    bool storeElementsOk = m_storeDecoder && m_storeConvert && m_storeEncoder && m_storeParse;
+    if (storeElementsOk) {
+        m_useIntraEncode = true;
+        qDebug() << "✅ H.264 intra-only storage encoder pipeline ready: d3d11h264enc";
+        captureDebugLog("GST", "H.264 intra-only store encoder: avdec_h264 → videoconvert → d3d11upload → d3d11h264enc(gop=1) → h264parse");
+    } else {
+        qDebug() << "⚠️ Intra-only encode not available, fallback to raw NALU store";
+        captureDebugLog("GST", "WARN: intra-only encode elements missing, raw NALU fallback");
+        if (m_storeDecoder) { gst_object_unref(m_storeDecoder); m_storeDecoder = nullptr; }
+        if (m_storeConvert) { gst_object_unref(m_storeConvert); m_storeConvert = nullptr; }
+        if (m_storeUpload) { gst_object_unref(m_storeUpload); m_storeUpload = nullptr; }
+        if (m_storeEncoder) { gst_object_unref(m_storeEncoder); m_storeEncoder = nullptr; }
+        if (m_storeParse) { gst_object_unref(m_storeParse); m_storeParse = nullptr; }
+    }
+
     // ⭐⭐⭐ v10超低延迟：小队列（配合 QUEUE_ABSOLUTE_MAX）
     // 方案B（平衡）：5帧缓冲，兼顾低延迟和平滑
     m_queueDepay = gst_element_factory_make("queue", "queue_depay");
@@ -800,6 +842,11 @@ bool GstPlayer::createPipeline()
                 m_download, m_videoScale, m_videoBalance, m_gamma,
                 m_displayQueue, m_convert, m_appsink,
                 nullptr);
+            if (m_useIntraEncode) {
+                gst_bin_add_many(GST_BIN(m_pipeline),
+                    m_storeDecoder, m_storeConvert, m_storeUpload,
+                    m_storeEncoder, m_storeParse, nullptr);
+            }
 
             if (!gst_element_link(m_rtph264depay, m_h264parse) || !linkNaluTeeBranch()
                 || !gst_element_link_many(m_queueDepay, m_decoder, m_queueDecode,
@@ -819,6 +866,11 @@ bool GstPlayer::createPipeline()
                 m_videoScale, m_videoBalance, m_gamma,
                 m_displayQueue, m_convert, m_appsink,
                 nullptr);
+            if (m_useIntraEncode) {
+                gst_bin_add_many(GST_BIN(m_pipeline),
+                    m_storeDecoder, m_storeConvert, m_storeUpload,
+                    m_storeEncoder, m_storeParse, nullptr);
+            }
 
             if (!gst_element_link(m_rtph264depay, m_h264parse) || !linkNaluTeeBranch()
                 || !gst_element_link_many(m_queueDepay, m_decoder, m_queueDecode,
@@ -872,6 +924,11 @@ bool GstPlayer::createPipeline()
                 m_download, m_videoScale, m_videoBalance, m_gamma,
                 m_displayQueue, m_convert, m_appsink,
                 nullptr);
+            if (m_useIntraEncode) {
+                gst_bin_add_many(GST_BIN(m_pipeline),
+                    m_storeDecoder, m_storeConvert, m_storeUpload,
+                    m_storeEncoder, m_storeParse, nullptr);
+            }
 
             if (!gst_element_link(m_appsrc, m_h264parse) || !linkNaluTeeBranch()
                 || !gst_element_link_many(m_queueDepay, m_decoder, m_queueDecode,
@@ -890,6 +947,11 @@ bool GstPlayer::createPipeline()
                 m_videoScale, m_videoBalance, m_gamma,
                 m_displayQueue, m_convert, m_appsink,
                 nullptr);
+            if (m_useIntraEncode) {
+                gst_bin_add_many(GST_BIN(m_pipeline),
+                    m_storeDecoder, m_storeConvert, m_storeUpload,
+                    m_storeEncoder, m_storeParse, nullptr);
+            }
 
             if (!gst_element_link(m_appsrc, m_h264parse) || !linkNaluTeeBranch()
                 || !gst_element_link_many(m_queueDepay, m_decoder, m_queueDecode,
@@ -980,6 +1042,12 @@ void GstPlayer::destroyPipeline()
     m_naluTee = nullptr;
     m_naluQueue = nullptr;
     m_naluAppsink = nullptr;
+    m_storeDecoder = nullptr;
+    m_storeConvert = nullptr;
+    m_storeUpload = nullptr;
+    m_storeEncoder = nullptr;
+    m_storeParse = nullptr;
+    m_useIntraEncode = false;
     m_queueDepay = nullptr;    // ⭐ 解码前缓冲队列
     m_decoder = nullptr;
     m_queueDecode = nullptr;   // ⭐ 解码后缓冲队列
@@ -1214,22 +1282,32 @@ bool GstPlayer::linkNaluTeeBranch()
     }
     gst_object_unref(depaySink);
 
-    if (!gst_element_link(m_naluQueue, m_naluAppsink)) {
-        captureDebugLog("GST", "linkNaluTeeBranch FAIL naluQueue->appsink");
-        return false;
+    if (!m_useIntraEncode) {
+        captureDebugLog("GST", "linkNaluTeeBranch SKIP: intra-encode not available, store branch disabled");
+        return true;
+    }
+
+    // naluQueue → avdec_h264 → videoconvert → d3d11upload → d3d11h264enc → h264parse → appsink
+    if (!gst_element_link_many(m_naluQueue, m_storeDecoder, m_storeConvert,
+                                m_storeUpload, m_storeEncoder, m_storeParse,
+                                m_naluAppsink, nullptr)) {
+        captureDebugLog("GST", "linkNaluTeeBranch FAIL: intra-encode link failed, store branch disabled");
+        m_useIntraEncode = false;
+        return true;
     }
 
     m_naluTeePadStore = gst_element_request_pad_simple(m_naluTee, "src_%u");
     GstPad *naluQueueSink = gst_element_get_static_pad(m_naluQueue, "sink");
     if (!m_naluTeePadStore || !naluQueueSink
         || gst_pad_link(m_naluTeePadStore, naluQueueSink) != GST_PAD_LINK_OK) {
-        captureDebugLog("GST", "linkNaluTeeBranch FAIL tee->naluQueue");
+        captureDebugLog("GST", "linkNaluTeeBranch FAIL tee->naluQueue, store branch disabled");
         if (naluQueueSink) gst_object_unref(naluQueueSink);
-        return false;
+        m_useIntraEncode = false;
+        return true;
     }
     gst_object_unref(naluQueueSink);
 
-    captureDebugLog("GST", "linkNaluTeeBranch OK main=queueDepay store=appsink(leaky)");
+    captureDebugLog("GST", "linkNaluTeeBranch OK: intra-encode active (d3d11h264enc)");
     return true;
 }
 
