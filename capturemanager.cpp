@@ -866,49 +866,63 @@ QImage CaptureManager::decodeFromDisk(int itemIndex, int frameOffset)
         }
     }
 
-    // 顺序失败 → 从最近 keyframe 开始，中间帧全部缓存
+    // 顺序失败 → 从最近 keyframe 开始
     if (result.isNull()) {
+        // 如果 keyFrameOffsets 为空，扫描 .nalu 文件找关键帧（SPS start code）
         int keyOffset = 0;
-        for (int i = item.keyFrameOffsets.size() - 1; i >= 0; --i) {
-            if (item.keyFrameOffsets[i] <= frameOffset) {
-                keyOffset = item.keyFrameOffsets[i];
-                break;
+        if (!item.keyFrameOffsets.isEmpty()) {
+            for (int i = item.keyFrameOffsets.size() - 1; i >= 0; --i) {
+                if (item.keyFrameOffsets[i] <= frameOffset) {
+                    keyOffset = item.keyFrameOffsets[i];
+                    break;
+                }
             }
+        } else {
+            // keyFrameOffsets 为空 → 从目标帧向前扫描，找含 SPS(0x67) 的 NALU 文件
+            for (int off = frameOffset; off >= 0; --off) {
+                QByteArray data = readNaluFile(item.naluDir, off);
+                if (data.size() >= 5) {
+                    const quint8 *p = reinterpret_cast<const quint8*>(data.constData());
+                    // Annex-B: 00 00 00 01 [NAL header]，NAL type = header & 0x1F
+                    for (int i = 0; i + 4 < data.size(); i++) {
+                        if (p[i] == 0 && p[i+1] == 0 && p[i+2] == 0 && p[i+3] == 1) {
+                            quint8 nalType = p[i+4] & 0x1F;
+                            if (nalType == 7) { // SPS
+                                keyOffset = off;
+                                qDebug() << "decodeFromDisk: 扫描找到 SPS keyframe at offset=" << off;
+                                goto found_keyframe;
+                            }
+                        }
+                    }
+                }
+            }
+            found_keyframe:;
         }
 
         qDebug() << "decodeFromDisk: keyframe seek item=" << itemIndex
                  << "from=" << keyOffset << "to=" << frameOffset
-                 << "dir=" << item.naluDir
-                 << "keyFrameOffsets=" << item.keyFrameOffsets;
+                 << "dir=" << item.naluDir;
 
         state.decoder->flush();
 
-        int decoded = 0, failed = 0;
-        for (int off = keyOffset; off <= frameOffset; off++) {
+        // 中间帧用 pushNalu（只推不拉，不阻塞），目标帧用 decodeNalu（推+拉）
+        int pushed = 0;
+        for (int off = keyOffset; off < frameOffset; off++) {
             QByteArray data = readNaluFile(item.naluDir, off);
-            if (data.isEmpty()) { failed++; continue; }
-
-            QImage img = state.decoder->decodeNalu(data);
-            if (img.isNull()) { failed++; continue; }
-            decoded++;
-
-            if (off == frameOffset) {
-                result = img;
-            } else {
-                QImage cached = img;
-                if (m_videoRotation != 0) {
-                    QTransform t;
-                    t.rotate(m_videoRotation);
-                    cached = cached.transformed(t, Qt::FastTransformation);
-                }
-                qint64 midKey = qint64(itemIndex) * 100000 + off;
-                evictFrameCache();
-                m_frameCache[midKey] = {cached, ++m_frameCacheCounter};
+            if (!data.isEmpty()) {
+                state.decoder->pushNalu(data);
+                pushed++;
             }
         }
 
-        qDebug() << "decodeFromDisk: keyframe seek 结果 decoded=" << decoded
-                 << "failed=" << failed << "result=" << (result.isNull() ? "NULL" : "OK");
+        // 目标帧：推送并等待解码结果
+        QByteArray targetData = readNaluFile(item.naluDir, frameOffset);
+        if (!targetData.isEmpty()) {
+            result = state.decoder->decodeNalu(targetData);
+        }
+
+        qDebug() << "decodeFromDisk: keyframe seek pushed=" << pushed
+                 << "result=" << (result.isNull() ? "NULL" : "OK");
     }
 
     if (result.isNull()) {
