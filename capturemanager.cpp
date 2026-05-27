@@ -823,29 +823,21 @@ void CaptureManager::capture()
         item.liveSnapshot = item.liveSnapshot.transformed(transform, Qt::FastTransformation);
     }
 
-    // 从环形缓冲拷贝已有帧到磁盘（异步写入，不阻塞主线程）
+    // 从环形缓冲拷贝已有帧到磁盘
     if (m_gstPlayer && m_gstPlayer->naluFrameStore()) {
         NaluFrameStore *store = m_gstPlayer->naluFrameStore();
         qint64 saveTo = qMin(endIndex, store->newestIndex());
-        QVector<QPair<int, QByteArray>> framesToSave;
         for (qint64 idx = startIndex; idx <= saveTo; idx++) {
             if (store->hasFrame(idx)) {
                 int offset = static_cast<int>(idx - startIndex);
-                framesToSave.append({offset, store->getFrame(idx)});
+                QByteArray data = store->getFrame(idx);
+                QString path = item.naluDir + QString("/%1.nalu").arg(offset, 6, 10, QChar('0'));
+                QFile file(path);
+                if (file.open(QIODevice::WriteOnly)) {
+                    file.write(data);
+                }
                 item.savedFrameCount++;
             }
-        }
-        if (!framesToSave.isEmpty()) {
-            QString naluDir = item.naluDir;
-            QtConcurrent::run([naluDir, framesToSave]() {
-                for (const auto &pair : framesToSave) {
-                    QString path = naluDir + QString("/%1.nalu").arg(pair.first, 6, 10, QChar('0'));
-                    QFile file(path);
-                    if (file.open(QIODevice::WriteOnly)) {
-                        file.write(pair.second);
-                    }
-                }
-            });
         }
     }
 
