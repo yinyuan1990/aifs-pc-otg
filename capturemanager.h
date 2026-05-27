@@ -348,15 +348,17 @@ private:
     void putFrameCache(int itemIndex, int frameOffset, const QImage &img);
     void evictFrameCache();
     void syncColorToJpegEncoder();
+    QMutex &itemDecodeMutex(int itemIndex);
+    void clearItemDecoder(int itemIndex);
 
 private:
     // 每个 item 独立 GStreamer 解码器（avdec_h264，不与实时流 GPU 竞争）
     struct ItemDecodeState {
         GstCaptureDecoder *decoder = nullptr;
         int lastOffset = -1;
-        QMutex mutex;
     };
     QHash<int, ItemDecodeState> m_itemDecoders;
+    QHash<int, QMutex*> m_itemDecodeMutexes;
     GpuPipeline *m_gpuPipeline = nullptr;  // GPU 管道（颜色调整）
     GstPlayer *m_gstPlayer = nullptr;      // GStreamer 播放器（NALU 帧存储）
     QVector<CaptureItem> m_items;

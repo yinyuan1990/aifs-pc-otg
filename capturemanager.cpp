@@ -419,6 +419,33 @@ CaptureManager::~CaptureManager()
         delete state.decoder;
     }
     m_itemDecoders.clear();
+    for (auto it = m_itemDecodeMutexes.begin(); it != m_itemDecodeMutexes.end(); ++it) {
+        delete it.value();
+    }
+    m_itemDecodeMutexes.clear();
+}
+
+QMutex &CaptureManager::itemDecodeMutex(int itemIndex)
+{
+    auto it = m_itemDecodeMutexes.find(itemIndex);
+    if (it == m_itemDecodeMutexes.end()) {
+        it = m_itemDecodeMutexes.insert(itemIndex, new QMutex());
+    }
+    return *it.value();
+}
+
+void CaptureManager::clearItemDecoder(int itemIndex)
+{
+    auto decIt = m_itemDecoders.find(itemIndex);
+    if (decIt != m_itemDecoders.end()) {
+        delete decIt.value().decoder;
+        m_itemDecoders.erase(decIt);
+    }
+    auto muxIt = m_itemDecodeMutexes.find(itemIndex);
+    if (muxIt != m_itemDecodeMutexes.end()) {
+        delete muxIt.value();
+        m_itemDecodeMutexes.erase(muxIt);
+    }
 }
 
 void CaptureManager::ensureCapturesDir()
@@ -989,8 +1016,8 @@ QImage CaptureManager::decodeFromDisk(int itemIndex, int frameOffset)
         return QImage();
     }
 
+    QMutexLocker itemLock(&itemDecodeMutex(itemIndex));
     ItemDecodeState &state = m_itemDecoders[itemIndex];
-    QMutexLocker itemLock(&state.mutex);
 
     if (!state.decoder) {
         state.decoder = new GstCaptureDecoder();
@@ -1127,6 +1154,10 @@ void CaptureManager::clearAll()
         m_frameCacheCounter = 0;
         for (auto &state : m_itemDecoders) delete state.decoder;
         m_itemDecoders.clear();
+        for (auto it = m_itemDecodeMutexes.begin(); it != m_itemDecodeMutexes.end(); ++it) {
+            delete it.value();
+        }
+        m_itemDecodeMutexes.clear();
     }
 
     emit countChanged();
@@ -1140,11 +1171,7 @@ void CaptureManager::removeItem(int index)
     // 清除该 item 的解码器和帧缓存
     {
         QMutexLocker decodeLock(&m_decodeMutex);
-        auto decIt = m_itemDecoders.find(index);
-        if (decIt != m_itemDecoders.end()) {
-            delete decIt.value().decoder;
-            m_itemDecoders.erase(decIt);
-        }
+        clearItemDecoder(index);
         for (auto it = m_frameCache.begin(); it != m_frameCache.end(); ) {
             if (static_cast<int>(it.key() / 100000) == index) {
                 it = m_frameCache.erase(it);
