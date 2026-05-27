@@ -32,6 +32,7 @@ private:
     SwsContext *m_swsCtx = nullptr;
     int m_swsWidth = 0;
     int m_swsHeight = 0;
+    int m_swsFmt = -1;
     QImage m_lastDecoded;
     QMutex m_mutex;
 };

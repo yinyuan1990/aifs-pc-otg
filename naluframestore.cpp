@@ -103,6 +103,7 @@ void NaluFrameStore::addFrame(const QByteArray &naluData, qint64 frameIndex, boo
                     if (victim.isKeyFrame) {
                         m_keyFrameList.removeOne(victim.frameIndex);
                     }
+                    victim.dataCopy.clear();
                 }
             }
         }
@@ -112,6 +113,21 @@ void NaluFrameStore::addFrame(const QByteArray &naluData, qint64 frameIndex, boo
         if (m_dataPtr && dataSize > 0) {
             if (m_dataWritePos + dataSize > m_dataCapacity) {
                 m_dataWritePos = 0;
+            }
+            quint64 writeStart = m_dataWritePos;
+            quint64 writeEnd = writeStart + dataSize;
+            for (int i = 0; i < m_capacity; i++) {
+                FrameEntry &e = m_index[i];
+                if (e.frameIndex >= 0 && e.dataSize > 0 && e.dataCopy.isEmpty()
+                    && isProtected(e.frameIndex)) {
+                    quint64 eStart = e.dataOffset;
+                    quint64 eEnd = eStart + e.dataSize;
+                    if (writeStart < eEnd && writeEnd > eStart) {
+                        e.dataCopy = QByteArray(
+                            reinterpret_cast<const char*>(m_dataPtr + e.dataOffset),
+                            static_cast<int>(e.dataSize));
+                    }
+                }
             }
             dataOffset = m_dataWritePos;
             std::memcpy(m_dataPtr + m_dataWritePos, naluData.constData(), dataSize);
@@ -145,6 +161,7 @@ QByteArray NaluFrameStore::getFrame(qint64 frameIndex) const
     if (it == m_indexMap.end()) return QByteArray();
 
     const FrameEntry &entry = m_index[it.value()];
+    if (!entry.dataCopy.isEmpty()) return entry.dataCopy;
     if (!m_dataPtr || entry.dataSize == 0) return QByteArray();
 
     return QByteArray(reinterpret_cast<const char*>(m_dataPtr + entry.dataOffset),

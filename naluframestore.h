@@ -49,6 +49,7 @@ private:
         quint64 dataOffset = 0;
         quint32 dataSize = 0;
         bool isKeyFrame = false;
+        QByteArray dataCopy;
     };
 
     bool isProtected(qint64 frameIndex) const;

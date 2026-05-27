@@ -793,7 +793,8 @@ void CaptureManager::capture()
     item.timestamp = QDateTime::currentMSecsSinceEpoch();
 
     // 创建磁盘目录存 NALU 文件
-    item.naluDir = m_capturesDir + QString("/nalu_%1").arg(item.id, 6, 10, QChar('0'));
+    QString prefix = (m_slowMotionActive && m_slowMotionPlayer) ? "slow" : "nalu";
+    item.naluDir = m_capturesDir + QString("/%1_%2").arg(prefix).arg(item.id, 6, 10, QChar('0'));
     QDir().mkpath(item.naluDir);
 
     // 保存 SPS/PPS 供离线回放解码器初始化

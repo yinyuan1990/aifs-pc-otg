@@ -149,6 +149,8 @@ copy "%GST_ROOT%\lib\gstreamer-1.0\gstlibav.dll" "%RELEASE_DIR%\runtime\gstreame
 copy "%GST_ROOT%\lib\gstreamer-1.0\gstnvcodec.dll" "%RELEASE_DIR%\runtime\gstreamer\lib\gstreamer-1.0\" >nul 2>&1
 copy "%GST_ROOT%\lib\gstreamer-1.0\gstqsv.dll" "%RELEASE_DIR%\runtime\gstreamer\lib\gstreamer-1.0\" >nul 2>&1
 copy "%GST_ROOT%\lib\gstreamer-1.0\gstamfcodec.dll" "%RELEASE_DIR%\runtime\gstreamer\lib\gstreamer-1.0\" >nul 2>&1
+:: Media Foundation 编码器插件（mfh264enc IDR 编码）
+copy "%GST_ROOT%\lib\gstreamer-1.0\gstmediafoundation.dll" "%RELEASE_DIR%\runtime\gstreamer\lib\gstreamer-1.0\" >nul 2>&1
 :: WebRTC 插件
 copy "%GST_ROOT%\lib\gstreamer-1.0\gstwebrtc.dll" "%RELEASE_DIR%\runtime\gstreamer\lib\gstreamer-1.0\" >nul 2>&1
 copy "%GST_ROOT%\lib\gstreamer-1.0\gstrtp.dll" "%RELEASE_DIR%\runtime\gstreamer\lib\gstreamer-1.0\" >nul 2>&1

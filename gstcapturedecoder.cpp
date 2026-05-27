@@ -54,6 +54,7 @@ void GstCaptureDecoder::cleanup()
     if (m_codecCtx) { avcodec_free_context(&m_codecCtx); m_codecCtx = nullptr; }
     m_swsWidth = 0;
     m_swsHeight = 0;
+    m_swsFmt = -1;
     m_lastDecoded = QImage();
 }
 
@@ -65,18 +66,20 @@ QImage GstCaptureDecoder::frameToImage()
     int w = m_frame->width;
     int h = m_frame->height;
 
-    if (!m_swsCtx || m_swsWidth != w || m_swsHeight != h) {
+    int fmt = m_frame->format;
+    if (!m_swsCtx || m_swsWidth != w || m_swsHeight != h || m_swsFmt != fmt) {
         if (m_swsCtx) sws_freeContext(m_swsCtx);
-        m_swsCtx = sws_getContext(w, h, (AVPixelFormat)m_frame->format,
+        m_swsCtx = sws_getContext(w, h, (AVPixelFormat)fmt,
                                   w, h, AV_PIX_FMT_BGRA,
                                   SWS_BICUBIC | SWS_FULL_CHR_H_INT | SWS_ACCURATE_RND,
                                   nullptr, nullptr, nullptr);
         m_swsWidth = w;
         m_swsHeight = h;
+        m_swsFmt = fmt;
     }
     if (!m_swsCtx) return QImage();
 
-    QImage result(w, h, QImage::Format_ARGB32);
+    QImage result(w, h, QImage::Format_RGB32);
     uint8_t *dst[1] = { result.bits() };
     int dstStride[1] = { static_cast<int>(result.bytesPerLine()) };
     sws_scale(m_swsCtx, m_frame->data, m_frame->linesize, 0, h, dst, dstStride);
