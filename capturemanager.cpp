@@ -768,34 +768,38 @@ void CaptureManager::capture()
     if (m_gstPlayer && m_gstPlayer->naluFrameStore()) {
         item.validRangeId = m_gstPlayer->naluFrameStore()->registerValidRange(startIndex, endIndex);
     }
-    
+
+    // 直接抓取当前直播画面（已解码的 BGRA，零延迟）
+    if (m_gstPlayer) {
+        item.liveSnapshot = m_gstPlayer->grabCurrentFrame();
+    }
+    if (!item.liveSnapshot.isNull() && m_videoRotation != 0) {
+        QTransform transform;
+        transform.rotate(m_videoRotation);
+        item.liveSnapshot = item.liveSnapshot.transformed(transform, Qt::SmoothTransformation);
+    }
+
     m_items.append(item);
     int newIndex = m_items.size() - 1;
-    
-    qDebug() << "Capture: item" << item.id 
+
+    qDebug() << "Capture: item" << item.id
              << "start:" << startIndex
              << "event:" << eventIndex
              << "end:" << endIndex
-             << "total:" << item.totalFrames();
-    
+             << "total:" << item.totalFrames()
+             << "snapshot:" << (item.liveSnapshot.isNull() ? "NULL" : "OK");
+
     emit countChanged();
     emit itemAdded(newIndex);
     emit captureComplete(newIndex);
 
-    // 异步预解码事件帧（避免阻塞渲染线程导致实时流卡顿）
+    // 后台预解码 NALU（用于前后帧滚动浏览）
     qint64 preDecodeIdx = eventIndex;
     int preDecodeItem = newIndex;
-    int preDecodeOffset = item.eventOffset();
-    QtConcurrent::run([this, preDecodeIdx, preDecodeItem, preDecodeOffset]() {
+    QtConcurrent::run([this, preDecodeIdx, preDecodeItem]() {
         if (m_naluDecoder) {
             m_naluDecoder->decodeFrame(preDecodeIdx);
         }
-        QMetaObject::invokeMethod(this, [this, preDecodeItem, preDecodeOffset]() {
-            m_cachedImage = QImage();
-            if (preDecodeItem < m_items.size()) {
-                emit frameChanged(preDecodeItem, preDecodeOffset);
-            }
-        }, Qt::QueuedConnection);
     });
 }
 
@@ -947,28 +951,16 @@ QImage CaptureManager::getFrameImage(int itemIndex, int frameOffset)
         return QImage();
     }
     
-    const CaptureItem &item = m_items[itemIndex];
-    
-    // ⭐⭐⭐ 诊断日志：对比请求的frameOffset与item状态
-    qDebug() << "🖼️ getFrameImage | item=" << itemIndex 
-             << "| 请求frameOffset=" << frameOffset 
-             << "| item.currentOffset=" << item.currentOffset 
-             << "| item.eventOffset=" << item.eventOffset()
-             << "| 是否同步=" << (frameOffset == item.currentOffset ? "✅" : "❌");
-    
-    // 检查缓存（只检查 item 和帧索引，不再检查 zoom 参数）
-    // 缩放在 QML 层面实现，不在图片加载时应用
-    static int cachedRotation = 0;
-    
-    if (m_cachedItemIndex == itemIndex && m_cachedFrameOffset == frameOffset 
-        && cachedRotation == m_videoRotation 
+    CaptureItem &item = m_items[itemIndex];
+
+    // 检查缓存
+    if (m_cachedItemIndex == itemIndex && m_cachedFrameOffset == frameOffset
+        && m_cachedRotation == m_videoRotation
         && !m_cachedImage.isNull()) {
-        qDebug() << "   ↳ 使用缓存";
         return m_cachedImage;
     }
-    
-    qint64 globalIndex = item.startIndex + frameOffset;
 
+    qint64 globalIndex = item.startIndex + frameOffset;
     QImage img;
 
     if (m_naluDecoder) {
@@ -990,7 +982,9 @@ QImage CaptureManager::getFrameImage(int itemIndex, int frameOffset)
                         }
                     }, Qt::QueuedConnection);
                 });
-                return QImage();
+                // 返回上一帧缓存或直播快照，不返回空图
+                if (!m_cachedImage.isNull()) return m_cachedImage;
+                return item.liveSnapshot;
             }
         }
     }
@@ -998,30 +992,29 @@ QImage CaptureManager::getFrameImage(int itemIndex, int frameOffset)
     if (img.isNull()) {
         img = loadFrameFromDisk(globalIndex, item.sessionPrefix);
     }
-    
+
+    // 最终兜底：用直播快照
+    if (img.isNull()) {
+        return item.liveSnapshot;
+    }
+
     // 应用旋转
-    if (!img.isNull() && m_videoRotation != 0) {
+    if (m_videoRotation != 0) {
         QTransform transform;
         transform.rotate(m_videoRotation);
         img = img.transformed(transform, Qt::SmoothTransformation);
     }
-    
-    // ⭐ 注意：不再在 getFrameImage 中应用缩放裁剪
-    // 缩放应该只在 QML UI 层面实现（通过 Image 的 width/height 和 itemZoom）
-    // 这样每个抓拍 item 可以保持自己独立的缩放状态，不受当前实时流缩放影响
-    // 
-    // 原因：之前的裁剪逻辑使用 m_videoZoom（当前实时流缩放），
-    // 导致当用户改变实时流缩放后，已有的抓拍 item 也会受影响。
-    // 正确的做法是：每个 item 在 QML 中保存自己的 itemZoom，
-    // 通过 Image 的 width/height 属性来实现缩放显示。
-    
-    // 更新缓存
-    // 更新缓存（不再缓存 zoom 参数，因为缩放在 QML 层面实现）
+
+    // NALU 解码成功后清除快照（释放内存）
+    if (!item.liveSnapshot.isNull()) {
+        item.liveSnapshot = QImage();
+    }
+
     m_cachedItemIndex = itemIndex;
     m_cachedFrameOffset = frameOffset;
-    cachedRotation = m_videoRotation;
+    m_cachedRotation = m_videoRotation;
     m_cachedImage = img;
-    
+
     return img;
 }
 

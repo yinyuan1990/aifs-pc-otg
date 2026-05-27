@@ -63,6 +63,8 @@ public:
     // NALU 帧存储（H.264 ring buffer，替代 JPEG 文件）
     NaluFrameStore* naluFrameStore() const { return m_naluStore; }
 
+    QImage grabCurrentFrame();
+
     // 推送 H.264 NALU 数据（保留用于兼容，WebRTCBin 模式下不使用）
     Q_INVOKABLE void pushNalu(const QByteArray &nalu);
     

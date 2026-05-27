@@ -927,6 +927,38 @@ bool GstPlayer::createPipeline()
     return true;
 }
 
+QImage GstPlayer::grabCurrentFrame()
+{
+    QMutexLocker lock(&m_mutex);
+    if (!m_lastValidSample) return QImage();
+
+    GstBuffer *buffer = gst_sample_get_buffer(m_lastValidSample);
+    GstCaps *caps = gst_sample_get_caps(m_lastValidSample);
+    if (!buffer || !caps) return QImage();
+
+    GstStructure *s = gst_caps_get_structure(caps, 0);
+    int w = 0, h = 0;
+    gst_structure_get_int(s, "width", &w);
+    gst_structure_get_int(s, "height", &h);
+    if (w <= 0 || h <= 0) return QImage();
+
+    GstMapInfo map;
+    if (!gst_buffer_map(buffer, &map, GST_MAP_READ)) return QImage();
+
+    QImage img(w, h, QImage::Format_ARGB32);
+    int srcStride = w * 4;
+    int dstStride = img.bytesPerLine();
+    if (srcStride == dstStride) {
+        memcpy(img.bits(), map.data, qMin(map.size, (gsize)(h * dstStride)));
+    } else {
+        for (int y = 0; y < h; y++) {
+            memcpy(img.bits() + y * dstStride, map.data + y * srcStride, srcStride);
+        }
+    }
+    gst_buffer_unmap(buffer, &map);
+    return img;
+}
+
 void GstPlayer::destroyPipeline()
 {
     QMutexLocker lock(&m_mutex);
