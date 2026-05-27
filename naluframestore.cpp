@@ -1,32 +1,91 @@
 #include "naluframestore.h"
 #include <QDebug>
+#include <QDir>
+#include <QStandardPaths>
 #include <algorithm>
+#include <cstring>
+
+static constexpr quint64 BYTES_PER_FRAME = 50 * 1024; // 50KB average per NALU
 
 NaluFrameStore::NaluFrameStore(int capacity, QObject *parent)
     : QObject(parent)
     , m_capacity(capacity)
 {
-    m_buffer.resize(capacity);
-    qDebug() << "NaluFrameStore: capacity" << capacity
-             << "~" << (capacity * 30 / 1024) << "MB estimated";
+    m_index.resize(capacity);
+
+    if (initMmap()) {
+        qDebug() << "NaluFrameStore: mmap OK, capacity" << capacity
+                 << "data" << (m_dataCapacity / 1024 / 1024) << "MB";
+    } else {
+        qWarning() << "NaluFrameStore: mmap failed";
+    }
 }
 
-NaluFrameStore::~NaluFrameStore() = default;
+NaluFrameStore::~NaluFrameStore()
+{
+    cleanupMmap();
+}
+
+bool NaluFrameStore::initMmap()
+{
+    QString tempDir = QStandardPaths::writableLocation(QStandardPaths::TempLocation);
+    QString path = QDir(tempDir).filePath(
+        QString("nalustore_%1.dat").arg(reinterpret_cast<quintptr>(this), 0, 16));
+
+    m_dataFile.setFileName(path);
+    if (!m_dataFile.open(QIODevice::ReadWrite)) {
+        qWarning() << "NaluFrameStore: cannot open" << path;
+        return false;
+    }
+
+    m_dataCapacity = static_cast<quint64>(m_capacity) * BYTES_PER_FRAME;
+    if (!m_dataFile.resize(static_cast<qint64>(m_dataCapacity))) {
+        qWarning() << "NaluFrameStore: resize failed" << m_dataCapacity;
+        m_dataFile.close();
+        return false;
+    }
+
+    m_dataPtr = m_dataFile.map(0, static_cast<qint64>(m_dataCapacity));
+    if (!m_dataPtr) {
+        qWarning() << "NaluFrameStore: map failed";
+        m_dataFile.close();
+        return false;
+    }
+
+    m_dataWritePos = 0;
+    return true;
+}
+
+void NaluFrameStore::cleanupMmap()
+{
+    if (m_dataPtr) {
+        m_dataFile.unmap(m_dataPtr);
+        m_dataPtr = nullptr;
+    }
+    if (m_dataFile.isOpen()) {
+        QString path = m_dataFile.fileName();
+        m_dataFile.close();
+        QFile::remove(path);
+    }
+}
 
 void NaluFrameStore::addFrame(const QByteArray &naluData, qint64 frameIndex, bool isKeyFrame)
 {
     {
         QMutexLocker lock(&m_mutex);
 
+        quint32 dataSize = static_cast<quint32>(naluData.size());
+
+        // Evict oldest slot if ring buffer full
         if (m_count >= m_capacity) {
-            FrameEntry &old = m_buffer[m_head];
+            FrameEntry &old = m_index[m_head];
             if (old.frameIndex >= 0) {
                 if (isProtected(old.frameIndex)) {
                     int attempts = 0;
                     int tryHead = m_head;
                     while (attempts < m_capacity) {
                         tryHead = (tryHead + 1) % m_capacity;
-                        FrameEntry &tryEntry = m_buffer[tryHead];
+                        FrameEntry &tryEntry = m_index[tryHead];
                         if (tryEntry.frameIndex < 0 || !isProtected(tryEntry.frameIndex)) {
                             m_head = tryHead;
                             break;
@@ -38,7 +97,7 @@ void NaluFrameStore::addFrame(const QByteArray &naluData, qint64 frameIndex, boo
                     }
                 }
 
-                FrameEntry &victim = m_buffer[m_head];
+                FrameEntry &victim = m_index[m_head];
                 if (victim.frameIndex >= 0) {
                     m_indexMap.remove(victim.frameIndex);
                     if (victim.isKeyFrame) {
@@ -48,9 +107,21 @@ void NaluFrameStore::addFrame(const QByteArray &naluData, qint64 frameIndex, boo
             }
         }
 
-        FrameEntry &entry = m_buffer[m_head];
-        entry.data = naluData;
+        // Write NALU data to mmap region
+        quint64 dataOffset = 0;
+        if (m_dataPtr && dataSize > 0) {
+            if (m_dataWritePos + dataSize > m_dataCapacity) {
+                m_dataWritePos = 0;
+            }
+            dataOffset = m_dataWritePos;
+            std::memcpy(m_dataPtr + m_dataWritePos, naluData.constData(), dataSize);
+            m_dataWritePos += dataSize;
+        }
+
+        FrameEntry &entry = m_index[m_head];
         entry.frameIndex = frameIndex;
+        entry.dataOffset = dataOffset;
+        entry.dataSize = dataSize;
         entry.isKeyFrame = isKeyFrame;
 
         m_indexMap[frameIndex] = m_head;
@@ -72,7 +143,12 @@ QByteArray NaluFrameStore::getFrame(qint64 frameIndex) const
     QMutexLocker lock(&m_mutex);
     auto it = m_indexMap.find(frameIndex);
     if (it == m_indexMap.end()) return QByteArray();
-    return m_buffer[it.value()].data;
+
+    const FrameEntry &entry = m_index[it.value()];
+    if (!m_dataPtr || entry.dataSize == 0) return QByteArray();
+
+    return QByteArray(reinterpret_cast<const char*>(m_dataPtr + entry.dataOffset),
+                      static_cast<int>(entry.dataSize));
 }
 
 bool NaluFrameStore::hasFrame(qint64 frameIndex) const
@@ -86,7 +162,7 @@ bool NaluFrameStore::isKeyFrame(qint64 frameIndex) const
     QMutexLocker lock(&m_mutex);
     auto it = m_indexMap.find(frameIndex);
     if (it == m_indexMap.end()) return false;
-    return m_buffer[it.value()].isKeyFrame;
+    return m_index[it.value()].isKeyFrame;
 }
 
 qint64 NaluFrameStore::findNearestKeyFrame(qint64 frameIndex) const
@@ -125,7 +201,12 @@ QVector<QPair<QByteArray, qint64>> NaluFrameStore::getDecodeSequence(qint64 targ
     for (qint64 idx = keyFrameIdx; idx <= targetIndex; idx++) {
         auto it = m_indexMap.find(idx);
         if (it != m_indexMap.end()) {
-            result.append({m_buffer[it.value()].data, idx});
+            const FrameEntry &entry = m_index[it.value()];
+            if (m_dataPtr && entry.dataSize > 0) {
+                QByteArray data(reinterpret_cast<const char*>(m_dataPtr + entry.dataOffset),
+                                static_cast<int>(entry.dataSize));
+                result.append({data, idx});
+            }
         }
     }
 
@@ -149,7 +230,7 @@ qint64 NaluFrameStore::newestIndex() const
     QMutexLocker lock(&m_mutex);
     if (m_count == 0) return -1;
     int pos = (m_head - 1 + m_capacity) % m_capacity;
-    return m_buffer[pos].frameIndex;
+    return m_index[pos].frameIndex;
 }
 
 int NaluFrameStore::count() const
@@ -193,7 +274,7 @@ void NaluFrameStore::clear()
 {
     QMutexLocker lock(&m_mutex);
     for (int i = 0; i < m_capacity; i++) {
-        m_buffer[i] = FrameEntry();
+        m_index[i] = FrameEntry();
     }
     m_head = 0;
     m_count = 0;
@@ -201,4 +282,5 @@ void NaluFrameStore::clear()
     m_keyFrameList.clear();
     m_validRanges.clear();
     m_nextRangeId = 0;
+    m_dataWritePos = 0;
 }

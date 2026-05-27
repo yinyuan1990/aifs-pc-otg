@@ -8,6 +8,7 @@
 
 struct AVCodecContext;
 struct AVFrame;
+struct AVBufferRef;
 struct SwsContext;
 
 class NaluFrameStore;
@@ -24,6 +25,7 @@ public:
     bool canDecodeQuickly(qint64 frameIndex);
     void clearCache();
     void flush();
+    int hwPixFmt() const { return m_hwPixFmt; }
 
 private:
     bool ensureDecoder();
@@ -36,9 +38,15 @@ private:
 
     AVCodecContext *m_codecCtx = nullptr;
     AVFrame *m_avFrame = nullptr;
+    AVFrame *m_swFrame = nullptr;
     SwsContext *m_swsCtx = nullptr;
     int m_swsWidth = 0;
     int m_swsHeight = 0;
+    int m_swsSrcFmt = -1;
+
+    AVBufferRef *m_hwDeviceCtx = nullptr;
+    int m_hwPixFmt = -1;
+    bool m_useHwDecode = false;
 
     struct CacheEntry {
         QImage image;

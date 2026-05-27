@@ -9,6 +9,7 @@
 #include <QMap>
 #include <QPair>
 #include <QMutex>
+#include <QFile>
 
 class NaluFrameStore : public QObject
 {
@@ -44,20 +45,28 @@ signals:
 
 private:
     struct FrameEntry {
-        QByteArray data;
         qint64 frameIndex = -1;
+        quint64 dataOffset = 0;
+        quint32 dataSize = 0;
         bool isKeyFrame = false;
     };
 
     bool isProtected(qint64 frameIndex) const;
+    bool initMmap();
+    void cleanupMmap();
 
-    QVector<FrameEntry> m_buffer;
+    QVector<FrameEntry> m_index;
     int m_capacity;
     int m_head = 0;
     int m_count = 0;
 
     QHash<qint64, int> m_indexMap;
     QList<qint64> m_keyFrameList;
+
+    QFile m_dataFile;
+    uchar *m_dataPtr = nullptr;
+    quint64 m_dataCapacity = 0;
+    quint64 m_dataWritePos = 0;
 
     QMap<int, QPair<qint64, qint64>> m_validRanges;
     int m_nextRangeId = 0;
