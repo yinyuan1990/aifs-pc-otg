@@ -4339,8 +4339,8 @@ Rectangle {
         property string qualityType: "high" // 档位：low/standard/high/ultra/p4k
         property bool antiFlickerEnabled: false  // 抗频闪开关（默认关闭）
         property int antiFlickerFps: 80          // 抗频闪帧率档位（80/100/200）
-        property bool filterModeEnabled: true    // 滤镜模式（Metal 后处理，默认开）
-        property bool lutModeEnabled: true       // LUT 模式（玉麒麟 LUT，默认开）
+        property bool filterModeEnabled: false   // 滤镜模式（Metal 后处理，默认关 — 对标玉麒麟只开 LUT）
+        property bool lutModeEnabled: true       // LUT 模式（玉麒麟 GPUImage，默认开）
         property int hardwareBrightness: 20      // 硬件亮度 0~100 → EV -2..+8，20=0EV
         
         // 窗口内容背景
@@ -11164,7 +11164,7 @@ Rectangle {
         property double fExposure:   1.10
         property double fRedBoost:   0.02
         property double fBlackPoint: 0.10   // ⭐ 默认 0.10 压死 limited-range 伪黑 (黑色不再灰)
-        property bool   fEnabled:    true
+        property bool   fEnabled:    false
 
         // ⭐ 玉麒麟 LUT（5 张 png，STOMP ptype=lutName + test_mode 开关）
         property bool   lutEnabled: true
@@ -11523,7 +11523,7 @@ Rectangle {
                                 iosFilterPopup.fSaturation = iosFilterPopup.saturationDefault
                                 iosFilterPopup.fExposure   = iosFilterPopup.exposureDefault
                                 iosFilterPopup.fRedBoost   = iosFilterPopup.redBoostDefault
-                                iosFilterPopup.fEnabled    = true
+                                iosFilterPopup.fEnabled    = false
                                 iosFilterPopup.prevBrightness = iosFilterPopup.brightnessDefault
                                 iosFilterPopup.prevGamma      = iosFilterPopup.gammaDefault
                                 iosFilterPopup.prevContrast   = iosFilterPopup.contrastDefault
