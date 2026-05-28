@@ -4292,7 +4292,7 @@ Rectangle {
     Window {
         id: iosCameraSettingsPopup
         width: 560
-        height: 960
+        height: 880
         flags: Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
         color: "transparent"
         visible: false
@@ -4310,7 +4310,6 @@ Rectangle {
             cameraBrightnessSlider.value = iosFilterPopup.fContrast        // 对比度滑块 → iOS 滤镜的 contrast
             cameraFakeExposureSlider.value = iosFilterPopup.fBrightness   // 曝光度滑块 → iOS 滤镜的 brightness
             cameraSaturationSlider.value = iosFilterPopup.fSaturation     // 红外模式滑块 → iOS 滤镜的 saturation
-            testBrightnessSlider.value = hardwareBrightness
 
             visible = true
         }
@@ -5561,160 +5560,6 @@ Rectangle {
                 }
             }
 
-            // 滤镜 / LUT 模式（独立开关，默认都开；管道：相机 → 滤镜 → LUT → 编码）
-            Item {
-                Layout.fillWidth: true
-                height: 36
-
-                Row {
-                    anchors.horizontalCenter: parent.horizontalCenter
-                    spacing: 24
-
-                    Row {
-                        spacing: 8
-                        anchors.verticalCenter: parent.verticalCenter
-                        Text {
-                            text: "滤镜模式"
-                            font.family: "PingFang HK"
-                            font.pixelSize: 13
-                            font.bold: true
-                            color: "#1976D2"
-                            anchors.verticalCenter: parent.verticalCenter
-                        }
-                        Rectangle {
-                            width: 44; height: 24; radius: 12
-                            color: iosCameraSettingsPopup.filterModeEnabled ? "#1976D2" : "#E0E0E0"
-                            anchors.verticalCenter: parent.verticalCenter
-                            Rectangle {
-                                width: 20; height: 20; radius: 10
-                                color: "#FFFFFF"
-                                x: iosCameraSettingsPopup.filterModeEnabled ? 22 : 2
-                                anchors.verticalCenter: parent.verticalCenter
-                                Behavior on x { NumberAnimation { duration: 150 } }
-                            }
-                            MouseArea {
-                                anchors.fill: parent
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: {
-                                    iosCameraSettingsPopup.filterModeEnabled = !iosCameraSettingsPopup.filterModeEnabled
-                                    sendFilterModeConfig()
-                                }
-                            }
-                        }
-                    }
-
-                    Row {
-                        spacing: 8
-                        anchors.verticalCenter: parent.verticalCenter
-                        Text {
-                            text: "LUT模式"
-                            font.family: "PingFang HK"
-                            font.pixelSize: 13
-                            font.bold: true
-                            color: "#1976D2"
-                            anchors.verticalCenter: parent.verticalCenter
-                        }
-                        Rectangle {
-                            width: 44; height: 24; radius: 12
-                            color: iosCameraSettingsPopup.lutModeEnabled ? "#1976D2" : "#E0E0E0"
-                            anchors.verticalCenter: parent.verticalCenter
-                            Rectangle {
-                                width: 20; height: 20; radius: 10
-                                color: "#FFFFFF"
-                                x: iosCameraSettingsPopup.lutModeEnabled ? 22 : 2
-                                anchors.verticalCenter: parent.verticalCenter
-                                Behavior on x { NumberAnimation { duration: 150 } }
-                            }
-                            MouseArea {
-                                anchors.fill: parent
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: {
-                                    iosCameraSettingsPopup.lutModeEnabled = !iosCameraSettingsPopup.lutModeEnabled
-                                    sendLutModeConfig()
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            Text {
-                Layout.fillWidth: true
-                horizontalAlignment: Text.AlignHCenter
-                text: "硬件参数（不受上方开关影响）"
-                font.family: "PingFang HK"
-                font.pixelSize: 12
-                color: "#90A4AE"
-            }
-
-            // 硬件亮度：ISO/EV，-2~+8 EV，默认 0
-            RowLayout {
-                Layout.fillWidth: true
-                spacing: 10
-
-                Text {
-                    text: "亮度"
-                    font.family: "PingFang HK"
-                    font.pixelSize: 16
-                    color: "#263238"
-                    Layout.preferredWidth: 60
-                }
-
-                Slider {
-                    id: testBrightnessSlider
-                    Layout.fillWidth: true
-                    from: 0
-                    to: 100
-                    stepSize: 1
-                    value: iosCameraSettingsPopup.hardwareBrightness
-
-                    onMoved: {
-                        iosCameraSettingsPopup.hardwareBrightness = value
-                        sendTestBrightnessConfig(value)
-                    }
-                    onPressedChanged: if (!pressed) {
-                        iosCameraSettingsPopup.hardwareBrightness = value
-                        sendTestBrightnessConfig(value)
-                    }
-
-                    background: Rectangle {
-                        x: testBrightnessSlider.leftPadding
-                        y: testBrightnessSlider.topPadding + testBrightnessSlider.availableHeight / 2 - height / 2
-                        implicitWidth: 200
-                        implicitHeight: 4
-                        width: testBrightnessSlider.availableWidth
-                        height: 4
-                        radius: 999
-                        color: "#C8E6C9"
-
-                        Rectangle {
-                            width: testBrightnessSlider.visualPosition * parent.width
-                            height: parent.height
-                            radius: 999
-                            color: "#4DB6AC"
-                        }
-                    }
-
-                    handle: Rectangle {
-                        x: testBrightnessSlider.leftPadding + testBrightnessSlider.visualPosition * (testBrightnessSlider.availableWidth - width)
-                        y: testBrightnessSlider.topPadding + testBrightnessSlider.availableHeight / 2 - height / 2
-                        implicitWidth: 14
-                        implicitHeight: 14
-                        width: 14
-                        height: 14
-                        radius: 7
-                        color: "#4DB6AC"
-                    }
-                }
-
-                Text {
-                    text: iosCameraSettingsPopup.hardwareEVText()
-                    font.family: "PingFang HK"
-                    font.pixelSize: 14
-                    color: "#263238"
-                    Layout.preferredWidth: 56
-                }
-            }
             }  // 关闭 ColumnLayout
         }  // 关闭 Rectangle
     }  // 关闭 Window (相机设定)
@@ -5733,27 +5578,37 @@ Rectangle {
         iosCameraSettingsPopup.open()
     }
 
-    // 滤镜模式开关
+    // 滤镜模式开关（以 iOS 滤镜弹框为准）
     function sendFilterModeConfig() {
-        var enabled = iosCameraSettingsPopup.filterModeEnabled
-        iosFilterPopup.fEnabled = enabled
+        var enabled = iosFilterPopup.fEnabled
+        iosCameraSettingsPopup.filterModeEnabled = enabled
         sendConfigUpdate("filterEnabled", { "filterEnabled": enabled })
         console.log("🎨 滤镜模式:", enabled ? "开启" : "关闭")
     }
 
-    // LUT 模式开关
+    // LUT 模式开关（以 iOS 滤镜弹框为准）
     function sendLutModeConfig() {
-        var enabled = iosCameraSettingsPopup.lutModeEnabled
-        iosFilterPopup.lutEnabled = enabled
+        var enabled = iosFilterPopup.lutEnabled
+        iosCameraSettingsPopup.lutModeEnabled = enabled
         var payload = { "cmd": "test_mode", "enabled": enabled }
         console.log("🎨 LUT模式:", enabled ? "开启" : "关闭")
         sendConfigUpdate("test_mode", payload)
     }
 
+    // 清晰度百分比 → iOS 码率 min/max
+    function sendBitrateConfig() {
+        var v = iosCameraSettingsPopup.clarityValue
+        sendConfigUpdate("bitrate", { "bitrate": v })
+        console.log("📊 清晰度/码率推送:", v + "%")
+    }
+
     // 硬件亮度：ISO/EV -2~+8，不受滤镜/LUT 开关影响
     function sendTestBrightnessConfig(value) {
-        iosCameraSettingsPopup.hardwareBrightness = Math.round(value)
-        var payload = { "cmd": "test_brightness", "value": Math.round(value) }
+        var v = Math.round(value)
+        iosCameraSettingsPopup.hardwareBrightness = v
+        if (typeof ifFilterHardwareBrightnessSlider !== 'undefined')
+            ifFilterHardwareBrightnessSlider.value = v
+        var payload = { "cmd": "test_brightness", "value": v }
         sendConfigUpdate("test_brightness", payload)
     }
 
@@ -7151,6 +7006,7 @@ Rectangle {
         // 发送档位切换
         HttpClient.updateQualityType(qualityType)
         sendConfigUpdate("type", {"type": qualityType})
+        sendBitrateConfig()
         
         // ⭐ 切换档位时保持当前参数不变（亮度、对比度、综合亮度、帧率、超级帧率）
         // 只检查帧率和超级帧率是否超过新档位的上限，如果超过则限制到上限
@@ -7466,6 +7322,7 @@ Rectangle {
                 sendFilterModeConfig()
                 sendLutModeConfig()
                 sendTestBrightnessConfig(iosCameraSettingsPopup.hardwareBrightness)
+                sendBitrateConfig()
             }
         }
         
@@ -7996,7 +7853,8 @@ Rectangle {
             }
             if (ptype === "test_brightness" && config.value !== undefined) {
                 iosCameraSettingsPopup.hardwareBrightness = config.value
-                testBrightnessSlider.value = config.value
+                if (typeof ifFilterHardwareBrightnessSlider !== 'undefined')
+                    ifFilterHardwareBrightnessSlider.value = config.value
             }
             if (ptype === "lutName" || (shouldUpdateAll && config.lutName !== undefined)) {
                 if (config.lutName !== undefined && config.lutName !== "") {
@@ -8031,6 +7889,16 @@ Rectangle {
                 iosFilterPopup.fExposure = expLinear
                 iosFilterPopup.prevExposure = expLinear
                 if (typeof ifExposureSlider !== 'undefined') ifExposureSlider.value = expLinear
+            }
+            if ((ptype === "sharpness" || shouldUpdateAll) && config.sharpness !== undefined) {
+                iosFilterPopup.fSharpness = config.sharpness
+                iosFilterPopup.prevSharpness = config.sharpness
+                if (typeof ifSharpnessSlider !== 'undefined') ifSharpnessSlider.value = config.sharpness
+            }
+            if ((ptype === "highlightLift" || shouldUpdateAll) && config.highlightLift !== undefined) {
+                iosFilterPopup.fHighlightLift = config.highlightLift
+                iosFilterPopup.prevHighlightLift = config.highlightLift
+                if (typeof ifHighlightLiftSlider !== 'undefined') ifHighlightLiftSlider.value = config.highlightLift
             }
             
             // ⭐ 本地视觉效果（时时流局部缩放）- 其他PC操作时需要同步
@@ -11136,7 +11004,7 @@ Rectangle {
     Window {
         id: iosFilterPopup
         width: 480
-        height: 520
+        height: 820
         flags: Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
         color: "transparent"
         visible: false
@@ -11145,6 +11013,8 @@ Rectangle {
         //   open 时把 PC 当前默认值同步到 iOS (确保 redBoost=0.02 等锁死值生效)
         function open()  {
             visible = true
+            if (typeof ifFilterHardwareBrightnessSlider !== 'undefined')
+                ifFilterHardwareBrightnessSlider.value = iosCameraSettingsPopup.hardwareBrightness
             pushAllStomp()
         }
         function close() { visible = false }
@@ -11185,6 +11055,13 @@ Rectangle {
         property double exposureFrom:   0.6;   property double exposureTo:   1.6;   property double exposureStep:   0.02; property double exposureDefault:   1.10
         property double redBoostDefault: 0.02
         property double blackPointDefault: 0.10   // ⭐ 后台可调; 压 H.264 limited-range 伪黑
+        // ⭐ 玉麒麟扩展参数
+        property double sharpnessFrom: 0;   property double sharpnessTo: 1.0;  property double sharpnessStep: 0.05; property double sharpnessDefault: 0.20
+        property double highlightLiftFrom: 0; property double highlightLiftTo: 1.0; property double highlightLiftStep: 0.02; property double highlightLiftDefault: 0.0
+        property double fSharpness: 0.20
+        property double fHighlightLift: 0.0
+        property double prevSharpness: 0.20
+        property double prevHighlightLift: 0.0
 
         // ⭐ 综合亮度联动 — 每个选项前的复选框, 勾选的滑块组成联动组
         //   拖任一勾选滑块, 其他勾选滑块按各自 stepSize 走相同步数 (双向)
@@ -11232,6 +11109,8 @@ Rectangle {
             applyOne("contrast",   "contrastFrom",   "contrastTo",   "contrastStep",   "contrastDefault",   "fContrast",   "prevContrast",   "linkContrast",   "linkContrastDefault")
             applyOne("saturation", "saturationFrom", "saturationTo", "saturationStep", "saturationDefault", "fSaturation", "prevSaturation", "linkSaturation", "linkSaturationDefault")
             applyOne("exposure",   "exposureFrom",   "exposureTo",   "exposureStep",   "exposureDefault",   "fExposure",   "prevExposure",   "linkExposure",   "linkExposureDefault")
+            applyOne("sharpness",  "sharpnessFrom",  "sharpnessTo",  "sharpnessStep",  "sharpnessDefault",  "fSharpness",  "prevSharpness",  null, null)
+            applyOne("highlightLift", "highlightLiftFrom", "highlightLiftTo", "highlightLiftStep", "highlightLiftDefault", "fHighlightLift", "prevHighlightLift", null, null)
             if (c.redBoost && c.redBoost.locked !== undefined) {
                 iosFilterPopup.redBoostDefault = c.redBoost.locked
                 iosFilterPopup.fRedBoost       = c.redBoost.locked
@@ -11247,6 +11126,8 @@ Rectangle {
             if (typeof ifContrastSlider   !== 'undefined') ifContrastSlider.value   = iosFilterPopup.fContrast
             if (typeof ifSaturationSlider !== 'undefined') ifSaturationSlider.value = iosFilterPopup.fSaturation
             if (typeof ifExposureSlider   !== 'undefined') ifExposureSlider.value   = iosFilterPopup.fExposure
+            if (typeof ifSharpnessSlider  !== 'undefined') ifSharpnessSlider.value  = iosFilterPopup.fSharpness
+            if (typeof ifHighlightLiftSlider !== 'undefined') ifHighlightLiftSlider.value = iosFilterPopup.fHighlightLift
             console.log("✅ [iOS-Filter] 已应用后台默认值")
 
             // ⭐ Bug2 修复：重置相机设定的"综合亮度"到中点 50（对应所有 iOS 滤镜值都在 default）
@@ -11340,6 +11221,8 @@ Rectangle {
             pushParam("gamma",         iosFilterPopup.fGamma)
             pushParam("exposure",      Math.log2(iosFilterPopup.fExposure))
             pushParam("blackPoint",    iosFilterPopup.fBlackPoint)
+            pushParam("sharpness",     iosFilterPopup.fSharpness)
+            pushParam("highlightLift", iosFilterPopup.fHighlightLift)
             if (iosFilterPopup.lutEnabled) {
                 sendConfigUpdate("test_mode", { "cmd": "test_mode", "enabled": true })
                 pushParam("lutName", iosFilterPopup.selectedLutName)
@@ -11522,6 +11405,8 @@ Rectangle {
                                 iosFilterPopup.fContrast   = iosFilterPopup.contrastDefault
                                 iosFilterPopup.fSaturation = iosFilterPopup.saturationDefault
                                 iosFilterPopup.fExposure   = iosFilterPopup.exposureDefault
+                                iosFilterPopup.fSharpness  = iosFilterPopup.sharpnessDefault
+                                iosFilterPopup.fHighlightLift = iosFilterPopup.highlightLiftDefault
                                 iosFilterPopup.fRedBoost   = iosFilterPopup.redBoostDefault
                                 iosFilterPopup.fEnabled    = false
                                 iosFilterPopup.prevBrightness = iosFilterPopup.brightnessDefault
@@ -11529,6 +11414,8 @@ Rectangle {
                                 iosFilterPopup.prevContrast   = iosFilterPopup.contrastDefault
                                 iosFilterPopup.prevSaturation = iosFilterPopup.saturationDefault
                                 iosFilterPopup.prevExposure   = iosFilterPopup.exposureDefault
+                                iosFilterPopup.prevSharpness  = iosFilterPopup.sharpnessDefault
+                                iosFilterPopup.prevHighlightLift = iosFilterPopup.highlightLiftDefault
                                 // ⭐ 使用后台配置的 linkDefault 值（而非硬编码）
                                 iosFilterPopup.linkBrightness = iosFilterPopup.linkBrightnessDefault
                                 iosFilterPopup.linkGamma      = iosFilterPopup.linkGammaDefault
@@ -11540,6 +11427,8 @@ Rectangle {
                                 if (typeof ifContrastSlider   !== 'undefined') ifContrastSlider.value   = iosFilterPopup.contrastDefault
                                 if (typeof ifSaturationSlider !== 'undefined') ifSaturationSlider.value = iosFilterPopup.saturationDefault
                                 if (typeof ifExposureSlider   !== 'undefined') ifExposureSlider.value   = iosFilterPopup.exposureDefault
+                                if (typeof ifSharpnessSlider  !== 'undefined') ifSharpnessSlider.value  = iosFilterPopup.sharpnessDefault
+                                if (typeof ifHighlightLiftSlider !== 'undefined') ifHighlightLiftSlider.value = iosFilterPopup.highlightLiftDefault
                                 // ⭐ 同时重置相机设定的"综合亮度"到中点 50（对应所有 iOS 滤镜值都在 default）
                                 iosCameraSettingsPopup.exposureValue = 50
                                 iosFilterPopup.pushAllStomp()
@@ -11898,9 +11787,219 @@ Rectangle {
                     Text { text: iosFilterPopup.fExposure.toFixed(2); font.family: "PingFang HK"; font.pixelSize: 16; color: "#263238"; Layout.preferredWidth: 50 }
                 }
 
+                Rectangle {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 1
+                    color: "#E0E0E0"
+                }
+
+                Text {
+                    Layout.fillWidth: true
+                    horizontalAlignment: Text.AlignHCenter
+                    text: "玉麒麟补充"
+                    font.family: "PingFang HK"
+                    font.pixelSize: 12
+                    color: "#90A4AE"
+                }
+
+                // ===== 色调(H) — iOS 无 STOMP =====
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 8
+                    Item { Layout.preferredWidth: 28; Layout.preferredHeight: 28 }
+                    Text { text: "色调(H)"; font.family: "PingFang HK"; font.pixelSize: 16; font.bold: true; color: "#90A4AE"; Layout.preferredWidth: 70 }
+                    Text { text: "无法调"; font.family: "PingFang HK"; font.pixelSize: 14; color: "#90A4AE"; Layout.fillWidth: true }
+                    Text { text: "—"; font.family: "PingFang HK"; font.pixelSize: 16; color: "#90A4AE"; Layout.preferredWidth: 50 }
+                }
+
+                // ===== 清晰度(P)（滤镜） =====
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 8
+                    Item { Layout.preferredWidth: 28; Layout.preferredHeight: 28 }
+                    Text { text: "清晰度(P)（滤镜）"; font.family: "PingFang HK"; font.pixelSize: 16; font.bold: true; color: "#E53935"; Layout.preferredWidth: 130 }
+                    Slider {
+                        id: ifSharpnessSlider
+                        Layout.fillWidth: true
+                        from: iosFilterPopup.sharpnessFrom; to: iosFilterPopup.sharpnessTo; stepSize: iosFilterPopup.sharpnessStep
+                        value: iosFilterPopup.fSharpness
+                        onMoved: {
+                            iosFilterPopup.prevSharpness = value
+                            iosFilterPopup.fSharpness = value
+                            iosFilterPopup.pushParam("sharpness", value)
+                        }
+                        onPressedChanged: if (!pressed) iosFilterPopup.pushParam("sharpness", value)
+                        background: Rectangle {
+                            x: ifSharpnessSlider.leftPadding
+                            y: ifSharpnessSlider.topPadding + ifSharpnessSlider.availableHeight / 2 - height / 2
+                            implicitWidth: 200; implicitHeight: 4
+                            width: ifSharpnessSlider.availableWidth; height: 4
+                            radius: 999; color: "#C8E6C9"
+                            Rectangle {
+                                width: ifSharpnessSlider.visualPosition * parent.width
+                                height: parent.height; radius: 999; color: "#4DB6AC"
+                            }
+                        }
+                        handle: Rectangle {
+                            x: ifSharpnessSlider.leftPadding + ifSharpnessSlider.visualPosition * (ifSharpnessSlider.availableWidth - width)
+                            y: ifSharpnessSlider.topPadding + ifSharpnessSlider.availableHeight / 2 - height / 2
+                            implicitWidth: 14; implicitHeight: 14
+                            width: 14; height: 14; radius: 7; color: "#4DB6AC"
+                        }
+                        WheelHandler {
+                            onWheel: function(event) {
+                                if (event.angleDelta.y === 0) return
+                                var dir = event.angleDelta.y > 0 ? 1 : -1
+                                var nv = iosFilterPopup.clampVal(ifSharpnessSlider.value + dir * ifSharpnessSlider.stepSize, ifSharpnessSlider.from, ifSharpnessSlider.to)
+                                ifSharpnessSlider.value = nv
+                                iosFilterPopup.prevSharpness = nv
+                                iosFilterPopup.fSharpness = nv
+                                iosFilterPopup.pushParam("sharpness", nv)
+                            }
+                        }
+                    }
+                    Text { text: iosFilterPopup.fSharpness.toFixed(2); font.family: "PingFang HK"; font.pixelSize: 16; color: "#263238"; Layout.preferredWidth: 50 }
+                }
+
+                // ===== 白平衡(WD) — iOS 无 STOMP =====
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 8
+                    Item { Layout.preferredWidth: 28; Layout.preferredHeight: 28 }
+                    Text { text: "白平衡(WD)"; font.family: "PingFang HK"; font.pixelSize: 16; font.bold: true; color: "#90A4AE"; Layout.preferredWidth: 90 }
+                    Text { text: "无法调"; font.family: "PingFang HK"; font.pixelSize: 14; color: "#90A4AE"; Layout.fillWidth: true }
+                    Text { text: "—"; font.family: "PingFang HK"; font.pixelSize: 16; color: "#90A4AE"; Layout.preferredWidth: 50 }
+                }
+
+                // ===== 逆光对比(B)（滤镜） =====
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 8
+                    Item { Layout.preferredWidth: 28; Layout.preferredHeight: 28 }
+                    Text { text: "逆光对比(B)（滤镜）"; font.family: "PingFang HK"; font.pixelSize: 16; font.bold: true; color: "#E53935"; Layout.preferredWidth: 130 }
+                    Slider {
+                        id: ifHighlightLiftSlider
+                        Layout.fillWidth: true
+                        from: iosFilterPopup.highlightLiftFrom; to: iosFilterPopup.highlightLiftTo; stepSize: iosFilterPopup.highlightLiftStep
+                        value: iosFilterPopup.fHighlightLift
+                        onMoved: {
+                            iosFilterPopup.prevHighlightLift = value
+                            iosFilterPopup.fHighlightLift = value
+                            iosFilterPopup.pushParam("highlightLift", value)
+                        }
+                        onPressedChanged: if (!pressed) iosFilterPopup.pushParam("highlightLift", value)
+                        background: Rectangle {
+                            x: ifHighlightLiftSlider.leftPadding
+                            y: ifHighlightLiftSlider.topPadding + ifHighlightLiftSlider.availableHeight / 2 - height / 2
+                            implicitWidth: 200; implicitHeight: 4
+                            width: ifHighlightLiftSlider.availableWidth; height: 4
+                            radius: 999; color: "#C8E6C9"
+                            Rectangle {
+                                width: ifHighlightLiftSlider.visualPosition * parent.width
+                                height: parent.height; radius: 999; color: "#4DB6AC"
+                            }
+                        }
+                        handle: Rectangle {
+                            x: ifHighlightLiftSlider.leftPadding + ifHighlightLiftSlider.visualPosition * (ifHighlightLiftSlider.availableWidth - width)
+                            y: ifHighlightLiftSlider.topPadding + ifHighlightLiftSlider.availableHeight / 2 - height / 2
+                            implicitWidth: 14; implicitHeight: 14
+                            width: 14; height: 14; radius: 7; color: "#4DB6AC"
+                        }
+                        WheelHandler {
+                            onWheel: function(event) {
+                                if (event.angleDelta.y === 0) return
+                                var dir = event.angleDelta.y > 0 ? 1 : -1
+                                var nv = iosFilterPopup.clampVal(ifHighlightLiftSlider.value + dir * ifHighlightLiftSlider.stepSize, ifHighlightLiftSlider.from, ifHighlightLiftSlider.to)
+                                ifHighlightLiftSlider.value = nv
+                                iosFilterPopup.prevHighlightLift = nv
+                                iosFilterPopup.fHighlightLift = nv
+                                iosFilterPopup.pushParam("highlightLift", nv)
+                            }
+                        }
+                    }
+                    Text { text: iosFilterPopup.fHighlightLift.toFixed(2); font.family: "PingFang HK"; font.pixelSize: 16; color: "#263238"; Layout.preferredWidth: 50 }
+                }
+
+                Rectangle {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 1
+                    color: "#E0E0E0"
+                }
+
+                Text {
+                    Layout.fillWidth: true
+                    horizontalAlignment: Text.AlignHCenter
+                    text: "硬件参数（不受滤镜/LUT 开关影响）"
+                    font.family: "PingFang HK"
+                    font.pixelSize: 12
+                    font.bold: true
+                    color: "#546E7A"
+                }
+
+                // ===== 增益(G)：ISO/EV -2~+8 =====
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 8
+                    Item { Layout.preferredWidth: 28; Layout.preferredHeight: 28 }
+                    Text { text: "增益(G)"; font.family: "PingFang HK"; font.pixelSize: 16; font.bold: true; color: "#263238"; Layout.preferredWidth: 72 }
+                    Slider {
+                        id: ifFilterHardwareBrightnessSlider
+                        Layout.fillWidth: true
+                        from: 0
+                        to: 100
+                        stepSize: 1
+                        value: iosCameraSettingsPopup.hardwareBrightness
+                        onMoved: sendTestBrightnessConfig(value)
+                        onPressedChanged: if (!pressed) sendTestBrightnessConfig(value)
+                        background: Rectangle {
+                            x: ifFilterHardwareBrightnessSlider.leftPadding
+                            y: ifFilterHardwareBrightnessSlider.topPadding + ifFilterHardwareBrightnessSlider.availableHeight / 2 - height / 2
+                            implicitWidth: 200; implicitHeight: 4
+                            width: ifFilterHardwareBrightnessSlider.availableWidth; height: 4
+                            radius: 999; color: "#C8E6C9"
+                            Rectangle {
+                                width: ifFilterHardwareBrightnessSlider.visualPosition * parent.width
+                                height: parent.height; radius: 999; color: "#4DB6AC"
+                            }
+                        }
+                        handle: Rectangle {
+                            x: ifFilterHardwareBrightnessSlider.leftPadding + ifFilterHardwareBrightnessSlider.visualPosition * (ifFilterHardwareBrightnessSlider.availableWidth - width)
+                            y: ifFilterHardwareBrightnessSlider.topPadding + ifFilterHardwareBrightnessSlider.availableHeight / 2 - height / 2
+                            implicitWidth: 14; implicitHeight: 14
+                            width: 14; height: 14; radius: 7; color: "#4DB6AC"
+                        }
+                        WheelHandler {
+                            onWheel: function(event) {
+                                if (event.angleDelta.y === 0) return
+                                var dir = event.angleDelta.y > 0 ? 1 : -1
+                                var nv = Math.max(0, Math.min(100, ifFilterHardwareBrightnessSlider.value + dir))
+                                ifFilterHardwareBrightnessSlider.value = nv
+                                sendTestBrightnessConfig(nv)
+                            }
+                        }
+                    }
+                    Text {
+                        text: iosCameraSettingsPopup.hardwareEVText()
+                        font.family: "PingFang HK"
+                        font.pixelSize: 14
+                        color: "#263238"
+                        Layout.preferredWidth: 50
+                    }
+                }
+
+                // ===== 自动 — 相机 AE，PC 暂无 STOMP =====
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 8
+                    Item { Layout.preferredWidth: 28; Layout.preferredHeight: 28 }
+                    Text { text: "自动"; font.family: "PingFang HK"; font.pixelSize: 16; font.bold: true; color: "#90A4AE"; Layout.preferredWidth: 72 }
+                    Text { text: "无法调"; font.family: "PingFang HK"; font.pixelSize: 14; color: "#90A4AE"; Layout.fillWidth: true }
+                    Text { text: "—"; font.family: "PingFang HK"; font.pixelSize: 16; color: "#90A4AE"; Layout.preferredWidth: 50 }
+                }
+
                 // ===== 红色增强已锁死 0.02 (无滑块, 启动时由 pushAllStomp 推) =====
 
-                // ===== 玉麒麟 LUT =====
+                // ===== 滤镜 / LUT 开关 + LUT 切换 =====
                 Rectangle {
                     Layout.fillWidth: true
                     Layout.preferredHeight: 1
@@ -11911,12 +12010,12 @@ Rectangle {
                     Layout.fillWidth: true
                     spacing: 10
                     Text {
-                        text: "滤镜"
+                        text: "滤镜模式"
                         font.family: "PingFang HK"
-                        font.pixelSize: 20
+                        font.pixelSize: 16
                         font.bold: true
                         color: "#1976D2"
-                        Layout.preferredWidth: 50
+                        Layout.preferredWidth: 72
                     }
                     Rectangle {
                         width: 44; height: 24; radius: 12
@@ -11946,20 +12045,17 @@ Rectangle {
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: 10
-
                     Text {
-                        text: "LUT"
+                        text: "LUT模式"
                         font.family: "PingFang HK"
-                        font.pixelSize: 20
+                        font.pixelSize: 16
                         font.bold: true
                         color: "#1976D2"
-                        Layout.preferredWidth: 50
+                        Layout.preferredWidth: 72
                     }
-
                     Rectangle {
                         width: 44; height: 24; radius: 12
                         color: iosFilterPopup.lutEnabled ? "#1976D2" : "#E0E0E0"
-
                         Rectangle {
                             width: 20; height: 20; radius: 10
                             color: "#FFFFFF"
@@ -11967,22 +12063,29 @@ Rectangle {
                             anchors.verticalCenter: parent.verticalCenter
                             Behavior on x { NumberAnimation { duration: 150 } }
                         }
-
                         MouseArea {
                             anchors.fill: parent
                             cursorShape: Qt.PointingHandCursor
                             onClicked: iosFilterPopup.pushLutEnabled(!iosFilterPopup.lutEnabled)
                         }
                     }
-
                     Text {
                         text: iosFilterPopup.lutEnabled ? "已开启" : "已关闭"
                         font.family: "PingFang HK"
                         font.pixelSize: 12
                         color: iosFilterPopup.lutEnabled ? "#1976D2" : "#90A4AE"
                     }
-
                     Item { Layout.fillWidth: true }
+                }
+
+                Text {
+                    Layout.fillWidth: true
+                    horizontalAlignment: Text.AlignHCenter
+                    text: "LUT 切换"
+                    font.family: "PingFang HK"
+                    font.pixelSize: 12
+                    color: "#1976D2"
+                    font.bold: true
                 }
 
                 Flow {
