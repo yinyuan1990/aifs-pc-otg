@@ -4310,10 +4310,16 @@ Rectangle {
             cameraBrightnessSlider.value = iosFilterPopup.fContrast        // 对比度滑块 → iOS 滤镜的 contrast
             cameraFakeExposureSlider.value = iosFilterPopup.fBrightness   // 曝光度滑块 → iOS 滤镜的 brightness
             cameraSaturationSlider.value = iosFilterPopup.fSaturation     // 红外模式滑块 → iOS 滤镜的 saturation
+            testBrightnessSlider.value = hardwareBrightness
 
             visible = true
         }
         function close() { visible = false }
+
+        function hardwareEVText() {
+            var ev = -2 + (hardwareBrightness / 100) * 10
+            return ev.toFixed(1) + "EV"
+        }
         
         // 拖动相关属性
         property point dragStart: Qt.point(0, 0)
@@ -4333,7 +4339,9 @@ Rectangle {
         property string qualityType: "high" // 档位：low/standard/high/ultra/p4k
         property bool antiFlickerEnabled: false  // 抗频闪开关（默认关闭）
         property int antiFlickerFps: 80          // 抗频闪帧率档位（80/100/200）
-        property bool testModeEnabled: false     // 测试模式：硬件EV/ISO 调亮度（玉麒麟方案对比）
+        property bool filterModeEnabled: true    // 滤镜模式（Metal 后处理，默认开）
+        property bool lutModeEnabled: true       // LUT 模式（玉麒麟 LUT，默认开）
+        property int hardwareBrightness: 20      // 硬件亮度 0~100 → EV -2..+8，20=0EV
         
         // 窗口内容背景
         Rectangle {
@@ -5553,67 +5561,102 @@ Rectangle {
                 }
             }
 
-            // 测试模式（硬件 EV/ISO 调亮度，对比玉麒麟方案）
+            // 滤镜 / LUT 模式（独立开关，默认都开；管道：相机 → 滤镜 → LUT → 编码）
             Item {
                 Layout.fillWidth: true
                 height: 36
 
                 Row {
                     anchors.horizontalCenter: parent.horizontalCenter
-                    spacing: 10
+                    spacing: 24
 
-                    Text {
-                        text: "原生模式"
-                        font.family: "PingFang HK"
-                        font.pixelSize: 13
-                        font.bold: true
-                        color: "#1976D2"
+                    Row {
+                        spacing: 8
                         anchors.verticalCenter: parent.verticalCenter
-                    }
-
-                    Rectangle {
-                        width: 44; height: 24; radius: 12
-                        color: iosCameraSettingsPopup.testModeEnabled ? "#1976D2" : "#E0E0E0"
-                        anchors.verticalCenter: parent.verticalCenter
-
-                        Rectangle {
-                            width: 20; height: 20; radius: 10
-                            color: "#FFFFFF"
-                            x: iosCameraSettingsPopup.testModeEnabled ? 22 : 2
+                        Text {
+                            text: "滤镜模式"
+                            font.family: "PingFang HK"
+                            font.pixelSize: 13
+                            font.bold: true
+                            color: "#1976D2"
                             anchors.verticalCenter: parent.verticalCenter
-                            Behavior on x { NumberAnimation { duration: 150 } }
                         }
-
-                        MouseArea {
-                            anchors.fill: parent
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: {
-                                iosCameraSettingsPopup.testModeEnabled = !iosCameraSettingsPopup.testModeEnabled
-                                sendTestModeConfig()
+                        Rectangle {
+                            width: 44; height: 24; radius: 12
+                            color: iosCameraSettingsPopup.filterModeEnabled ? "#1976D2" : "#E0E0E0"
+                            anchors.verticalCenter: parent.verticalCenter
+                            Rectangle {
+                                width: 20; height: 20; radius: 10
+                                color: "#FFFFFF"
+                                x: iosCameraSettingsPopup.filterModeEnabled ? 22 : 2
+                                anchors.verticalCenter: parent.verticalCenter
+                                Behavior on x { NumberAnimation { duration: 150 } }
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    iosCameraSettingsPopup.filterModeEnabled = !iosCameraSettingsPopup.filterModeEnabled
+                                    sendFilterModeConfig()
+                                }
                             }
                         }
                     }
 
-                    Text {
-                        text: iosCameraSettingsPopup.testModeEnabled ? "硬件直出" : "后处理增强"
-                        font.family: "PingFang HK"
-                        font.pixelSize: 11
-                        color: "#78909C"
+                    Row {
+                        spacing: 8
                         anchors.verticalCenter: parent.verticalCenter
+                        Text {
+                            text: "LUT模式"
+                            font.family: "PingFang HK"
+                            font.pixelSize: 13
+                            font.bold: true
+                            color: "#1976D2"
+                            anchors.verticalCenter: parent.verticalCenter
+                        }
+                        Rectangle {
+                            width: 44; height: 24; radius: 12
+                            color: iosCameraSettingsPopup.lutModeEnabled ? "#1976D2" : "#E0E0E0"
+                            anchors.verticalCenter: parent.verticalCenter
+                            Rectangle {
+                                width: 20; height: 20; radius: 10
+                                color: "#FFFFFF"
+                                x: iosCameraSettingsPopup.lutModeEnabled ? 22 : 2
+                                anchors.verticalCenter: parent.verticalCenter
+                                Behavior on x { NumberAnimation { duration: 150 } }
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    iosCameraSettingsPopup.lutModeEnabled = !iosCameraSettingsPopup.lutModeEnabled
+                                    sendLutModeConfig()
+                                }
+                            }
+                        }
                     }
                 }
             }
 
-            // 测试亮度滑块（仅原生模式开启时生效，独立于综合亮度）
+            Text {
+                Layout.fillWidth: true
+                horizontalAlignment: Text.AlignHCenter
+                text: "硬件参数（不受上方开关影响）"
+                font.family: "PingFang HK"
+                font.pixelSize: 12
+                color: "#90A4AE"
+            }
+
+            // 硬件亮度：ISO/EV，-2~+8 EV，默认 0
             RowLayout {
                 Layout.fillWidth: true
                 spacing: 10
 
                 Text {
-                    text: "原生亮度"
+                    text: "亮度"
                     font.family: "PingFang HK"
                     font.pixelSize: 16
-                    color: iosCameraSettingsPopup.testModeEnabled ? "#263238" : "#B0BEC5"
+                    color: "#263238"
                     Layout.preferredWidth: 60
                 }
 
@@ -5623,11 +5666,14 @@ Rectangle {
                     from: 0
                     to: 100
                     stepSize: 1
-                    value: 50
-                    enabled: iosCameraSettingsPopup.testModeEnabled
-                    opacity: iosCameraSettingsPopup.testModeEnabled ? 1.0 : 0.4
+                    value: iosCameraSettingsPopup.hardwareBrightness
 
                     onMoved: {
+                        iosCameraSettingsPopup.hardwareBrightness = value
+                        sendTestBrightnessConfig(value)
+                    }
+                    onPressedChanged: if (!pressed) {
+                        iosCameraSettingsPopup.hardwareBrightness = value
                         sendTestBrightnessConfig(value)
                     }
 
@@ -5662,11 +5708,11 @@ Rectangle {
                 }
 
                 Text {
-                    text: Math.round(testBrightnessSlider.value)
+                    text: iosCameraSettingsPopup.hardwareEVText()
                     font.family: "PingFang HK"
-                    font.pixelSize: 16
-                    color: iosCameraSettingsPopup.testModeEnabled ? "#263238" : "#B0BEC5"
-                    Layout.preferredWidth: 40
+                    font.pixelSize: 14
+                    color: "#263238"
+                    Layout.preferredWidth: 56
                 }
             }
             }  // 关闭 ColumnLayout
@@ -5687,17 +5733,26 @@ Rectangle {
         iosCameraSettingsPopup.open()
     }
 
-    // 测试模式：通知 iOS 切换到硬件 EV/ISO 调亮度（玉麒麟方案对比）
-    function sendTestModeConfig() {
-        var enabled = iosCameraSettingsPopup.testModeEnabled
+    // 滤镜模式开关
+    function sendFilterModeConfig() {
+        var enabled = iosCameraSettingsPopup.filterModeEnabled
+        iosFilterPopup.fEnabled = enabled
+        sendConfigUpdate("filterEnabled", { "filterEnabled": enabled })
+        console.log("🎨 滤镜模式:", enabled ? "开启" : "关闭")
+    }
+
+    // LUT 模式开关
+    function sendLutModeConfig() {
+        var enabled = iosCameraSettingsPopup.lutModeEnabled
+        iosFilterPopup.lutEnabled = enabled
         var payload = { "cmd": "test_mode", "enabled": enabled }
-        console.log("🧪 测试模式:", enabled ? "开启(硬件EV/ISO)" : "关闭(后处理)")
+        console.log("🎨 LUT模式:", enabled ? "开启" : "关闭")
         sendConfigUpdate("test_mode", payload)
     }
 
-    // 测试亮度：独立滑块（仅测试模式生效，不影响综合亮度后处理）
+    // 硬件亮度：ISO/EV -2~+8，不受滤镜/LUT 开关影响
     function sendTestBrightnessConfig(value) {
-        if (!iosCameraSettingsPopup.testModeEnabled) return
+        iosCameraSettingsPopup.hardwareBrightness = Math.round(value)
         var payload = { "cmd": "test_brightness", "value": Math.round(value) }
         sendConfigUpdate("test_brightness", payload)
     }
@@ -7408,6 +7463,9 @@ Rectangle {
             //    多发无副作用 (iOS 收到相同值不会有视觉抖动).
             if (deviceId && deviceId !== "") {
                 iosFilterPopup.pushAllStomp()
+                sendFilterModeConfig()
+                sendLutModeConfig()
+                sendTestBrightnessConfig(iosCameraSettingsPopup.hardwareBrightness)
             }
         }
         
@@ -7925,6 +7983,54 @@ Rectangle {
                     exposureSettingsPopup.gammaValue = config.gamma
                     // captureManager.gamma = config.gamma
                 }
+            }
+
+            // ⭐ 玉麒麟 LUT 开关 / 切换 — 其他 PC 同步 UI
+            if (ptype === "test_mode" && config.enabled !== undefined) {
+                iosFilterPopup.lutEnabled = config.enabled
+                iosCameraSettingsPopup.lutModeEnabled = config.enabled
+            }
+            if (ptype === "filterEnabled" && config.filterEnabled !== undefined) {
+                iosFilterPopup.fEnabled = config.filterEnabled
+                iosCameraSettingsPopup.filterModeEnabled = config.filterEnabled
+            }
+            if (ptype === "test_brightness" && config.value !== undefined) {
+                iosCameraSettingsPopup.hardwareBrightness = config.value
+                testBrightnessSlider.value = config.value
+            }
+            if (ptype === "lutName" || (shouldUpdateAll && config.lutName !== undefined)) {
+                if (config.lutName !== undefined && config.lutName !== "") {
+                    iosFilterPopup.selectedLutName = config.lutName
+                    iosFilterPopup.lutEnabled = true
+                    iosCameraSettingsPopup.lutModeEnabled = true
+                }
+            }
+            // ⭐ iOS 滤镜弹框 — 其他 PC 同步滑块值
+            if (ptype === "brightness" && config.brightness !== undefined) {
+                iosFilterPopup.fBrightness = config.brightness
+                iosFilterPopup.prevBrightness = config.brightness
+                if (typeof ifMasterSlider !== 'undefined') ifMasterSlider.value = config.brightness
+            }
+            if (ptype === "contrast" && config.contrast !== undefined) {
+                iosFilterPopup.fContrast = config.contrast
+                iosFilterPopup.prevContrast = config.contrast
+                if (typeof ifContrastSlider !== 'undefined') ifContrastSlider.value = config.contrast
+            }
+            if (ptype === "saturation" && config.saturation !== undefined) {
+                iosFilterPopup.fSaturation = config.saturation
+                iosFilterPopup.prevSaturation = config.saturation
+                if (typeof ifSaturationSlider !== 'undefined') ifSaturationSlider.value = config.saturation
+            }
+            if (ptype === "gamma" && config.gamma !== undefined) {
+                iosFilterPopup.fGamma = config.gamma
+                iosFilterPopup.prevGamma = config.gamma
+                if (typeof ifGammaSlider !== 'undefined') ifGammaSlider.value = config.gamma
+            }
+            if (ptype === "exposure" && config.exposure !== undefined) {
+                var expLinear = Math.pow(2, config.exposure)
+                iosFilterPopup.fExposure = expLinear
+                iosFilterPopup.prevExposure = expLinear
+                if (typeof ifExposureSlider !== 'undefined') ifExposureSlider.value = expLinear
             }
             
             // ⭐ 本地视觉效果（时时流局部缩放）- 其他PC操作时需要同步
@@ -11030,7 +11136,7 @@ Rectangle {
     Window {
         id: iosFilterPopup
         width: 480
-        height: 420
+        height: 520
         flags: Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
         color: "transparent"
         visible: false
@@ -11059,6 +11165,17 @@ Rectangle {
         property double fRedBoost:   0.02
         property double fBlackPoint: 0.10   // ⭐ 默认 0.10 压死 limited-range 伪黑 (黑色不再灰)
         property bool   fEnabled:    true
+
+        // ⭐ 玉麒麟 LUT（5 张 png，STOMP ptype=lutName + test_mode 开关）
+        property bool   lutEnabled: true
+        property string selectedLutName: "lookup_soft_elegance_1"
+        readonly property var lutOptions: [
+            { name: "lookup",                 label: "标准" },
+            { name: "lookup_soft_elegance_1", label: "柔雅1" },
+            { name: "lookup_soft_elegance_2", label: "柔雅2" },
+            { name: "lookup_amatorka",        label: "Amatorka" },
+            { name: "lookup_miss_etikate",    label: "Etikate" }
+        ]
 
         // ⭐ 上下限 / 步进 / 出厂默认 — 跟默认值一样从后台动态拉取 (硬编码仅作 server fetch 失败时的 fallback)
         property double brightnessFrom: 0.8;   property double brightnessTo: 2.0;   property double brightnessStep: 0.02; property double brightnessDefault: 1.10
@@ -11213,16 +11330,40 @@ Rectangle {
             sendConfigUpdate(ptype, c)
         }
 
-        // ⭐ STOMP 全量推送 — 还原时用一次发齐 (filterEnabled 永远 true 不可关)
+        // ⭐ STOMP 全量推送 — 还原时用一次发齐
         function pushAllStomp() {
-            pushParam("filterEnabled", true)
+            pushParam("filterEnabled", iosFilterPopup.fEnabled)
             pushParam("brightness",    iosFilterPopup.fBrightness)
             pushParam("contrast",      iosFilterPopup.fContrast)
             pushParam("saturation",    iosFilterPopup.fSaturation)
             pushParam("redBoost",      iosFilterPopup.fRedBoost)
             pushParam("gamma",         iosFilterPopup.fGamma)
             pushParam("exposure",      Math.log2(iosFilterPopup.fExposure))
-            pushParam("blackPoint",    iosFilterPopup.fBlackPoint)   // ⭐ 压 limited-range 伪黑
+            pushParam("blackPoint",    iosFilterPopup.fBlackPoint)
+            if (iosFilterPopup.lutEnabled) {
+                sendConfigUpdate("test_mode", { "cmd": "test_mode", "enabled": true })
+                pushParam("lutName", iosFilterPopup.selectedLutName)
+            }
+        }
+
+        // ⭐ LUT 开关 → STOMP test_mode（与相机设定同步）
+        function pushLutEnabled(enabled) {
+            lutEnabled = enabled
+            iosCameraSettingsPopup.lutModeEnabled = enabled
+            sendConfigUpdate("test_mode", { "cmd": "test_mode", "enabled": enabled })
+        }
+
+        // ⭐ 滤镜栈开关
+        function pushFilterEnabled(enabled) {
+            fEnabled = enabled
+            iosCameraSettingsPopup.filterModeEnabled = enabled
+            pushParam("filterEnabled", enabled)
+        }
+
+        // ⭐ 切换 LUT 图
+        function selectLut(name) {
+            selectedLutName = name
+            pushParam("lutName", name)
         }
 
         // ⭐ 相机设定的"综合亮度"(0-100) → 同时驱动 brightness + gamma + exposure
@@ -11758,6 +11899,127 @@ Rectangle {
                 }
 
                 // ===== 红色增强已锁死 0.02 (无滑块, 启动时由 pushAllStomp 推) =====
+
+                // ===== 玉麒麟 LUT =====
+                Rectangle {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 1
+                    color: "#E0E0E0"
+                }
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 10
+                    Text {
+                        text: "滤镜"
+                        font.family: "PingFang HK"
+                        font.pixelSize: 20
+                        font.bold: true
+                        color: "#1976D2"
+                        Layout.preferredWidth: 50
+                    }
+                    Rectangle {
+                        width: 44; height: 24; radius: 12
+                        color: iosFilterPopup.fEnabled ? "#1976D2" : "#E0E0E0"
+                        Rectangle {
+                            width: 20; height: 20; radius: 10
+                            color: "#FFFFFF"
+                            x: iosFilterPopup.fEnabled ? 22 : 2
+                            anchors.verticalCenter: parent.verticalCenter
+                            Behavior on x { NumberAnimation { duration: 150 } }
+                        }
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: iosFilterPopup.pushFilterEnabled(!iosFilterPopup.fEnabled)
+                        }
+                    }
+                    Text {
+                        text: iosFilterPopup.fEnabled ? "已开启" : "已关闭"
+                        font.family: "PingFang HK"
+                        font.pixelSize: 12
+                        color: iosFilterPopup.fEnabled ? "#1976D2" : "#90A4AE"
+                    }
+                    Item { Layout.fillWidth: true }
+                }
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 10
+
+                    Text {
+                        text: "LUT"
+                        font.family: "PingFang HK"
+                        font.pixelSize: 20
+                        font.bold: true
+                        color: "#1976D2"
+                        Layout.preferredWidth: 50
+                    }
+
+                    Rectangle {
+                        width: 44; height: 24; radius: 12
+                        color: iosFilterPopup.lutEnabled ? "#1976D2" : "#E0E0E0"
+
+                        Rectangle {
+                            width: 20; height: 20; radius: 10
+                            color: "#FFFFFF"
+                            x: iosFilterPopup.lutEnabled ? 22 : 2
+                            anchors.verticalCenter: parent.verticalCenter
+                            Behavior on x { NumberAnimation { duration: 150 } }
+                        }
+
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: iosFilterPopup.pushLutEnabled(!iosFilterPopup.lutEnabled)
+                        }
+                    }
+
+                    Text {
+                        text: iosFilterPopup.lutEnabled ? "已开启" : "已关闭"
+                        font.family: "PingFang HK"
+                        font.pixelSize: 12
+                        color: iosFilterPopup.lutEnabled ? "#1976D2" : "#90A4AE"
+                    }
+
+                    Item { Layout.fillWidth: true }
+                }
+
+                Flow {
+                    Layout.fillWidth: true
+                    spacing: 6
+
+                    Repeater {
+                        model: iosFilterPopup.lutOptions
+                        delegate: Rectangle {
+                            width: 84
+                            height: 28
+                            radius: 6
+                            property bool isSelected: iosFilterPopup.selectedLutName === modelData.name
+                            color: isSelected ? "#1976D2" : (lutBtnArea.containsMouse ? "#E3F2FD" : "#F5F5F5")
+                            border.color: isSelected ? "#1565C0" : "#B0BEC5"
+                            border.width: 1
+                            opacity: iosFilterPopup.lutEnabled ? 1.0 : 0.55
+
+                            Text {
+                                anchors.centerIn: parent
+                                text: modelData.label
+                                font.family: "PingFang HK"
+                                font.pixelSize: 12
+                                font.bold: parent.isSelected
+                                color: parent.isSelected ? "#FFFFFF" : "#37474F"
+                            }
+
+                            MouseArea {
+                                id: lutBtnArea
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: iosFilterPopup.selectLut(modelData.name)
+                            }
+                        }
+                    }
+                }
 
                 // 底部留空 (正式后端没有 IosFilterController, "保存为系统默认"按钮已去掉)
                 Item { Layout.fillWidth: true; Layout.fillHeight: true }
