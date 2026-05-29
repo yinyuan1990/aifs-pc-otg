@@ -58,9 +58,32 @@ Rectangle {
     property real videoOffsetX: 0          // X轴偏移（相对于中心）
     property real videoOffsetY: 0          // Y轴偏移（相对于中心）
 
-    onVideoZoomChanged: { slowmoZoom = videoZoom }
-    onVideoOffsetXChanged: { slowmoOffsetX = videoOffsetX }
-    onVideoOffsetYChanged: { slowmoOffsetY = videoOffsetY }
+    function clampVideoOffsets() {
+        var maxOffsetX = videoContainer.width * (videoZoom - 1) / 2
+        var maxOffsetY = videoContainer.height * (videoZoom - 1) / 2
+        videoOffsetX = Math.max(-maxOffsetX, Math.min(maxOffsetX, videoOffsetX))
+        videoOffsetY = Math.max(-maxOffsetY, Math.min(maxOffsetY, videoOffsetY))
+    }
+
+    function clampSlowmoOffsets() {
+        var maxOffsetX = slowmoVideoContainer.width * (slowmoZoom - 1) / 2
+        var maxOffsetY = slowmoVideoContainer.height * (slowmoZoom - 1) / 2
+        slowmoOffsetX = Math.max(-maxOffsetX, Math.min(maxOffsetX, slowmoOffsetX))
+        slowmoOffsetY = Math.max(-maxOffsetY, Math.min(maxOffsetY, slowmoOffsetY))
+    }
+
+    onVideoZoomChanged: {
+        slowmoZoom = videoZoom
+        clampVideoOffsets()
+    }
+    onVideoOffsetXChanged: {
+        clampVideoOffsets()
+        slowmoOffsetX = videoOffsetX
+    }
+    onVideoOffsetYChanged: {
+        clampVideoOffsets()
+        slowmoOffsetY = videoOffsetY
+    }
 
     // ⭐ 慢放回放窗口的 独立 局部缩放 (S+滚轮 触发, 鼠标位置为中心)
     //    慢放跟实时流的 videoZoom 解耦, 满放跟随实时流同步.
@@ -68,6 +91,10 @@ Rectangle {
     property real slowmoZoom: 1.0          // 慢放本地缩放 1.0 - 5.0
     property real slowmoOffsetX: 0
     property real slowmoOffsetY: 0
+
+    onSlowmoZoomChanged: { clampSlowmoOffsets() }
+    onSlowmoOffsetXChanged: { clampSlowmoOffsets() }
+    onSlowmoOffsetYChanged: { clampSlowmoOffsets() }
     
     // ⭐ 每个抓拍 item 的初始缩放（抓拍时保存当前 videoZoom）
     property var itemZoomMap: ({})         // { itemIndex: { zoom, offsetX, offsetY } }
@@ -2028,7 +2055,9 @@ Rectangle {
                         anchors.fill: parent
                         anchors.margins: 2
                         clip: true
-                        
+                        onWidthChanged: mainPage.clampVideoOffsets()
+                        onHeightChanged: mainPage.clampVideoOffsets()
+
                         // 视频输出
                         VideoOutput {
                             id: liveVideoPlayer
@@ -2719,7 +2748,9 @@ Rectangle {
                         anchors.fill: parent
                         anchors.margins: 2
                         clip: true
-                        
+                        onWidthChanged: mainPage.clampSlowmoOffsets()
+                        onHeightChanged: mainPage.clampSlowmoOffsets()
+
                         // 慢放视频输出（GPU 直接渲染，避免 QImage 内存开销）
                         VideoOutput {
                             id: slowmoVideoOutput
@@ -11038,7 +11069,7 @@ Rectangle {
 
         // ⭐ 玉麒麟 LUT（5 张 png，STOMP ptype=lutName + test_mode 开关）
         property bool   lutEnabled: true
-        property string selectedLutName: "lookup_soft_elegance_1"
+        property string selectedLutName: "lookup"
         readonly property var lutOptions: [
             { name: "lookup",                 label: "标准" },
             { name: "lookup_soft_elegance_1", label: "柔雅1" },
