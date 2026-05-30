@@ -12150,6 +12150,25 @@ Rectangle {
                         color: "#263238"
                         Layout.preferredWidth: 50
                     }
+                    Rectangle {
+                        width: 40; height: 22; radius: 4
+                        color: applyWBMouseArea.containsMouse ? "#1565C0" : "#1976D2"
+                        Text {
+                            anchors.centerIn: parent
+                            text: "运用"
+                            font.family: "PingFang HK"
+                            font.pixelSize: 12
+                            font.bold: true
+                            color: "#FFFFFF"
+                        }
+                        MouseArea {
+                            id: applyWBMouseArea
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            hoverEnabled: true
+                            onClicked: iosFilterPopup.pushApplyWhiteBalance()
+                        }
+                    }
                 }
 
                 // ===== 自动 — 相机 AE，PC 暂无 STOMP =====
@@ -12180,13 +12199,12 @@ Rectangle {
                             { label: "滤镜模式", checked: iosFilterPopup.fEnabled, action: "filter" },
                             { label: "LUT模式", checked: iosFilterPopup.lutEnabled, action: "lut" },
                             { label: "Video HDR", checked: iosFilterPopup.videoHDREnabled, action: "videoHDR" },
-                            { label: "自动HDR", checked: iosFilterPopup.autoHDREnabled, action: "autoHDR" },
-                            { label: "运用白平衡", checked: false, action: "applyWhiteBalance" }
+                            { label: "自动HDR", checked: iosFilterPopup.autoHDREnabled, action: "autoHDR" }
                         ]
 
                         delegate: RowLayout {
                             spacing: 6
-                            Layout.preferredWidth: modelData.label === "运用白平衡" ? 112 : 96
+                            Layout.preferredWidth: 96
 
                             Text {
                                 text: modelData.label
@@ -12194,7 +12212,7 @@ Rectangle {
                                 font.pixelSize: 13
                                 font.bold: true
                                 color: "#1976D2"
-                                Layout.preferredWidth: modelData.label === "运用白平衡" ? 64 : 52
+                                Layout.preferredWidth: 52
                                 elide: Text.ElideRight
                             }
                             Rectangle {
@@ -12215,7 +12233,7 @@ Rectangle {
                                         else if (modelData.action === "lut") iosFilterPopup.pushLutEnabled(!iosFilterPopup.lutEnabled)
                                         else if (modelData.action === "videoHDR") iosFilterPopup.pushVideoHDREnabled(!iosFilterPopup.videoHDREnabled)
                                         else if (modelData.action === "autoHDR") iosFilterPopup.pushAutoHDREnabled(!iosFilterPopup.autoHDREnabled)
-                                        else if (modelData.action === "applyWhiteBalance") iosFilterPopup.pushApplyWhiteBalance()
+                                        // applyWhiteBalance 已移到独立按钮
                                     }
                                 }
                             }
