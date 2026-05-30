@@ -4385,6 +4385,12 @@ Rectangle {
         property bool filterModeEnabled: false   // 滤镜模式（Metal 后处理，默认关 — 对标玉麒麟只开 LUT）
         property bool lutModeEnabled: true       // LUT 模式（玉麒麟 GPUImage，默认开）
         property int hardwareBrightness: 20      // 硬件亮度 0~100 → EV -2..+8，20=0EV
+        property int hardwareWhiteBalance: 50   // 白平衡 0~100 → 2000K-8000K，50=5000K
+
+        function whiteBalanceText() {
+            var kelvin = 2000 + (hardwareWhiteBalance / 100) * 6000
+            return Math.round(kelvin) + "K"
+        }
         
         // 窗口内容背景
         Rectangle {
@@ -5654,6 +5660,16 @@ Rectangle {
             ifFilterHardwareBrightnessSlider.value = v
         var payload = { "cmd": "test_brightness", "value": v }
         sendConfigUpdate("test_brightness", payload)
+    }
+
+    // 白平衡：色温 2000K-8000K，不受滤镜/LUT 开关影响
+    function sendWhiteBalanceConfig(value) {
+        var v = Math.round(value)
+        iosCameraSettingsPopup.hardwareWhiteBalance = v
+        if (typeof ifFilterWhiteBalanceSlider !== 'undefined')
+            ifFilterWhiteBalanceSlider.value = v
+        var payload = { "cmd": "white_balance", "value": v }
+        sendConfigUpdate("white_balance", payload)
     }
 
     // 抗频闪：发送开关和帧率档位到 iOS
@@ -7909,6 +7925,11 @@ Rectangle {
                 iosCameraSettingsPopup.hardwareBrightness = config.value
                 if (typeof ifFilterHardwareBrightnessSlider !== 'undefined')
                     ifFilterHardwareBrightnessSlider.value = config.value
+            }
+            if (ptype === "white_balance" && config.value !== undefined) {
+                iosCameraSettingsPopup.hardwareWhiteBalance = config.value
+                if (typeof ifFilterWhiteBalanceSlider !== 'undefined')
+                    ifFilterWhiteBalanceSlider.value = config.value
             }
             if (ptype === "lutName" || (shouldUpdateAll && config.lutName !== undefined)) {
                 if (config.lutName !== undefined && config.lutName !== "") {
@@ -11083,6 +11104,8 @@ Rectangle {
             visible = true
             if (typeof ifFilterHardwareBrightnessSlider !== 'undefined')
                 ifFilterHardwareBrightnessSlider.value = iosCameraSettingsPopup.hardwareBrightness
+            if (typeof ifFilterWhiteBalanceSlider !== 'undefined')
+                ifFilterWhiteBalanceSlider.value = iosCameraSettingsPopup.hardwareWhiteBalance
             pushAllStomp()
         }
         function close() { visible = false }
@@ -12069,6 +12092,57 @@ Rectangle {
                     }
                     Text {
                         text: iosCameraSettingsPopup.hardwareEVText()
+                        font.family: "PingFang HK"
+                        font.pixelSize: 14
+                        color: "#263238"
+                        Layout.preferredWidth: 50
+                    }
+                }
+
+                // ===== 白平衡(WB)：色温 2000K-8000K =====
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 8
+                    Item { Layout.preferredWidth: 28; Layout.preferredHeight: 28 }
+                    Text { text: "白平衡"; font.family: "PingFang HK"; font.pixelSize: 16; font.bold: true; color: "#263238"; Layout.preferredWidth: 72 }
+                    Slider {
+                        id: ifFilterWhiteBalanceSlider
+                        Layout.fillWidth: true
+                        from: 0
+                        to: 100
+                        stepSize: 1
+                        value: iosCameraSettingsPopup.hardwareWhiteBalance
+                        onMoved: sendWhiteBalanceConfig(value)
+                        onPressedChanged: if (!pressed) sendWhiteBalanceConfig(value)
+                        background: Rectangle {
+                            x: ifFilterWhiteBalanceSlider.leftPadding
+                            y: ifFilterWhiteBalanceSlider.topPadding + ifFilterWhiteBalanceSlider.availableHeight / 2 - height / 2
+                            implicitWidth: 200; implicitHeight: 4
+                            width: ifFilterWhiteBalanceSlider.availableWidth; height: 4
+                            radius: 999; color: "#C8E6C9"
+                            Rectangle {
+                                width: ifFilterWhiteBalanceSlider.visualPosition * parent.width
+                                height: parent.height; radius: 999; color: "#FF8A65"
+                            }
+                        }
+                        handle: Rectangle {
+                            x: ifFilterWhiteBalanceSlider.leftPadding + ifFilterWhiteBalanceSlider.visualPosition * (ifFilterWhiteBalanceSlider.availableWidth - width)
+                            y: ifFilterWhiteBalanceSlider.topPadding + ifFilterWhiteBalanceSlider.availableHeight / 2 - height / 2
+                            implicitWidth: 14; implicitHeight: 14
+                            width: 14; height: 14; radius: 7; color: "#FF8A65"
+                        }
+                        WheelHandler {
+                            onWheel: function(event) {
+                                if (event.angleDelta.y === 0) return
+                                var dir = event.angleDelta.y > 0 ? 1 : -1
+                                var nv = Math.max(0, Math.min(100, ifFilterWhiteBalanceSlider.value + dir))
+                                ifFilterWhiteBalanceSlider.value = nv
+                                sendWhiteBalanceConfig(nv)
+                            }
+                        }
+                    }
+                    Text {
+                        text: iosCameraSettingsPopup.whiteBalanceText()
                         font.family: "PingFang HK"
                         font.pixelSize: 14
                         color: "#263238"
