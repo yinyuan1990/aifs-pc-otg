@@ -156,6 +156,14 @@ qt_add_qml_module(Phoenix
         images/fh.png
 )
 
+# MinGW: QML AOT 原生代码会调用 copysign，链接时需 libm；--only-bytecode 避免生成该原生代码
+if(MINGW)
+    target_link_libraries(Phoenix PRIVATE m)
+    set_target_properties(Phoenix PROPERTIES
+        QT_QMLCACHEGEN_ARGUMENTS "--only-bytecode"
+    )
+endif()
+
 # 编译 Shader（GPU 颜色调整）
 qt6_add_shaders(Phoenix "shaders"
     PREFIX "/shaders"
