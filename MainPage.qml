@@ -7914,11 +7914,11 @@ Rectangle {
             if (ptype === "autoHDR" && config.autoHDR !== undefined) {
                 iosFilterPopup.autoHDREnabled = config.autoHDR
             }
-            // 运用白平衡回传：iOS 自动测出色温后回传 slider 值，同步滑块
-            if (ptype === "applyWhiteBalance" && config.value !== undefined) {
-                iosCameraSettingsPopup.hardwareWhiteBalance = config.value
+            // 运用白平衡回传：iOS 自动测出色温后回传 wb_value，同步滑块
+            if (ptype === "applyWhiteBalance" && config.wb_value !== undefined) {
+                iosCameraSettingsPopup.hardwareWhiteBalance = config.wb_value
                 if (typeof ifFilterWhiteBalanceSlider !== 'undefined')
-                    ifFilterWhiteBalanceSlider.value = config.value
+                    ifFilterWhiteBalanceSlider.value = config.wb_value
             }
             if (ptype === "filterEnabled" && config.filterEnabled !== undefined) {
                 iosFilterPopup.fEnabled = config.filterEnabled
