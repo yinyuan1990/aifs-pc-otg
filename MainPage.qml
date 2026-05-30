@@ -7914,8 +7914,11 @@ Rectangle {
             if (ptype === "autoHDR" && config.autoHDR !== undefined) {
                 iosFilterPopup.autoHDREnabled = config.autoHDR
             }
-            if (ptype === "autoWhiteBalance" && config.autoWhiteBalance !== undefined) {
-                iosFilterPopup.autoWhiteBalanceEnabled = config.autoWhiteBalance
+            // 运用白平衡回传：iOS 自动测出色温后回传 slider 值，同步滑块
+            if (ptype === "applyWhiteBalance" && config.value !== undefined) {
+                iosCameraSettingsPopup.hardwareWhiteBalance = config.value
+                if (typeof ifFilterWhiteBalanceSlider !== 'undefined')
+                    ifFilterWhiteBalanceSlider.value = config.value
             }
             if (ptype === "filterEnabled" && config.filterEnabled !== undefined) {
                 iosFilterPopup.fEnabled = config.filterEnabled
@@ -11132,7 +11135,7 @@ Rectangle {
         property string selectedLutName: "lookup"
         property bool   videoHDREnabled: false
         property bool   autoHDREnabled: false
-        property bool   autoWhiteBalanceEnabled: false
+        // autoWhiteBalanceEnabled 已移除 — 改为"运用白平衡"单次触发
         readonly property var lutOptions: [
             { name: "lookup",                 label: "标准" },
             { name: "lookup_soft_elegance_1", label: "柔雅1" },
@@ -11319,7 +11322,7 @@ Rectangle {
             pushParam("highlightLift", iosFilterPopup.fHighlightLift)
             sendConfigUpdate("videoHDR", { "videoHDR": iosFilterPopup.videoHDREnabled })
             sendConfigUpdate("autoHDR", { "autoHDR": iosFilterPopup.autoHDREnabled })
-            sendConfigUpdate("autoWhiteBalance", { "autoWhiteBalance": iosFilterPopup.autoWhiteBalanceEnabled })
+            // 运用白平衡是单次触发，不在 pushAll 里推
             if (iosFilterPopup.lutEnabled) {
                 sendConfigUpdate("test_mode", { "cmd": "test_mode", "enabled": true })
                 pushParam("lutName", iosFilterPopup.selectedLutName)
@@ -11343,9 +11346,8 @@ Rectangle {
             sendConfigUpdate("autoHDR", { "autoHDR": enabled })
         }
 
-        function pushAutoWhiteBalanceEnabled(enabled) {
-            autoWhiteBalanceEnabled = enabled
-            sendConfigUpdate("autoWhiteBalance", { "autoWhiteBalance": enabled })
+        function pushApplyWhiteBalance() {
+            sendConfigUpdate("applyWhiteBalance", { "cmd": "applyWhiteBalance" })
         }
 
         // ⭐ 滤镜栈开关
@@ -12179,12 +12181,12 @@ Rectangle {
                             { label: "LUT模式", checked: iosFilterPopup.lutEnabled, action: "lut" },
                             { label: "Video HDR", checked: iosFilterPopup.videoHDREnabled, action: "videoHDR" },
                             { label: "自动HDR", checked: iosFilterPopup.autoHDREnabled, action: "autoHDR" },
-                            { label: "自动白平衡", checked: iosFilterPopup.autoWhiteBalanceEnabled, action: "autoWhiteBalance" }
+                            { label: "运用白平衡", checked: false, action: "applyWhiteBalance" }
                         ]
 
                         delegate: RowLayout {
                             spacing: 6
-                            Layout.preferredWidth: modelData.label === "自动白平衡" ? 112 : 96
+                            Layout.preferredWidth: modelData.label === "运用白平衡" ? 112 : 96
 
                             Text {
                                 text: modelData.label
@@ -12192,7 +12194,7 @@ Rectangle {
                                 font.pixelSize: 13
                                 font.bold: true
                                 color: "#1976D2"
-                                Layout.preferredWidth: modelData.label === "自动白平衡" ? 64 : 52
+                                Layout.preferredWidth: modelData.label === "运用白平衡" ? 64 : 52
                                 elide: Text.ElideRight
                             }
                             Rectangle {
@@ -12213,7 +12215,7 @@ Rectangle {
                                         else if (modelData.action === "lut") iosFilterPopup.pushLutEnabled(!iosFilterPopup.lutEnabled)
                                         else if (modelData.action === "videoHDR") iosFilterPopup.pushVideoHDREnabled(!iosFilterPopup.videoHDREnabled)
                                         else if (modelData.action === "autoHDR") iosFilterPopup.pushAutoHDREnabled(!iosFilterPopup.autoHDREnabled)
-                                        else if (modelData.action === "autoWhiteBalance") iosFilterPopup.pushAutoWhiteBalanceEnabled(!iosFilterPopup.autoWhiteBalanceEnabled)
+                                        else if (modelData.action === "applyWhiteBalance") iosFilterPopup.pushApplyWhiteBalance()
                                     }
                                 }
                             }
