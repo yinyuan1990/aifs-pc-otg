@@ -7878,6 +7878,15 @@ Rectangle {
                 iosFilterPopup.lutEnabled = config.enabled
                 iosCameraSettingsPopup.lutModeEnabled = config.enabled
             }
+            if (ptype === "videoHDR" && config.videoHDR !== undefined) {
+                iosFilterPopup.videoHDREnabled = config.videoHDR
+            }
+            if (ptype === "autoHDR" && config.autoHDR !== undefined) {
+                iosFilterPopup.autoHDREnabled = config.autoHDR
+            }
+            if (ptype === "autoWhiteBalance" && config.autoWhiteBalance !== undefined) {
+                iosFilterPopup.autoWhiteBalanceEnabled = config.autoWhiteBalance
+            }
             if (ptype === "filterEnabled" && config.filterEnabled !== undefined) {
                 iosFilterPopup.fEnabled = config.filterEnabled
                 iosCameraSettingsPopup.filterModeEnabled = config.filterEnabled
@@ -11070,6 +11079,9 @@ Rectangle {
         // ⭐ 玉麒麟 LUT（5 张 png，STOMP ptype=lutName + test_mode 开关）
         property bool   lutEnabled: true
         property string selectedLutName: "lookup"
+        property bool   videoHDREnabled: false
+        property bool   autoHDREnabled: false
+        property bool   autoWhiteBalanceEnabled: false
         readonly property var lutOptions: [
             { name: "lookup",                 label: "标准" },
             { name: "lookup_soft_elegance_1", label: "柔雅1" },
@@ -11254,6 +11266,9 @@ Rectangle {
             pushParam("blackPoint",    iosFilterPopup.fBlackPoint)
             pushParam("sharpness",     iosFilterPopup.fSharpness)
             pushParam("highlightLift", iosFilterPopup.fHighlightLift)
+            sendConfigUpdate("videoHDR", { "videoHDR": iosFilterPopup.videoHDREnabled })
+            sendConfigUpdate("autoHDR", { "autoHDR": iosFilterPopup.autoHDREnabled })
+            sendConfigUpdate("autoWhiteBalance", { "autoWhiteBalance": iosFilterPopup.autoWhiteBalanceEnabled })
             if (iosFilterPopup.lutEnabled) {
                 sendConfigUpdate("test_mode", { "cmd": "test_mode", "enabled": true })
                 pushParam("lutName", iosFilterPopup.selectedLutName)
@@ -11265,6 +11280,21 @@ Rectangle {
             lutEnabled = enabled
             iosCameraSettingsPopup.lutModeEnabled = enabled
             sendConfigUpdate("test_mode", { "cmd": "test_mode", "enabled": enabled })
+        }
+
+        function pushVideoHDREnabled(enabled) {
+            videoHDREnabled = enabled
+            sendConfigUpdate("videoHDR", { "videoHDR": enabled })
+        }
+
+        function pushAutoHDREnabled(enabled) {
+            autoHDREnabled = enabled
+            sendConfigUpdate("autoHDR", { "autoHDR": enabled })
+        }
+
+        function pushAutoWhiteBalanceEnabled(enabled) {
+            autoWhiteBalanceEnabled = enabled
+            sendConfigUpdate("autoWhiteBalance", { "autoWhiteBalance": enabled })
         }
 
         // ⭐ 滤镜栈开关
@@ -12106,6 +12136,48 @@ Rectangle {
                         font.pixelSize: 12
                         color: iosFilterPopup.lutEnabled ? "#1976D2" : "#90A4AE"
                     }
+                    Item { Layout.fillWidth: true }
+                }
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 10
+                    Text { text: "Video HDR"; font.family: "PingFang HK"; font.pixelSize: 16; font.bold: true; color: "#1976D2"; Layout.preferredWidth: 72 }
+                    Rectangle {
+                        width: 44; height: 24; radius: 12
+                        color: iosFilterPopup.videoHDREnabled ? "#1976D2" : "#E0E0E0"
+                        Rectangle { width: 20; height: 20; radius: 10; color: "#FFFFFF"; x: iosFilterPopup.videoHDREnabled ? 22 : 2; anchors.verticalCenter: parent.verticalCenter; Behavior on x { NumberAnimation { duration: 150 } } }
+                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: iosFilterPopup.pushVideoHDREnabled(!iosFilterPopup.videoHDREnabled) }
+                    }
+                    Text { text: iosFilterPopup.videoHDREnabled ? "已开启" : "已关闭"; font.family: "PingFang HK"; font.pixelSize: 12; color: iosFilterPopup.videoHDREnabled ? "#1976D2" : "#90A4AE" }
+                    Item { Layout.fillWidth: true }
+                }
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 10
+                    Text { text: "自动HDR"; font.family: "PingFang HK"; font.pixelSize: 16; font.bold: true; color: "#1976D2"; Layout.preferredWidth: 72 }
+                    Rectangle {
+                        width: 44; height: 24; radius: 12
+                        color: iosFilterPopup.autoHDREnabled ? "#1976D2" : "#E0E0E0"
+                        Rectangle { width: 20; height: 20; radius: 10; color: "#FFFFFF"; x: iosFilterPopup.autoHDREnabled ? 22 : 2; anchors.verticalCenter: parent.verticalCenter; Behavior on x { NumberAnimation { duration: 150 } } }
+                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: iosFilterPopup.pushAutoHDREnabled(!iosFilterPopup.autoHDREnabled) }
+                    }
+                    Text { text: iosFilterPopup.autoHDREnabled ? "已开启" : "已关闭"; font.family: "PingFang HK"; font.pixelSize: 12; color: iosFilterPopup.autoHDREnabled ? "#1976D2" : "#90A4AE" }
+                    Item { Layout.fillWidth: true }
+                }
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 10
+                    Text { text: "自动白平衡"; font.family: "PingFang HK"; font.pixelSize: 16; font.bold: true; color: "#1976D2"; Layout.preferredWidth: 72 }
+                    Rectangle {
+                        width: 44; height: 24; radius: 12
+                        color: iosFilterPopup.autoWhiteBalanceEnabled ? "#1976D2" : "#E0E0E0"
+                        Rectangle { width: 20; height: 20; radius: 10; color: "#FFFFFF"; x: iosFilterPopup.autoWhiteBalanceEnabled ? 22 : 2; anchors.verticalCenter: parent.verticalCenter; Behavior on x { NumberAnimation { duration: 150 } } }
+                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: iosFilterPopup.pushAutoWhiteBalanceEnabled(!iosFilterPopup.autoWhiteBalanceEnabled) }
+                    }
+                    Text { text: iosFilterPopup.autoWhiteBalanceEnabled ? "已开启" : "已关闭"; font.family: "PingFang HK"; font.pixelSize: 12; color: iosFilterPopup.autoWhiteBalanceEnabled ? "#1976D2" : "#90A4AE" }
                     Item { Layout.fillWidth: true }
                 }
 
