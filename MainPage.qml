@@ -7963,6 +7963,7 @@ Rectangle {
                 if (config.blue !== undefined) iosCaptureAdjustPopup.fWbBlue = config.blue
                 if (config.black !== undefined) iosCaptureAdjustPopup.fWbBlack = config.black
                 if (config.white !== undefined) iosCaptureAdjustPopup.fWbWhite = config.white
+                if (config.amber !== undefined) iosCaptureAdjustPopup.fWbAmber = config.amber
             }
             if (ptype === "captureColorReset") {
                 iosCaptureAdjustPopup.resetLocal()
@@ -12202,7 +12203,7 @@ Rectangle {
     Window {
         id: iosCaptureAdjustPopup
         width: 560
-        height: 640
+        height: 680
         flags: Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
         color: "transparent"
         visible: false
@@ -12220,9 +12221,11 @@ Rectangle {
         property double fWbBlue: 0
         property double fWbBlack: 0
         property double fWbWhite: 0
+        property double fWbAmber: 0
 
         readonly property var captureColorRows: [
             { label: "冷暖", prop: "fWbTemperature" },
+            { label: "黄/琥珀", prop: "fWbAmber" },
             { label: "绿紫", prop: "fWbTint" },
             { label: "红",   prop: "fWbRed" },
             { label: "绿",   prop: "fWbGreen" },
@@ -12241,7 +12244,8 @@ Rectangle {
                 green: fWbGreen,
                 blue: fWbBlue,
                 black: fWbBlack,
-                white: fWbWhite
+                white: fWbWhite,
+                amber: fWbAmber
             })
         }
 
@@ -12253,6 +12257,7 @@ Rectangle {
             fWbBlue = 0
             fWbBlack = 0
             fWbWhite = 0
+            fWbAmber = 0
         }
 
         function resetCaptureColor() {
@@ -12360,7 +12365,7 @@ Rectangle {
                 Text {
                     Layout.fillWidth: true
                     horizontalAlignment: Text.AlignHCenter
-                    text: "采集端硬件白平衡 gain 微调（-1~+1），STOMP 直推 iOS，非软件滤镜"
+                    text: "拖动滑块松手即推送 iOS（滚轮亦可），无需额外点击"
                     font.family: "PingFang HK"
                     font.pixelSize: 12
                     color: "#90A4AE"
@@ -12380,7 +12385,7 @@ Rectangle {
                             font.pixelSize: 20
                             font.bold: true
                             color: "#E53935"
-                            Layout.preferredWidth: 48
+                            Layout.preferredWidth: 56
                         }
                         Slider {
                             id: wbSlider
@@ -12391,6 +12396,7 @@ Rectangle {
                             value: iosCaptureAdjustPopup[propName]
                             onMoved: {
                                 iosCaptureAdjustPopup[propName] = iosCaptureAdjustPopup.clampWb(value)
+                                iosCaptureAdjustPopup.pushCaptureColor()
                             }
                             onPressedChanged: if (!pressed) iosCaptureAdjustPopup.pushCaptureColor()
                             background: Rectangle {
@@ -12438,14 +12444,6 @@ Rectangle {
                             Layout.preferredWidth: 50
                         }
                     }
-                }
-
-                Button {
-                    Layout.fillWidth: true
-                    Layout.preferredHeight: 32
-                    text: "应用并推送"
-                    font.family: "PingFang HK"
-                    onClicked: iosCaptureAdjustPopup.pushCaptureColor()
                 }
 
                 Item { Layout.fillWidth: true; Layout.fillHeight: true }
