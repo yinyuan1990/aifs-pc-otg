@@ -4078,6 +4078,19 @@ Rectangle {
         }
     }
 
+    // L键：打开/关闭 iOS 采集颜色调节（冷暖/绿紫/RGB/黑/白 → 硬件白平衡）
+    Shortcut {
+        sequence: "L"
+        context: Qt.ApplicationShortcut
+        onActivated: {
+            if (iosCaptureAdjustPopup.visible) {
+                iosCaptureAdjustPopup.close()
+            } else {
+                iosCaptureAdjustPopup.open()
+            }
+        }
+    }
+
     // ============ 函数 ============
     function playWebRTC() {
         // 检查 streamKey 是否有效
@@ -6484,6 +6497,7 @@ Rectangle {
                 ShortcutItem { key: "D"; desc: "删除最后抓拍" }
                 ShortcutItem { key: "R"; desc: "相机设定" }
                 ShortcutItem { key: "P"; desc: "相机参数精调" }
+                ShortcutItem { key: "L"; desc: "iOS采集颜色调节" }
                 ShortcutItem { key: "F1"; desc: "行数增加" }
                 ShortcutItem { key: "F2"; desc: "行数减少" }
                 ShortcutItem { key: "F3"; desc: "列数增加" }
@@ -7939,6 +7953,19 @@ Rectangle {
                 iosFilterPopup.fHighlightLift = config.highlightLift
                 iosFilterPopup.prevHighlightLift = config.highlightLift
                 if (typeof ifHighlightLiftSlider !== 'undefined') ifHighlightLiftSlider.value = config.highlightLift
+            }
+            // ⭐ iOS 采集颜色调节 — 多 PC 同步滑块
+            if (ptype === "captureColor") {
+                if (config.temperature !== undefined) iosCaptureAdjustPopup.fWbTemperature = config.temperature
+                if (config.tint !== undefined) iosCaptureAdjustPopup.fWbTint = config.tint
+                if (config.red !== undefined) iosCaptureAdjustPopup.fWbRed = config.red
+                if (config.green !== undefined) iosCaptureAdjustPopup.fWbGreen = config.green
+                if (config.blue !== undefined) iosCaptureAdjustPopup.fWbBlue = config.blue
+                if (config.black !== undefined) iosCaptureAdjustPopup.fWbBlack = config.black
+                if (config.white !== undefined) iosCaptureAdjustPopup.fWbWhite = config.white
+            }
+            if (ptype === "captureColorReset") {
+                iosCaptureAdjustPopup.resetLocal()
             }
             
             // ⭐ 本地视觉效果（时时流局部缩放）- 其他PC操作时需要同步
@@ -12166,6 +12193,261 @@ Rectangle {
                 }
 
                 // 底部留空 (正式后端没有 IosFilterController, "保存为系统默认"按钮已去掉)
+                Item { Layout.fillWidth: true; Layout.fillHeight: true }
+            }
+        }
+    }
+
+    // ============ ⭐ iOS 采集颜色调节 Window（L 键，硬件白平衡 WB gain）============
+    Window {
+        id: iosCaptureAdjustPopup
+        width: 560
+        height: 640
+        flags: Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
+        color: "transparent"
+        visible: false
+
+        function open() { visible = true }
+        function close() { visible = false }
+
+        property point dragStart: Qt.point(0, 0)
+        property bool dragging: false
+
+        property double fWbTemperature: 0
+        property double fWbTint: 0
+        property double fWbRed: 0
+        property double fWbGreen: 0
+        property double fWbBlue: 0
+        property double fWbBlack: 0
+        property double fWbWhite: 0
+
+        readonly property var captureColorRows: [
+            { label: "冷暖", prop: "fWbTemperature" },
+            { label: "绿紫", prop: "fWbTint" },
+            { label: "红",   prop: "fWbRed" },
+            { label: "绿",   prop: "fWbGreen" },
+            { label: "蓝",   prop: "fWbBlue" },
+            { label: "黑",   prop: "fWbBlack" },
+            { label: "白",   prop: "fWbWhite" }
+        ]
+
+        function clampWb(v) { return Math.max(-1, Math.min(1, v)) }
+
+        function pushCaptureColor() {
+            sendConfigUpdate("captureColor", {
+                temperature: fWbTemperature,
+                tint: fWbTint,
+                red: fWbRed,
+                green: fWbGreen,
+                blue: fWbBlue,
+                black: fWbBlack,
+                white: fWbWhite
+            })
+        }
+
+        function resetLocal() {
+            fWbTemperature = 0
+            fWbTint = 0
+            fWbRed = 0
+            fWbGreen = 0
+            fWbBlue = 0
+            fWbBlack = 0
+            fWbWhite = 0
+        }
+
+        function resetCaptureColor() {
+            resetLocal()
+            sendConfigUpdate("captureColorReset", { cmd: "reset" })
+        }
+
+        Rectangle {
+            anchors.fill: parent
+            color: "#FFFFFF"
+            radius: 4
+            border.color: "#A5D6A7"
+            border.width: 1
+
+            ColumnLayout {
+                spacing: 12
+                anchors.fill: parent
+                anchors.margins: 24
+
+                // ===== 标题栏 =====
+                Rectangle {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 40
+                    color: "transparent"
+
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.ClosedHandCursor
+                        property point startPos: Qt.point(0, 0)
+                        property point dragStartGlobal: Qt.point(0, 0)
+                        onPressed: function(mouse) {
+                            startPos = Qt.point(iosCaptureAdjustPopup.x, iosCaptureAdjustPopup.y)
+                            dragStartGlobal = mapToGlobal(mouse.x, mouse.y)
+                            iosCaptureAdjustPopup.dragging = true
+                            mouse.accepted = true
+                        }
+                        onPositionChanged: function(mouse) {
+                            if (iosCaptureAdjustPopup.dragging) {
+                                var g = mapToGlobal(mouse.x, mouse.y)
+                                iosCaptureAdjustPopup.x = startPos.x + (g.x - dragStartGlobal.x)
+                                iosCaptureAdjustPopup.y = startPos.y + (g.y - dragStartGlobal.y)
+                            }
+                        }
+                        onReleased: iosCaptureAdjustPopup.dragging = false
+                    }
+
+                    Rectangle {
+                        anchors.left: parent.left
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: icaResetText.width + 20
+                        height: 28
+                        radius: 6
+                        color: icaResetArea.containsMouse ? "#C8E6C9" : "#E8F5E9"
+                        border.color: "#A5D6A7"
+                        border.width: 1
+                        Text {
+                            id: icaResetText
+                            anchors.centerIn: parent
+                            text: "还原"
+                            font.family: "PingFang HK"
+                            font.pixelSize: 14
+                            color: "#263238"
+                        }
+                        MouseArea {
+                            id: icaResetArea
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: iosCaptureAdjustPopup.resetCaptureColor()
+                        }
+                    }
+
+                    Text {
+                        anchors.centerIn: parent
+                        text: "iOS 采集颜色调节"
+                        font.family: "PingFang HK"
+                        font.pixelSize: 16
+                        font.bold: true
+                        color: "#263238"
+                    }
+
+                    Rectangle {
+                        anchors.right: parent.right
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: 24
+                        height: 24
+                        radius: 12
+                        color: icaCloseBtn.containsMouse ? "#C8E6C9" : "transparent"
+                        Text {
+                            anchors.centerIn: parent
+                            text: "✕"
+                            font.pixelSize: 14
+                            color: "#546E7A"
+                        }
+                        MouseArea {
+                            id: icaCloseBtn
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: iosCaptureAdjustPopup.close()
+                        }
+                    }
+                }
+
+                Text {
+                    Layout.fillWidth: true
+                    horizontalAlignment: Text.AlignHCenter
+                    text: "采集端硬件白平衡 gain 微调（-1~+1），STOMP 直推 iOS，非软件滤镜"
+                    font.family: "PingFang HK"
+                    font.pixelSize: 12
+                    color: "#90A4AE"
+                    wrapMode: Text.WordWrap
+                }
+
+                Repeater {
+                    model: iosCaptureAdjustPopup.captureColorRows
+                    delegate: RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 8
+                        property string propName: modelData.prop
+
+                        Text {
+                            text: modelData.label
+                            font.family: "PingFang HK"
+                            font.pixelSize: 20
+                            font.bold: true
+                            color: "#E53935"
+                            Layout.preferredWidth: 48
+                        }
+                        Slider {
+                            id: wbSlider
+                            Layout.fillWidth: true
+                            from: -1
+                            to: 1
+                            stepSize: 0.05
+                            value: iosCaptureAdjustPopup[propName]
+                            onMoved: {
+                                iosCaptureAdjustPopup[propName] = iosCaptureAdjustPopup.clampWb(value)
+                            }
+                            onPressedChanged: if (!pressed) iosCaptureAdjustPopup.pushCaptureColor()
+                            background: Rectangle {
+                                x: wbSlider.leftPadding
+                                y: wbSlider.topPadding + wbSlider.availableHeight / 2 - height / 2
+                                implicitWidth: 200
+                                implicitHeight: 4
+                                width: wbSlider.availableWidth
+                                height: 4
+                                radius: 999
+                                color: "#C8E6C9"
+                                Rectangle {
+                                    width: wbSlider.visualPosition * parent.width
+                                    height: parent.height
+                                    radius: 999
+                                    color: "#4DB6AC"
+                                }
+                            }
+                            handle: Rectangle {
+                                x: wbSlider.leftPadding + wbSlider.visualPosition * (wbSlider.availableWidth - width)
+                                y: wbSlider.topPadding + wbSlider.availableHeight / 2 - height / 2
+                                implicitWidth: 14
+                                implicitHeight: 14
+                                width: 14
+                                height: 14
+                                radius: 7
+                                color: "#4DB6AC"
+                            }
+                            WheelHandler {
+                                onWheel: function(event) {
+                                    if (event.angleDelta.y === 0) return
+                                    var dir = event.angleDelta.y > 0 ? 1 : -1
+                                    var nv = iosCaptureAdjustPopup.clampWb(wbSlider.value + dir * wbSlider.stepSize)
+                                    wbSlider.value = nv
+                                    iosCaptureAdjustPopup[propName] = nv
+                                    iosCaptureAdjustPopup.pushCaptureColor()
+                                }
+                            }
+                        }
+                        Text {
+                            text: iosCaptureAdjustPopup[propName].toFixed(2)
+                            font.family: "PingFang HK"
+                            font.pixelSize: 16
+                            color: "#263238"
+                            Layout.preferredWidth: 50
+                        }
+                    }
+                }
+
+                Button {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 32
+                    text: "应用并推送"
+                    font.family: "PingFang HK"
+                    onClicked: iosCaptureAdjustPopup.pushCaptureColor()
+                }
+
                 Item { Layout.fillWidth: true; Layout.fillHeight: true }
             }
         }
