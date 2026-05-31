@@ -314,6 +314,19 @@ void AutoUpdater::downloadAndInstall()
             out << "timeout /t 2 /nobreak >nul\n";
             out << "echo.\n";
 
+            // 防呆：解压若被多套了一层目录(zip 带 release/ 之类前缀，文件落到 appDir\子目录\)，
+            // 把那层目录里的内容挪回根目录覆盖。正常解压时无子目录含 Phoenix.exe，自动跳过。
+            auto writeUnnestFix = [&]() {
+                out << "for /d %%D in (\"" << nAppDir << "\\*\") do (\n";
+                out << "    if exist \"%%D\\Phoenix.exe\" (\n";
+                out << "        echo  检测到多层目录，正在修正: %%D\n";
+                out << "        echo --- fix nested dir: %%D --- >> \"%ULOG%\"\n";
+                out << "        xcopy \"%%D\\*\" \"" << nAppDir << "\\\" /E /H /Y >> \"%ULOG%\" 2>&1\n";
+                out << "        rd /s /q \"%%D\"\n";
+                out << "    )\n";
+                out << ")\n";
+            };
+
             if (directExeDownload) {
                 out << "echo  [2/3] 正在替换程序文件...\n";
                 out << "echo --- copy exe --- >> \"%ULOG%\"\n";
@@ -333,6 +346,7 @@ void AutoUpdater::downloadAndInstall()
                     << nZipFile << "\\\" -DestinationPath \\\"" << nAppDir << "\\\" -Force\" >> \"%ULOG%\" 2>&1\n";
                 out << ")\n";
                 out << "del \"" << nZipFile << "\" >nul 2>&1\n";
+                writeUnnestFix();
                 if (exeRenamed) {
                     out << "if exist \"" << nAppDir << "\\Phoenix.exe\" "
                         << "ren \"" << nAppDir << "\\Phoenix.exe\" \"" << actualExeName << "\"\n";
@@ -355,6 +369,7 @@ void AutoUpdater::downloadAndInstall()
                 out << "    )\n";
                 out << ")\n";
                 out << "del \"" << nZipFile << "\" >nul 2>&1\n";
+                writeUnnestFix();
                 if (exeRenamed) {
                     out << "if exist \"" << nAppDir << "\\Phoenix.exe\" "
                         << "ren \"" << nAppDir << "\\Phoenix.exe\" \"" << actualExeName << "\"\n";
