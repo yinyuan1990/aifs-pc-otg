@@ -5656,8 +5656,10 @@ Rectangle {
     function sendTestBrightnessConfig(value) {
         var v = Math.round(value)
         iosCameraSettingsPopup.hardwareBrightness = v
-        if (typeof ifFilterHardwareBrightnessSlider !== 'undefined')
-            ifFilterHardwareBrightnessSlider.value = v
+        iosFilterPopup.fGain = v
+        iosFilterPopup.prevGain = v
+        if (typeof ifGainSlider !== 'undefined')
+            ifGainSlider.value = v
         var payload = { "cmd": "test_brightness", "value": v }
         sendConfigUpdate("test_brightness", payload)
     }
@@ -7933,8 +7935,8 @@ Rectangle {
             }
             if (ptype === "test_brightness" && config.value !== undefined) {
                 iosCameraSettingsPopup.hardwareBrightness = config.value
-                if (typeof ifFilterHardwareBrightnessSlider !== 'undefined')
-                    ifFilterHardwareBrightnessSlider.value = config.value
+                if (typeof ifGainSlider !== 'undefined')
+                    ifGainSlider.value = config.value
             }
             if (ptype === "white_balance" && config.value !== undefined) {
                 iosCameraSettingsPopup.hardwareWhiteBalance = config.value
@@ -11112,8 +11114,8 @@ Rectangle {
         //   open 时把 PC 当前默认值同步到 iOS (确保 redBoost=0.02 等锁死值生效)
         function open()  {
             visible = true
-            if (typeof ifFilterHardwareBrightnessSlider !== 'undefined')
-                ifFilterHardwareBrightnessSlider.value = iosCameraSettingsPopup.hardwareBrightness
+            if (typeof ifGainSlider !== 'undefined')
+                ifGainSlider.value = iosFilterPopup.fGain
             if (typeof ifFilterWhiteBalanceSlider !== 'undefined')
                 ifFilterWhiteBalanceSlider.value = iosCameraSettingsPopup.hardwareWhiteBalance
             // ⭐ 打开弹框只在「该账号第一次」自动下发；之后重开不再覆盖设备当前状态
@@ -11175,21 +11177,29 @@ Rectangle {
         property double prevSharpness: 0.20
         property double prevHighlightLift: 0.0
 
-        // ⭐ 综合亮度联动 — 每个选项前的复选框, 勾选的滑块组成联动组
-        //   拖任一勾选滑块, 其他勾选滑块按各自 stepSize 走相同步数 (双向)
-        //   默认: 亮度+伽马 联动, 其他独立 (后台可改 linkDefault)
-        property bool linkBrightness: true
-        property bool linkGamma:      true
-        property bool linkContrast:   false
-        property bool linkSaturation: false
-        property bool linkExposure:   false
+        // ⭐ 增益（从硬件参数区移入滤镜统一联动）
+        property double gainFrom: 0; property double gainTo: 100; property double gainStep: 1; property double gainDefault: 20
+        property double fGain: 20
+        property double prevGain: 20
 
-        // ⭐ 存储后台配置的 linkDefault 值（供"还原"按钮使用）
-        property bool linkBrightnessDefault: true
-        property bool linkGammaDefault:      true
-        property bool linkContrastDefault:   false
-        property bool linkSaturationDefault: false
-        property bool linkExposureDefault:   false
+        // ⭐ 联动分组模式（替代旧的 boolean 联动）
+        //   groupId(1-100): 同编号参数组成联动组, 0=不参与
+        //   groupDirection(-1/1): -1=向左, 1=向右
+        //   brightSwitch: 综合亮度联动开关（后台配置）
+        //   brightDirection(-1/1): 综合亮度方向
+        //   pcFreeConfig: 后台开关, 打开后 PC 端显示方向配置
+        property bool pcFreeConfig: false
+        property var linkageConfig: ({
+            brightness:    { groupId: 1, groupDirection: -1, brightSwitch: false, brightDirection: 1 },
+            gamma:         { groupId: 1, groupDirection: 1,  brightSwitch: false, brightDirection: 1 },
+            contrast:      { groupId: 0, groupDirection: 1,  brightSwitch: false, brightDirection: 1 },
+            saturation:    { groupId: 0, groupDirection: 1,  brightSwitch: false, brightDirection: 1 },
+            exposure:      { groupId: 0, groupDirection: 1,  brightSwitch: false, brightDirection: 1 },
+            sharpness:     { groupId: 0, groupDirection: 1,  brightSwitch: false, brightDirection: 1 },
+            highlightLift: { groupId: 0, groupDirection: 1,  brightSwitch: false, brightDirection: 1 },
+            gain:          { groupId: 0, groupDirection: 1,  brightSwitch: false, brightDirection: 1 }
+        })
+        property var linkageConfigDefault: null
 
         // ⭐ 应用从后台拉到的默认配置 JSON
         //   后端 GET /api/config/ios-filter-defaults 返回 { config: "<JSON>" }
@@ -11199,40 +11209,55 @@ Rectangle {
             try { c = JSON.parse(configJson) }
             catch (e) { console.warn("🎨 [iOS-Filter] 后台默认值 JSON 解析失败:", e); return }
 
-            function applyOne(key, fromProp, toProp, stepProp, defaultProp, currProp, prevProp, linkProp, linkDefaultProp) {
+            // ⭐ PC端自由配置开关
+            if (c.pcFreeConfig && c.pcFreeConfig.enabled !== undefined)
+                iosFilterPopup.pcFreeConfig = c.pcFreeConfig.enabled
+
+            function applyOne(key, fromProp, toProp, stepProp, defaultProp, currProp, prevProp) {
                 if (!c[key]) return
                 var entry = c[key]
                 if (entry.from      !== undefined) iosFilterPopup[fromProp]    = entry.from
                 if (entry.to        !== undefined) iosFilterPopup[toProp]      = entry.to
                 if (entry.stepSize  !== undefined) iosFilterPopup[stepProp]    = entry.stepSize
                 if (entry.default   !== undefined) {
-                    iosFilterPopup[defaultProp] = entry.default       // 出厂默认 (供"还原"按钮用)
-                    iosFilterPopup[currProp]    = entry.default       // 当前值 (滑块绑定)
+                    iosFilterPopup[defaultProp] = entry.default
+                    iosFilterPopup[currProp]    = entry.default
                     iosFilterPopup[prevProp]    = entry.default
                 }
-                if (entry.linkDefault !== undefined && linkProp) {
-                    iosFilterPopup[linkProp] = entry.linkDefault
-                    // ⭐ 同时保存到 linkDefaultProp（供"还原"按钮恢复用）
-                    if (linkDefaultProp) iosFilterPopup[linkDefaultProp] = entry.linkDefault
+            }
+            applyOne("brightness",    "brightnessFrom",    "brightnessTo",    "brightnessStep",    "brightnessDefault",    "fBrightness",    "prevBrightness")
+            applyOne("gamma",         "gammaFrom",         "gammaTo",         "gammaStep",         "gammaDefault",         "fGamma",         "prevGamma")
+            applyOne("contrast",      "contrastFrom",      "contrastTo",      "contrastStep",      "contrastDefault",      "fContrast",      "prevContrast")
+            applyOne("saturation",    "saturationFrom",    "saturationTo",    "saturationStep",    "saturationDefault",    "fSaturation",    "prevSaturation")
+            applyOne("exposure",      "exposureFrom",      "exposureTo",      "exposureStep",      "exposureDefault",      "fExposure",      "prevExposure")
+            applyOne("sharpness",     "sharpnessFrom",     "sharpnessTo",     "sharpnessStep",     "sharpnessDefault",     "fSharpness",     "prevSharpness")
+            applyOne("highlightLift", "highlightLiftFrom", "highlightLiftTo", "highlightLiftStep", "highlightLiftDefault", "fHighlightLift", "prevHighlightLift")
+            applyOne("gain",          "gainFrom",          "gainTo",          "gainStep",          "gainDefault",          "fGain",          "prevGain")
+
+            // ⭐ 联动分组配置
+            var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig))
+            var params = ["brightness", "gamma", "contrast", "saturation", "exposure", "sharpness", "highlightLift", "gain"]
+            for (var i = 0; i < params.length; i++) {
+                var key = params[i]
+                if (c[key]) {
+                    if (c[key].groupId !== undefined) lc[key].groupId = c[key].groupId
+                    if (c[key].groupDirection !== undefined) lc[key].groupDirection = c[key].groupDirection
+                    if (c[key].brightSwitch !== undefined) lc[key].brightSwitch = c[key].brightSwitch
+                    if (c[key].brightDirection !== undefined) lc[key].brightDirection = c[key].brightDirection
                 }
             }
-            applyOne("brightness", "brightnessFrom", "brightnessTo", "brightnessStep", "brightnessDefault", "fBrightness", "prevBrightness", "linkBrightness", "linkBrightnessDefault")
-            applyOne("gamma",      "gammaFrom",      "gammaTo",      "gammaStep",      "gammaDefault",      "fGamma",      "prevGamma",      "linkGamma",      "linkGammaDefault")
-            applyOne("contrast",   "contrastFrom",   "contrastTo",   "contrastStep",   "contrastDefault",   "fContrast",   "prevContrast",   "linkContrast",   "linkContrastDefault")
-            applyOne("saturation", "saturationFrom", "saturationTo", "saturationStep", "saturationDefault", "fSaturation", "prevSaturation", "linkSaturation", "linkSaturationDefault")
-            applyOne("exposure",   "exposureFrom",   "exposureTo",   "exposureStep",   "exposureDefault",   "fExposure",   "prevExposure",   "linkExposure",   "linkExposureDefault")
-            applyOne("sharpness",  "sharpnessFrom",  "sharpnessTo",  "sharpnessStep",  "sharpnessDefault",  "fSharpness",  "prevSharpness",  null, null)
-            applyOne("highlightLift", "highlightLiftFrom", "highlightLiftTo", "highlightLiftStep", "highlightLiftDefault", "fHighlightLift", "prevHighlightLift", null, null)
+            iosFilterPopup.linkageConfig = lc
+            iosFilterPopup.linkageConfigDefault = JSON.parse(JSON.stringify(lc))
+
             if (c.redBoost && c.redBoost.locked !== undefined) {
                 iosFilterPopup.redBoostDefault = c.redBoost.locked
                 iosFilterPopup.fRedBoost       = c.redBoost.locked
             }
-            // ⭐ blackPoint (locked, 无滑块, 启动时由 pushAllStomp 推给 iOS)
             if (c.blackPoint && c.blackPoint.locked !== undefined) {
                 iosFilterPopup.blackPointDefault = c.blackPoint.locked
                 iosFilterPopup.fBlackPoint       = c.blackPoint.locked
             }
-            // 手动同步滑块当前 value (绑定可能已被 onMoved 打断)
+            // 手动同步滑块当前 value
             if (typeof ifMasterSlider     !== 'undefined') ifMasterSlider.value     = iosFilterPopup.fBrightness
             if (typeof ifGammaSlider      !== 'undefined') ifGammaSlider.value      = iosFilterPopup.fGamma
             if (typeof ifContrastSlider   !== 'undefined') ifContrastSlider.value   = iosFilterPopup.fContrast
@@ -11240,14 +11265,16 @@ Rectangle {
             if (typeof ifExposureSlider   !== 'undefined') ifExposureSlider.value   = iosFilterPopup.fExposure
             if (typeof ifSharpnessSlider  !== 'undefined') ifSharpnessSlider.value  = iosFilterPopup.fSharpness
             if (typeof ifHighlightLiftSlider !== 'undefined') ifHighlightLiftSlider.value = iosFilterPopup.fHighlightLift
+            if (typeof ifGainSlider       !== 'undefined') ifGainSlider.value       = iosFilterPopup.fGain
+            // ⭐ 同步增益到相机设定
+            iosCameraSettingsPopup.hardwareBrightness = Math.round(iosFilterPopup.fGain)
+            if (typeof ifGainSlider !== 'undefined')
+                ifGainSlider.value = iosFilterPopup.fGain
             console.log("✅ [iOS-Filter] 已应用后台默认值")
 
-            // ⭐ Bug2 修复：重置相机设定的"综合亮度"到中点 50（对应所有 iOS 滤镜值都在 default）
             iosCameraSettingsPopup.exposureValue = 50
             captureManager.exposure = 50
 
-            // ⭐ 滤镜默认值已就绪 → 走账号级「第一次下发」(需三链路开关也已加载)
-            //   不再每次拉到就全量推；改由 tryAutoPush 控制「每账号只首推一次」
             iosFilterPopup.filterLoaded = true
             iosFilterPopup.tryAutoPush()
         }
@@ -11320,45 +11347,95 @@ Rectangle {
         // ⭐ 联动 helper
         function clampVal(v, lo, hi) { return Math.max(lo, Math.min(hi, v)) }
 
-        //   sourceId: 触发联动的源滑块 ("brightness" / "gamma" / ...), 不会再次驱动它自己
-        //   stepCount: 源滑块走了多少个自己的 stepSize 单位 (整数或小数)
-        //   每个勾选的目标滑块 = prev + stepCount × 自己的 stepSize, clamp 到自身范围
-        function applyLinkedDelta(sourceId, stepCount) {
-            // ⭐ 亮度方向相反: 亮度永远与其他联动参数反向
-            //   - 亮度作为联动目标 (sourceId 不是 brightness)         → 走 -stepCount
-            //   - 亮度作为源 (sourceId === "brightness")              → 其他联动目标走 -stepCount
-            //   两种情况下"亮度增加=其他减少 / 其他增加=亮度减少".
-            var otherSign = (sourceId === "brightness") ? -1 : 1   // 给非 brightness 目标用的符号
+        function getParamRange(pid) {
+            if (pid === "brightness") return brightnessTo - brightnessFrom
+            if (pid === "gamma") return gammaTo - gammaFrom
+            if (pid === "contrast") return contrastTo - contrastFrom
+            if (pid === "saturation") return saturationTo - saturationFrom
+            if (pid === "exposure") return exposureTo - exposureFrom
+            if (pid === "sharpness") return sharpnessTo - sharpnessFrom
+            if (pid === "highlightLift") return highlightLiftTo - highlightLiftFrom
+            if (pid === "gain") return gainTo - gainFrom
+            return 1
+        }
 
-            if (sourceId !== "brightness" && linkBrightness) {
-                var nv = clampVal(prevBrightness + (-stepCount) * ifMasterSlider.stepSize,
-                                   ifMasterSlider.from, ifMasterSlider.to)
-                prevBrightness = nv;  fBrightness = nv;  ifMasterSlider.value = nv
+        function getParamPrev(pid) {
+            if (pid === "brightness") return prevBrightness
+            if (pid === "gamma") return prevGamma
+            if (pid === "contrast") return prevContrast
+            if (pid === "saturation") return prevSaturation
+            if (pid === "exposure") return prevExposure
+            if (pid === "sharpness") return prevSharpness
+            if (pid === "highlightLift") return prevHighlightLift
+            if (pid === "gain") return prevGain
+            return 0
+        }
+
+        function setParamValue(pid, val) {
+            if (pid === "brightness") {
+                var nv = clampVal(val, brightnessFrom, brightnessTo)
+                prevBrightness = nv; fBrightness = nv
+                if (typeof ifMasterSlider !== 'undefined') ifMasterSlider.value = nv
                 pushParam("brightness", nv)
-            }
-            if (sourceId !== "gamma" && linkGamma) {
-                var nv = clampVal(prevGamma + otherSign * stepCount * ifGammaSlider.stepSize,
-                                   ifGammaSlider.from, ifGammaSlider.to)
-                prevGamma = nv;  fGamma = nv;  ifGammaSlider.value = nv
+            } else if (pid === "gamma") {
+                var nv = clampVal(val, gammaFrom, gammaTo)
+                prevGamma = nv; fGamma = nv
+                if (typeof ifGammaSlider !== 'undefined') ifGammaSlider.value = nv
                 pushParam("gamma", nv)
-            }
-            if (sourceId !== "contrast" && linkContrast) {
-                var nv = clampVal(prevContrast + otherSign * stepCount * ifContrastSlider.stepSize,
-                                   ifContrastSlider.from, ifContrastSlider.to)
-                prevContrast = nv;  fContrast = nv;  ifContrastSlider.value = nv
+            } else if (pid === "contrast") {
+                var nv = clampVal(val, contrastFrom, contrastTo)
+                prevContrast = nv; fContrast = nv
+                if (typeof ifContrastSlider !== 'undefined') ifContrastSlider.value = nv
                 pushParam("contrast", nv)
-            }
-            if (sourceId !== "saturation" && linkSaturation) {
-                var nv = clampVal(prevSaturation + otherSign * stepCount * ifSaturationSlider.stepSize,
-                                   ifSaturationSlider.from, ifSaturationSlider.to)
-                prevSaturation = nv;  fSaturation = nv;  ifSaturationSlider.value = nv
+            } else if (pid === "saturation") {
+                var nv = clampVal(val, saturationFrom, saturationTo)
+                prevSaturation = nv; fSaturation = nv
+                if (typeof ifSaturationSlider !== 'undefined') ifSaturationSlider.value = nv
                 pushParam("saturation", nv)
-            }
-            if (sourceId !== "exposure" && linkExposure) {
-                var nv = clampVal(prevExposure + otherSign * stepCount * ifExposureSlider.stepSize,
-                                   ifExposureSlider.from, ifExposureSlider.to)
-                prevExposure = nv;  fExposure = nv;  ifExposureSlider.value = nv
+            } else if (pid === "exposure") {
+                var nv = clampVal(val, exposureFrom, exposureTo)
+                prevExposure = nv; fExposure = nv
+                if (typeof ifExposureSlider !== 'undefined') ifExposureSlider.value = nv
                 pushParam("exposure", Math.log2(nv))
+            } else if (pid === "sharpness") {
+                var nv = clampVal(val, sharpnessFrom, sharpnessTo)
+                prevSharpness = nv; fSharpness = nv
+                if (typeof ifSharpnessSlider !== 'undefined') ifSharpnessSlider.value = nv
+                pushParam("sharpness", nv)
+            } else if (pid === "highlightLift") {
+                var nv = clampVal(val, highlightLiftFrom, highlightLiftTo)
+                prevHighlightLift = nv; fHighlightLift = nv
+                if (typeof ifHighlightLiftSlider !== 'undefined') ifHighlightLiftSlider.value = nv
+                pushParam("highlightLift", nv)
+            } else if (pid === "gain") {
+                var nv = clampVal(val, gainFrom, gainTo)
+                nv = Math.round(nv)
+                prevGain = nv; fGain = nv
+                if (typeof ifGainSlider !== 'undefined') ifGainSlider.value = nv
+                sendTestBrightnessConfig(nv)
+            }
+        }
+
+        // ⭐ 分组联动：同 groupId 的参数按百分比同步, 方向由 groupDirection 决定
+        //   rawDelta: 源参数的原始值变化量（非步进数）
+        function applyLinkedDelta(sourceId, rawDelta) {
+            var lc = linkageConfig
+            var sc = lc[sourceId]
+            if (!sc || sc.groupId === 0) return
+            var sourceRange = getParamRange(sourceId)
+            if (sourceRange === 0) return
+            var deltaPercent = rawDelta / sourceRange
+
+            var params = ["brightness", "gamma", "contrast", "saturation", "exposure", "sharpness", "highlightLift", "gain"]
+            for (var i = 0; i < params.length; i++) {
+                var tid = params[i]
+                if (tid === sourceId) continue
+                var tc = lc[tid]
+                if (!tc || tc.groupId !== sc.groupId) continue
+                var dirMul = tc.groupDirection / sc.groupDirection
+                var targetRange = getParamRange(tid)
+                var targetDelta = deltaPercent * targetRange * dirMul
+                setParamValue(tid, getParamPrev(tid) + targetDelta)
             }
         }
 
@@ -11386,9 +11463,9 @@ Rectangle {
             }
             sendConfigUpdate("videoHDR", { "videoHDR": iosFilterPopup.videoHDREnabled })
             sendConfigUpdate("autoHDR", { "autoHDR": iosFilterPopup.autoHDREnabled })
-            // 硬件链路：仅在打开时下发增益(0-100→iOS 映射到 ISO)；白平衡始终自动，不在此下发
+            // 硬件链路：增益(0-100→iOS 映射到 ISO)；白平衡始终自动，不在此下发
             if (iosFilterPopup.hardwareEnabled) {
-                sendTestBrightnessConfig(iosCameraSettingsPopup.hardwareBrightness)
+                sendTestBrightnessConfig(Math.round(iosFilterPopup.fGain))
             }
             // LUT 链路：开=启用并下发 LUT 名；关=明确关闭
             if (iosFilterPopup.lutEnabled) {
@@ -11440,44 +11517,44 @@ Rectangle {
             pushParam("lutName", name)
         }
 
-        // ⭐ 相机设定的"综合亮度"(0-100) → 同时驱动 brightness + gamma + exposure
-        //   X=0   → 三个都到 from (最暗)
-        //   X=50  → 三个都到 default (出厂默认)
-        //   X=100 → 三个都到 to (最亮)
-        //   按各自 default/from/to 非对称插值, 保证 X=50 时停在默认
-        //   ⚠️ 亮度是反向的：X 增大时，brightness 减小（其他参数增大）
+        // ⭐ 综合亮度(0-100) → 驱动所有 brightSwitch=true 的参数
+        //   X=0 → from (最暗), X=50 → default (出厂), X=100 → to (最亮)
+        //   方向由 brightDirection 决定: -1 时 X 增大→值减小, 1 时 X 增大→值增大
         function syncFromOverallBrightness(X) {
             var t = (X - 50) / 50   // -1 .. +1
-            function setOne(currProp, prevProp, defProp, fromProp, toProp, ptype, isExposure, isInverted) {
+            var lc = linkageConfig
+            function setOne(pid, currProp, prevProp, defProp, fromProp, toProp) {
+                var cfg = lc[pid]
+                if (!cfg || !cfg.brightSwitch) return
                 var def = iosFilterPopup[defProp]
                 var lo  = iosFilterPopup[fromProp]
                 var hi  = iosFilterPopup[toProp]
-                // ⭐ 亮度反向：t 取反
-                var actualT = isInverted ? -t : t
+                var actualT = cfg.brightDirection === -1 ? -t : t
                 var v   = actualT < 0 ? def + actualT * (def - lo) : def + actualT * (hi - def)
                 v = clampVal(v, lo, hi)
                 iosFilterPopup[currProp] = v
                 iosFilterPopup[prevProp] = v
-                if (isExposure) pushParam("exposure", Math.log2(v))
-                else            pushParam(ptype, v)
+                if (pid === "gain") { sendTestBrightnessConfig(Math.round(v)) }
+                else if (pid === "exposure") { pushParam("exposure", Math.log2(v)) }
+                else { pushParam(pid, v) }
             }
-            // ⭐ 动态联动 — 不再写死 (brightness/gamma/exposure)
-            //    根据 iOS 滤镜弹框里的勾选 (linkBrightness/linkGamma/...) 决定
-            //    勾选状态启动时来自后端 /api/config/ios-filter-defaults 的 linkDefault,
-            //    切换账号时会重新拉取覆盖, 用户在 iOS 滤镜弹框里手动勾/取消也会改变这里的联动集合.
-            //    ⚠️ brightness 是反向的（isInverted = true）
-            if (linkBrightness) setOne("fBrightness", "prevBrightness", "brightnessDefault", "brightnessFrom", "brightnessTo", "brightness", false, true)
-            if (linkGamma)      setOne("fGamma",      "prevGamma",      "gammaDefault",      "gammaFrom",      "gammaTo",      "gamma",      false, false)
-            if (linkContrast)   setOne("fContrast",   "prevContrast",   "contrastDefault",   "contrastFrom",   "contrastTo",   "contrast",   false, false)
-            if (linkSaturation) setOne("fSaturation", "prevSaturation", "saturationDefault", "saturationFrom", "saturationTo", "saturation", false, false)
-            if (linkExposure)   setOne("fExposure",   "prevExposure",   "exposureDefault",   "exposureFrom",   "exposureTo",   "exposure",   true,  false)
-            // ⭐ Bug3 修复：同步更新 iOS 滤镜弹框的滑块
+            setOne("brightness",    "fBrightness",    "prevBrightness",    "brightnessDefault",    "brightnessFrom",    "brightnessTo")
+            setOne("gamma",         "fGamma",         "prevGamma",         "gammaDefault",         "gammaFrom",         "gammaTo")
+            setOne("contrast",      "fContrast",      "prevContrast",      "contrastDefault",      "contrastFrom",      "contrastTo")
+            setOne("saturation",    "fSaturation",    "prevSaturation",    "saturationDefault",    "saturationFrom",    "saturationTo")
+            setOne("exposure",      "fExposure",      "prevExposure",      "exposureDefault",      "exposureFrom",      "exposureTo")
+            setOne("sharpness",     "fSharpness",     "prevSharpness",     "sharpnessDefault",     "sharpnessFrom",     "sharpnessTo")
+            setOne("highlightLift", "fHighlightLift", "prevHighlightLift", "highlightLiftDefault", "highlightLiftFrom", "highlightLiftTo")
+            setOne("gain",          "fGain",          "prevGain",          "gainDefault",          "gainFrom",          "gainTo")
+            // 同步滑块
             if (typeof ifMasterSlider     !== 'undefined') ifMasterSlider.value     = iosFilterPopup.fBrightness
             if (typeof ifGammaSlider      !== 'undefined') ifGammaSlider.value      = iosFilterPopup.fGamma
             if (typeof ifContrastSlider   !== 'undefined') ifContrastSlider.value   = iosFilterPopup.fContrast
             if (typeof ifSaturationSlider !== 'undefined') ifSaturationSlider.value = iosFilterPopup.fSaturation
             if (typeof ifExposureSlider   !== 'undefined') ifExposureSlider.value   = iosFilterPopup.fExposure
-            // ⭐ Bug2 修复：同步更新相机设定弹框的滑块
+            if (typeof ifSharpnessSlider  !== 'undefined') ifSharpnessSlider.value  = iosFilterPopup.fSharpness
+            if (typeof ifHighlightLiftSlider !== 'undefined') ifHighlightLiftSlider.value = iosFilterPopup.fHighlightLift
+            if (typeof ifGainSlider       !== 'undefined') ifGainSlider.value       = iosFilterPopup.fGain
             if (typeof cameraFakeExposureSlider !== 'undefined') cameraFakeExposureSlider.value = iosFilterPopup.fBrightness
             if (typeof cameraBrightnessSlider   !== 'undefined') cameraBrightnessSlider.value   = iosFilterPopup.fContrast
             if (typeof cameraSaturationSlider   !== 'undefined') cameraSaturationSlider.value   = iosFilterPopup.fSaturation
@@ -11590,7 +11667,7 @@ Rectangle {
                             hoverEnabled: true
                             cursorShape: Qt.PointingHandCursor
                             onClicked: {
-                                // ⭐ Bug1 修复：还原 — 用从后台拉到的"出厂默认"(brightnessDefault 等) + linkDefault
+                                // ⭐ 还原 — 用从后台拉到的出厂默认值 + 联动配置
                                 iosFilterPopup.fBrightness = iosFilterPopup.brightnessDefault
                                 iosFilterPopup.fGamma      = iosFilterPopup.gammaDefault
                                 iosFilterPopup.fContrast   = iosFilterPopup.contrastDefault
@@ -11598,6 +11675,7 @@ Rectangle {
                                 iosFilterPopup.fExposure   = iosFilterPopup.exposureDefault
                                 iosFilterPopup.fSharpness  = iosFilterPopup.sharpnessDefault
                                 iosFilterPopup.fHighlightLift = iosFilterPopup.highlightLiftDefault
+                                iosFilterPopup.fGain       = iosFilterPopup.gainDefault
                                 iosFilterPopup.fRedBoost   = iosFilterPopup.redBoostDefault
                                 iosFilterPopup.fEnabled    = false
                                 iosFilterPopup.prevBrightness = iosFilterPopup.brightnessDefault
@@ -11607,12 +11685,10 @@ Rectangle {
                                 iosFilterPopup.prevExposure   = iosFilterPopup.exposureDefault
                                 iosFilterPopup.prevSharpness  = iosFilterPopup.sharpnessDefault
                                 iosFilterPopup.prevHighlightLift = iosFilterPopup.highlightLiftDefault
-                                // ⭐ 使用后台配置的 linkDefault 值（而非硬编码）
-                                iosFilterPopup.linkBrightness = iosFilterPopup.linkBrightnessDefault
-                                iosFilterPopup.linkGamma      = iosFilterPopup.linkGammaDefault
-                                iosFilterPopup.linkContrast   = iosFilterPopup.linkContrastDefault
-                                iosFilterPopup.linkSaturation = iosFilterPopup.linkSaturationDefault
-                                iosFilterPopup.linkExposure   = iosFilterPopup.linkExposureDefault
+                                iosFilterPopup.prevGain        = iosFilterPopup.gainDefault
+                                // ⭐ 还原联动配置到后台默认
+                                if (iosFilterPopup.linkageConfigDefault)
+                                    iosFilterPopup.linkageConfig = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfigDefault))
                                 if (typeof ifMasterSlider     !== 'undefined') ifMasterSlider.value     = iosFilterPopup.brightnessDefault
                                 if (typeof ifGammaSlider      !== 'undefined') ifGammaSlider.value      = iosFilterPopup.gammaDefault
                                 if (typeof ifContrastSlider   !== 'undefined') ifContrastSlider.value   = iosFilterPopup.contrastDefault
@@ -11620,7 +11696,8 @@ Rectangle {
                                 if (typeof ifExposureSlider   !== 'undefined') ifExposureSlider.value   = iosFilterPopup.exposureDefault
                                 if (typeof ifSharpnessSlider  !== 'undefined') ifSharpnessSlider.value  = iosFilterPopup.sharpnessDefault
                                 if (typeof ifHighlightLiftSlider !== 'undefined') ifHighlightLiftSlider.value = iosFilterPopup.highlightLiftDefault
-                                // ⭐ 同时重置相机设定的"综合亮度"到中点 50（对应所有 iOS 滤镜值都在 default）
+                                if (typeof ifGainSlider       !== 'undefined') ifGainSlider.value       = iosFilterPopup.gainDefault
+                                iosCameraSettingsPopup.hardwareBrightness = Math.round(iosFilterPopup.gainDefault)
                                 iosCameraSettingsPopup.exposureValue = 50
                                 iosFilterPopup.pushAllStomp()
                             }
@@ -11664,13 +11741,11 @@ Rectangle {
                 // ===== 启用滤镜 永远 true, UI 不再显示 (用户需求) =====
                 // ===== "GPU 后处理" 提示文字已移除 =====
 
-                // ===== 综合亮度联动 提示文字 =====
-                //   每行最前的 ☑ 复选框 = 是否加入"综合亮度联动组"
-                //   勾选 ≥ 2 项时, 拖动其中任一会按各自 stepSize 同步驱动其他勾选项 (双向)
+                // ===== 联动分组提示文字 =====
                 Text {
                     Layout.fillWidth: true
                     horizontalAlignment: Text.AlignHCenter
-                    text: "勾选 ☑ 加入'综合亮度联动'(双向): 拖任一勾选项, 其他勾选项按各自步进同步走"
+                    text: iosFilterPopup.pcFreeConfig ? "分组联动: 箭头=联动方向(点击切换)" : "分组联动(后台配置)"
                     font.family: "PingFang HK"
                     font.pixelSize: 12
                     color: "#90A4AE"
@@ -11681,10 +11756,18 @@ Rectangle {
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: 8
-                    CheckBox {
-                        checked: iosFilterPopup.linkBrightness
-                        onToggled: iosFilterPopup.linkBrightness = checked
+                    Text {
+                        Layout.preferredWidth: 28
+                        visible: iosFilterPopup.pcFreeConfig && iosFilterPopup.linkageConfig.brightness.groupId > 0
+                        text: iosFilterPopup.linkageConfig.brightness.groupDirection === -1 ? "←" : "→"
+                        font.pixelSize: 18; font.bold: true; color: "#4DB6AC"
+                        horizontalAlignment: Text.AlignHCenter
+                        MouseArea {
+                            anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                            onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.brightness.groupDirection *= -1; iosFilterPopup.linkageConfig = lc }
+                        }
                     }
+                    Item { Layout.preferredWidth: 28; Layout.preferredHeight: 28; visible: !iosFilterPopup.pcFreeConfig || iosFilterPopup.linkageConfig.brightness.groupId === 0 }
                     Text { text: "亮度"; font.family: "PingFang HK"; font.pixelSize: 20; font.bold: true; color: "#E53935"; Layout.preferredWidth: 70 }
                     Slider {
                         id: ifMasterSlider
@@ -11696,9 +11779,7 @@ Rectangle {
                             iosFilterPopup.prevBrightness = value
                             iosFilterPopup.fBrightness = value
                             iosFilterPopup.pushParam("brightness", value)
-                            if (iosFilterPopup.linkBrightness) {
-                                iosFilterPopup.applyLinkedDelta("brightness", delta / stepSize)
-                            }
+                            iosFilterPopup.applyLinkedDelta("brightness", delta)
                         }
                         onPressedChanged: if (!pressed) iosFilterPopup.pushParam("brightness", value)
                         background: Rectangle {
@@ -11728,9 +11809,7 @@ Rectangle {
                                 iosFilterPopup.prevBrightness = nv
                                 iosFilterPopup.fBrightness = nv
                                 iosFilterPopup.pushParam("brightness", nv)
-                                if (iosFilterPopup.linkBrightness) {
-                                    iosFilterPopup.applyLinkedDelta("brightness", delta / ifMasterSlider.stepSize)
-                                }
+                                iosFilterPopup.applyLinkedDelta("brightness", delta)
                             }
                         }
                     }
@@ -11742,10 +11821,18 @@ Rectangle {
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: 8
-                    CheckBox {
-                        checked: iosFilterPopup.linkGamma
-                        onToggled: iosFilterPopup.linkGamma = checked
+                    Text {
+                        Layout.preferredWidth: 28
+                        visible: iosFilterPopup.pcFreeConfig && iosFilterPopup.linkageConfig.gamma.groupId > 0
+                        text: iosFilterPopup.linkageConfig.gamma.groupDirection === -1 ? "←" : "→"
+                        font.pixelSize: 18; font.bold: true; color: "#4DB6AC"
+                        horizontalAlignment: Text.AlignHCenter
+                        MouseArea {
+                            anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                            onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.gamma.groupDirection *= -1; iosFilterPopup.linkageConfig = lc }
+                        }
                     }
+                    Item { Layout.preferredWidth: 28; Layout.preferredHeight: 28; visible: !iosFilterPopup.pcFreeConfig || iosFilterPopup.linkageConfig.gamma.groupId === 0 }
                     Text { text: "伽马"; font.family: "PingFang HK"; font.pixelSize: 20; font.bold: true; color: "#E53935"; Layout.preferredWidth: 70 }
                     Slider {
                         id: ifGammaSlider
@@ -11757,9 +11844,7 @@ Rectangle {
                             iosFilterPopup.prevGamma = value
                             iosFilterPopup.fGamma = value
                             iosFilterPopup.pushParam("gamma", value)
-                            if (iosFilterPopup.linkGamma) {
-                                iosFilterPopup.applyLinkedDelta("gamma", delta / stepSize)
-                            }
+                            iosFilterPopup.applyLinkedDelta("gamma", delta)
                         }
                         onPressedChanged: if (!pressed) iosFilterPopup.pushParam("gamma", value)
                         background: Rectangle {
@@ -11789,9 +11874,7 @@ Rectangle {
                                 iosFilterPopup.prevGamma = nv
                                 iosFilterPopup.fGamma = nv
                                 iosFilterPopup.pushParam("gamma", nv)
-                                if (iosFilterPopup.linkGamma) {
-                                    iosFilterPopup.applyLinkedDelta("gamma", delta / ifGammaSlider.stepSize)
-                                }
+                                iosFilterPopup.applyLinkedDelta("gamma", delta)
                             }
                         }
                     }
@@ -11802,10 +11885,18 @@ Rectangle {
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: 8
-                    CheckBox {
-                        checked: iosFilterPopup.linkContrast
-                        onToggled: iosFilterPopup.linkContrast = checked
+                    Text {
+                        Layout.preferredWidth: 28
+                        visible: iosFilterPopup.pcFreeConfig && iosFilterPopup.linkageConfig.contrast.groupId > 0
+                        text: iosFilterPopup.linkageConfig.contrast.groupDirection === -1 ? "←" : "→"
+                        font.pixelSize: 18; font.bold: true; color: "#4DB6AC"
+                        horizontalAlignment: Text.AlignHCenter
+                        MouseArea {
+                            anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                            onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.contrast.groupDirection *= -1; iosFilterPopup.linkageConfig = lc }
+                        }
                     }
+                    Item { Layout.preferredWidth: 28; Layout.preferredHeight: 28; visible: !iosFilterPopup.pcFreeConfig || iosFilterPopup.linkageConfig.contrast.groupId === 0 }
                     Text { text: "对比度"; font.family: "PingFang HK"; font.pixelSize: 20; font.bold: true; color: "#E53935"; Layout.preferredWidth: 70 }
                     Slider {
                         id: ifContrastSlider
@@ -11817,9 +11908,7 @@ Rectangle {
                             iosFilterPopup.prevContrast = value
                             iosFilterPopup.fContrast = value
                             iosFilterPopup.pushParam("contrast", value)
-                            if (iosFilterPopup.linkContrast) {
-                                iosFilterPopup.applyLinkedDelta("contrast", delta / stepSize)
-                            }
+                            iosFilterPopup.applyLinkedDelta("contrast", delta)
                         }
                         onPressedChanged: if (!pressed) iosFilterPopup.pushParam("contrast", value)
                         background: Rectangle {
@@ -11849,9 +11938,7 @@ Rectangle {
                                 iosFilterPopup.prevContrast = nv
                                 iosFilterPopup.fContrast = nv
                                 iosFilterPopup.pushParam("contrast", nv)
-                                if (iosFilterPopup.linkContrast) {
-                                    iosFilterPopup.applyLinkedDelta("contrast", delta / ifContrastSlider.stepSize)
-                                }
+                                iosFilterPopup.applyLinkedDelta("contrast", delta)
                             }
                         }
                     }
@@ -11862,10 +11949,18 @@ Rectangle {
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: 8
-                    CheckBox {
-                        checked: iosFilterPopup.linkSaturation
-                        onToggled: iosFilterPopup.linkSaturation = checked
+                    Text {
+                        Layout.preferredWidth: 28
+                        visible: iosFilterPopup.pcFreeConfig && iosFilterPopup.linkageConfig.saturation.groupId > 0
+                        text: iosFilterPopup.linkageConfig.saturation.groupDirection === -1 ? "←" : "→"
+                        font.pixelSize: 18; font.bold: true; color: "#4DB6AC"
+                        horizontalAlignment: Text.AlignHCenter
+                        MouseArea {
+                            anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                            onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.saturation.groupDirection *= -1; iosFilterPopup.linkageConfig = lc }
+                        }
                     }
+                    Item { Layout.preferredWidth: 28; Layout.preferredHeight: 28; visible: !iosFilterPopup.pcFreeConfig || iosFilterPopup.linkageConfig.saturation.groupId === 0 }
                     Text { text: "红外模式"; font.family: "PingFang HK"; font.pixelSize: 20; font.bold: true; color: "#E53935"; Layout.preferredWidth: 90 }
                     Slider {
                         id: ifSaturationSlider
@@ -11877,9 +11972,7 @@ Rectangle {
                             iosFilterPopup.prevSaturation = value
                             iosFilterPopup.fSaturation = value
                             iosFilterPopup.pushParam("saturation", value)
-                            if (iosFilterPopup.linkSaturation) {
-                                iosFilterPopup.applyLinkedDelta("saturation", delta / stepSize)
-                            }
+                            iosFilterPopup.applyLinkedDelta("saturation", delta)
                         }
                         onPressedChanged: if (!pressed) iosFilterPopup.pushParam("saturation", value)
                         background: Rectangle {
@@ -11909,9 +12002,7 @@ Rectangle {
                                 iosFilterPopup.prevSaturation = nv
                                 iosFilterPopup.fSaturation = nv
                                 iosFilterPopup.pushParam("saturation", nv)
-                                if (iosFilterPopup.linkSaturation) {
-                                    iosFilterPopup.applyLinkedDelta("saturation", delta / ifSaturationSlider.stepSize)
-                                }
+                                iosFilterPopup.applyLinkedDelta("saturation", delta)
                             }
                         }
                     }
@@ -11922,10 +12013,18 @@ Rectangle {
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: 8
-                    CheckBox {
-                        checked: iosFilterPopup.linkExposure
-                        onToggled: iosFilterPopup.linkExposure = checked
+                    Text {
+                        Layout.preferredWidth: 28
+                        visible: iosFilterPopup.pcFreeConfig && iosFilterPopup.linkageConfig.exposure.groupId > 0
+                        text: iosFilterPopup.linkageConfig.exposure.groupDirection === -1 ? "←" : "→"
+                        font.pixelSize: 18; font.bold: true; color: "#4DB6AC"
+                        horizontalAlignment: Text.AlignHCenter
+                        MouseArea {
+                            anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                            onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.exposure.groupDirection *= -1; iosFilterPopup.linkageConfig = lc }
+                        }
                     }
+                    Item { Layout.preferredWidth: 28; Layout.preferredHeight: 28; visible: !iosFilterPopup.pcFreeConfig || iosFilterPopup.linkageConfig.exposure.groupId === 0 }
                     Text { text: "曝光度"; font.family: "PingFang HK"; font.pixelSize: 20; font.bold: true; color: "#E53935"; Layout.preferredWidth: 70 }
                     Slider {
                         id: ifExposureSlider
@@ -11937,9 +12036,7 @@ Rectangle {
                             iosFilterPopup.prevExposure = value
                             iosFilterPopup.fExposure = value
                             iosFilterPopup.pushParam("exposure", Math.log2(value))
-                            if (iosFilterPopup.linkExposure) {
-                                iosFilterPopup.applyLinkedDelta("exposure", delta / stepSize)
-                            }
+                            iosFilterPopup.applyLinkedDelta("exposure", delta)
                         }
                         onPressedChanged: if (!pressed) iosFilterPopup.pushParam("exposure", Math.log2(value))
                         background: Rectangle {
@@ -11969,9 +12066,7 @@ Rectangle {
                                 iosFilterPopup.prevExposure = nv
                                 iosFilterPopup.fExposure = nv
                                 iosFilterPopup.pushParam("exposure", Math.log2(nv))
-                                if (iosFilterPopup.linkExposure) {
-                                    iosFilterPopup.applyLinkedDelta("exposure", delta / ifExposureSlider.stepSize)
-                                }
+                                iosFilterPopup.applyLinkedDelta("exposure", delta)
                             }
                         }
                     }
@@ -12007,17 +12102,30 @@ Rectangle {
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: 8
-                    Item { Layout.preferredWidth: 28; Layout.preferredHeight: 28 }
-                    Text { text: "清晰度(P)（滤镜）"; font.family: "PingFang HK"; font.pixelSize: 16; font.bold: true; color: "#E53935"; Layout.preferredWidth: 130 }
+                    Text {
+                        Layout.preferredWidth: 28
+                        visible: iosFilterPopup.pcFreeConfig && iosFilterPopup.linkageConfig.sharpness.groupId > 0
+                        text: iosFilterPopup.linkageConfig.sharpness.groupDirection === -1 ? "←" : "→"
+                        font.pixelSize: 18; font.bold: true; color: "#4DB6AC"
+                        horizontalAlignment: Text.AlignHCenter
+                        MouseArea {
+                            anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                            onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.sharpness.groupDirection *= -1; iosFilterPopup.linkageConfig = lc }
+                        }
+                    }
+                    Item { Layout.preferredWidth: 28; Layout.preferredHeight: 28; visible: !iosFilterPopup.pcFreeConfig || iosFilterPopup.linkageConfig.sharpness.groupId === 0 }
+                    Text { text: "清晰度(P)"; font.family: "PingFang HK"; font.pixelSize: 16; font.bold: true; color: "#E53935"; Layout.preferredWidth: 130 }
                     Slider {
                         id: ifSharpnessSlider
                         Layout.fillWidth: true
                         from: iosFilterPopup.sharpnessFrom; to: iosFilterPopup.sharpnessTo; stepSize: iosFilterPopup.sharpnessStep
                         value: iosFilterPopup.fSharpness
                         onMoved: {
+                            var delta = value - iosFilterPopup.prevSharpness
                             iosFilterPopup.prevSharpness = value
                             iosFilterPopup.fSharpness = value
                             iosFilterPopup.pushParam("sharpness", value)
+                            iosFilterPopup.applyLinkedDelta("sharpness", delta)
                         }
                         onPressedChanged: if (!pressed) iosFilterPopup.pushParam("sharpness", value)
                         background: Rectangle {
@@ -12042,10 +12150,12 @@ Rectangle {
                                 if (event.angleDelta.y === 0) return
                                 var dir = event.angleDelta.y > 0 ? 1 : -1
                                 var nv = iosFilterPopup.clampVal(ifSharpnessSlider.value + dir * ifSharpnessSlider.stepSize, ifSharpnessSlider.from, ifSharpnessSlider.to)
+                                var delta = nv - iosFilterPopup.prevSharpness
                                 ifSharpnessSlider.value = nv
                                 iosFilterPopup.prevSharpness = nv
                                 iosFilterPopup.fSharpness = nv
                                 iosFilterPopup.pushParam("sharpness", nv)
+                                iosFilterPopup.applyLinkedDelta("sharpness", delta)
                             }
                         }
                     }
@@ -12066,17 +12176,30 @@ Rectangle {
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: 8
-                    Item { Layout.preferredWidth: 28; Layout.preferredHeight: 28 }
-                    Text { text: "逆光对比(B)（滤镜）"; font.family: "PingFang HK"; font.pixelSize: 16; font.bold: true; color: "#E53935"; Layout.preferredWidth: 130 }
+                    Text {
+                        Layout.preferredWidth: 28
+                        visible: iosFilterPopup.pcFreeConfig && iosFilterPopup.linkageConfig.highlightLift.groupId > 0
+                        text: iosFilterPopup.linkageConfig.highlightLift.groupDirection === -1 ? "←" : "→"
+                        font.pixelSize: 18; font.bold: true; color: "#4DB6AC"
+                        horizontalAlignment: Text.AlignHCenter
+                        MouseArea {
+                            anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                            onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.highlightLift.groupDirection *= -1; iosFilterPopup.linkageConfig = lc }
+                        }
+                    }
+                    Item { Layout.preferredWidth: 28; Layout.preferredHeight: 28; visible: !iosFilterPopup.pcFreeConfig || iosFilterPopup.linkageConfig.highlightLift.groupId === 0 }
+                    Text { text: "逆光对比(B)"; font.family: "PingFang HK"; font.pixelSize: 16; font.bold: true; color: "#E53935"; Layout.preferredWidth: 130 }
                     Slider {
                         id: ifHighlightLiftSlider
                         Layout.fillWidth: true
                         from: iosFilterPopup.highlightLiftFrom; to: iosFilterPopup.highlightLiftTo; stepSize: iosFilterPopup.highlightLiftStep
                         value: iosFilterPopup.fHighlightLift
                         onMoved: {
+                            var delta = value - iosFilterPopup.prevHighlightLift
                             iosFilterPopup.prevHighlightLift = value
                             iosFilterPopup.fHighlightLift = value
                             iosFilterPopup.pushParam("highlightLift", value)
+                            iosFilterPopup.applyLinkedDelta("highlightLift", delta)
                         }
                         onPressedChanged: if (!pressed) iosFilterPopup.pushParam("highlightLift", value)
                         background: Rectangle {
@@ -12101,14 +12224,83 @@ Rectangle {
                                 if (event.angleDelta.y === 0) return
                                 var dir = event.angleDelta.y > 0 ? 1 : -1
                                 var nv = iosFilterPopup.clampVal(ifHighlightLiftSlider.value + dir * ifHighlightLiftSlider.stepSize, ifHighlightLiftSlider.from, ifHighlightLiftSlider.to)
+                                var delta = nv - iosFilterPopup.prevHighlightLift
                                 ifHighlightLiftSlider.value = nv
                                 iosFilterPopup.prevHighlightLift = nv
                                 iosFilterPopup.fHighlightLift = nv
                                 iosFilterPopup.pushParam("highlightLift", nv)
+                                iosFilterPopup.applyLinkedDelta("highlightLift", delta)
                             }
                         }
                     }
                     Text { text: iosFilterPopup.fHighlightLift.toFixed(2); font.family: "PingFang HK"; font.pixelSize: 16; color: "#263238"; Layout.preferredWidth: 50 }
+                }
+
+                // ===== 增益(G) — 移入滤镜联动区 =====
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 8
+                    Text {
+                        Layout.preferredWidth: 28
+                        visible: iosFilterPopup.pcFreeConfig && iosFilterPopup.linkageConfig.gain.groupId > 0
+                        text: iosFilterPopup.linkageConfig.gain.groupDirection === -1 ? "←" : "→"
+                        font.pixelSize: 18; font.bold: true; color: "#4DB6AC"
+                        horizontalAlignment: Text.AlignHCenter
+                        MouseArea {
+                            anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                            onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.gain.groupDirection *= -1; iosFilterPopup.linkageConfig = lc }
+                        }
+                    }
+                    Item { Layout.preferredWidth: 28; Layout.preferredHeight: 28; visible: !iosFilterPopup.pcFreeConfig || iosFilterPopup.linkageConfig.gain.groupId === 0 }
+                    Text { text: "增益(G)"; font.family: "PingFang HK"; font.pixelSize: 16; font.bold: true; color: "#E53935"; Layout.preferredWidth: 130 }
+                    Slider {
+                        id: ifGainSlider
+                        Layout.fillWidth: true
+                        from: iosFilterPopup.gainFrom; to: iosFilterPopup.gainTo; stepSize: iosFilterPopup.gainStep
+                        value: iosFilterPopup.fGain
+                        onMoved: {
+                            var delta = value - iosFilterPopup.prevGain
+                            iosFilterPopup.prevGain = value
+                            iosFilterPopup.fGain = value
+                            sendTestBrightnessConfig(Math.round(value))
+                            iosFilterPopup.applyLinkedDelta("gain", delta)
+                        }
+                        onPressedChanged: if (!pressed) sendTestBrightnessConfig(Math.round(value))
+                        background: Rectangle {
+                            x: ifGainSlider.leftPadding
+                            y: ifGainSlider.topPadding + ifGainSlider.availableHeight / 2 - height / 2
+                            implicitWidth: 200; implicitHeight: 4
+                            width: ifGainSlider.availableWidth; height: 4
+                            radius: 999; color: "#C8E6C9"
+                            Rectangle {
+                                width: ifGainSlider.visualPosition * parent.width
+                                height: parent.height; radius: 999; color: "#4DB6AC"
+                            }
+                        }
+                        handle: Rectangle {
+                            x: ifGainSlider.leftPadding + ifGainSlider.visualPosition * (ifGainSlider.availableWidth - width)
+                            y: ifGainSlider.topPadding + ifGainSlider.availableHeight / 2 - height / 2
+                            implicitWidth: 14; implicitHeight: 14
+                            width: 14; height: 14; radius: 7; color: "#4DB6AC"
+                        }
+                        WheelHandler {
+                            onWheel: function(event) {
+                                if (event.angleDelta.y === 0) return
+                                var dir = event.angleDelta.y > 0 ? 1 : -1
+                                var nv = iosFilterPopup.clampVal(ifGainSlider.value + dir * ifGainSlider.stepSize, ifGainSlider.from, ifGainSlider.to)
+                                var delta = nv - iosFilterPopup.prevGain
+                                ifGainSlider.value = nv
+                                iosFilterPopup.prevGain = nv
+                                iosFilterPopup.fGain = nv
+                                sendTestBrightnessConfig(Math.round(nv))
+                                iosFilterPopup.applyLinkedDelta("gain", delta)
+                            }
+                        }
+                    }
+                    Text {
+                        text: iosCameraSettingsPopup.hardwareEVText()
+                        font.family: "PingFang HK"; font.pixelSize: 14; color: "#263238"; Layout.preferredWidth: 50
+                    }
                 }
 
                 Rectangle {
@@ -12125,57 +12317,6 @@ Rectangle {
                     font.pixelSize: 12
                     font.bold: true
                     color: "#546E7A"
-                }
-
-                // ===== 增益(G)：ISO/EV -2~+8 =====
-                RowLayout {
-                    Layout.fillWidth: true
-                    spacing: 8
-                    Item { Layout.preferredWidth: 28; Layout.preferredHeight: 28 }
-                    Text { text: "增益(G)"; font.family: "PingFang HK"; font.pixelSize: 16; font.bold: true; color: "#263238"; Layout.preferredWidth: 72 }
-                    Slider {
-                        id: ifFilterHardwareBrightnessSlider
-                        Layout.fillWidth: true
-                        from: 0
-                        to: 100
-                        stepSize: 1
-                        value: iosCameraSettingsPopup.hardwareBrightness
-                        onMoved: sendTestBrightnessConfig(value)
-                        onPressedChanged: if (!pressed) sendTestBrightnessConfig(value)
-                        background: Rectangle {
-                            x: ifFilterHardwareBrightnessSlider.leftPadding
-                            y: ifFilterHardwareBrightnessSlider.topPadding + ifFilterHardwareBrightnessSlider.availableHeight / 2 - height / 2
-                            implicitWidth: 200; implicitHeight: 4
-                            width: ifFilterHardwareBrightnessSlider.availableWidth; height: 4
-                            radius: 999; color: "#C8E6C9"
-                            Rectangle {
-                                width: ifFilterHardwareBrightnessSlider.visualPosition * parent.width
-                                height: parent.height; radius: 999; color: "#4DB6AC"
-                            }
-                        }
-                        handle: Rectangle {
-                            x: ifFilterHardwareBrightnessSlider.leftPadding + ifFilterHardwareBrightnessSlider.visualPosition * (ifFilterHardwareBrightnessSlider.availableWidth - width)
-                            y: ifFilterHardwareBrightnessSlider.topPadding + ifFilterHardwareBrightnessSlider.availableHeight / 2 - height / 2
-                            implicitWidth: 14; implicitHeight: 14
-                            width: 14; height: 14; radius: 7; color: "#4DB6AC"
-                        }
-                        WheelHandler {
-                            onWheel: function(event) {
-                                if (event.angleDelta.y === 0) return
-                                var dir = event.angleDelta.y > 0 ? 1 : -1
-                                var nv = Math.max(0, Math.min(100, ifFilterHardwareBrightnessSlider.value + dir))
-                                ifFilterHardwareBrightnessSlider.value = nv
-                                sendTestBrightnessConfig(nv)
-                            }
-                        }
-                    }
-                    Text {
-                        text: iosCameraSettingsPopup.hardwareEVText()
-                        font.family: "PingFang HK"
-                        font.pixelSize: 14
-                        color: "#263238"
-                        Layout.preferredWidth: 50
-                    }
                 }
 
                 // ===== 白平衡(WB)：色温 2000K-8000K =====
