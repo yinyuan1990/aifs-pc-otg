@@ -12270,6 +12270,7 @@ Rectangle {
                 }
 
                 Rectangle {
+                    visible: false
                     Layout.fillWidth: true
                     Layout.preferredHeight: 1
                     color: "#E0E0E0"
@@ -12283,10 +12284,12 @@ Rectangle {
                     font.pixelSize: 12
                     font.bold: true
                     color: "#546E7A"
+                    visible: false
                 }
 
                 // ===== 白平衡(WB)：色温 2000K-8000K =====
                 RowLayout {
+                    visible: false
                     Layout.fillWidth: true
                     spacing: 8
                     Item { Layout.preferredWidth: 28; Layout.preferredHeight: 28 }
@@ -12357,6 +12360,7 @@ Rectangle {
 
                 // ===== 自动 — 相机 AE，PC 暂无 STOMP =====
                 RowLayout {
+                    visible: false
                     Layout.fillWidth: true
                     spacing: 8
                     Item { Layout.preferredWidth: 28; Layout.preferredHeight: 28 }
@@ -12381,8 +12385,6 @@ Rectangle {
                     Repeater {
                         model: [
                             { label: "滤镜模式", checked: iosFilterPopup.fEnabled, action: "filter" },
-                            { label: "LUT模式", checked: iosFilterPopup.lutEnabled, action: "lut" },
-                            { label: "硬件", checked: iosFilterPopup.hardwareEnabled, action: "hardware" },
                             { label: "Video HDR", checked: iosFilterPopup.videoHDREnabled, action: "videoHDR" },
                             { label: "自动HDR", checked: iosFilterPopup.autoHDREnabled, action: "autoHDR" }
                         ]
@@ -12428,6 +12430,7 @@ Rectangle {
                 }
 
                 Text {
+                    visible: false
                     Layout.fillWidth: true
                     horizontalAlignment: Text.AlignHCenter
                     text: "LUT 切换"
@@ -12438,6 +12441,7 @@ Rectangle {
                 }
 
                 Flow {
+                    visible: false
                     Layout.fillWidth: true
                     spacing: 6
 
