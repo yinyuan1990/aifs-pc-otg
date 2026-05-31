@@ -302,25 +302,35 @@ void AutoUpdater::downloadAndInstall()
             out << "echo  =====================================\n";
             out << "echo.\n";
 
-            // 等待 Phoenix 退出（QCoreApplication::quit() 已立即调用）
+            // 解压明细日志（脚本在程序退出后运行，必须自己写文件）
+            out << "set \"ULOG=" << nAppDir << "\\update_extract.log\"\n";
+            out << "echo ==== Phoenix update %date% %time% ==== > \"%ULOG%\"\n";
+            out << "echo  解压明细将写入: %ULOG%\n";
+
+            // 强制结束 Phoenix 进程并等待释放文件锁
             out << "echo  [1/3] 等待旧程序退出...\n";
-            out << "timeout /t 3 /nobreak >nul\n";
+            out << "taskkill /F /IM Phoenix.exe /T >nul 2>&1\n";
+            out << "taskkill /F /IM " << actualExeName << " /T >nul 2>&1\n";
+            out << "timeout /t 2 /nobreak >nul\n";
             out << "echo.\n";
 
             if (directExeDownload) {
                 out << "echo  [2/3] 正在替换程序文件...\n";
-                out << "copy /y \"" << nExeFile << "\" \"" << nExePath << "\" >nul\n";
+                out << "echo --- copy exe --- >> \"%ULOG%\"\n";
+                out << "copy /y \"" << nExeFile << "\" \"" << nExePath << "\" >> \"%ULOG%\" 2>&1\n";
                 out << "del \"" << nExeFile << "\" >nul 2>&1\n";
             } else if (m_updateMode == 0) {
                 out << "echo  [2/3] 正在解压程序包（请稍候）...\n";
                 // tar.exe 是 Win10 1803+ 内置工具，对中文路径支持比 powershell Expand-Archive 好
-                // -C 切到目标目录，-x 解压，-f 指定 zip 文件
+                // -C 切到目标目录，-x 解压，-v 逐个列出文件（含覆盖失败的错误行），-f 指定 zip 文件
                 out << "if not exist \"" << nAppDir << "\" md \"" << nAppDir << "\"\n";
-                out << "tar -x -f \"" << nZipFile << "\" -C \"" << nAppDir << "\"\n";
+                out << "echo --- tar -xv --- >> \"%ULOG%\"\n";
+                out << "tar -xv -f \"" << nZipFile << "\" -C \"" << nAppDir << "\" >> \"%ULOG%\" 2>&1\n";
                 out << "if errorlevel 1 (\n";
                 out << "    echo  tar 解压失败，回退到 powershell ...\n";
+                out << "    echo --- powershell Expand-Archive --- >> \"%ULOG%\"\n";
                 out << "    powershell -NoProfile -Command \"Expand-Archive -LiteralPath \\\""
-                    << nZipFile << "\\\" -DestinationPath \\\"" << nAppDir << "\\\" -Force\"\n";
+                    << nZipFile << "\\\" -DestinationPath \\\"" << nAppDir << "\\\" -Force\" >> \"%ULOG%\" 2>&1\n";
                 out << ")\n";
                 out << "del \"" << nZipFile << "\" >nul 2>&1\n";
                 if (exeRenamed) {
@@ -331,13 +341,15 @@ void AutoUpdater::downloadAndInstall()
                 // 模式1 全量更新：直接解压到 appDir
                 out << "echo  [2/3] 正在解压完整更新包（请稍候，文件较大）...\n";
                 out << "if not exist \"" << nAppDir << "\" md \"" << nAppDir << "\"\n";
-                out << "tar -x -f \"" << nZipFile << "\" -C \"" << nAppDir << "\"\n";
+                out << "echo --- tar -xv --- >> \"%ULOG%\"\n";
+                out << "tar -xv -f \"" << nZipFile << "\" -C \"" << nAppDir << "\" >> \"%ULOG%\" 2>&1\n";
                 out << "if errorlevel 1 (\n";
                 out << "    echo  tar 解压失败，回退到 powershell ...\n";
+                out << "    echo --- powershell Expand-Archive --- >> \"%ULOG%\"\n";
                 out << "    powershell -NoProfile -Command \"Expand-Archive -LiteralPath \\\""
-                    << nZipFile << "\\\" -DestinationPath \\\"" << nAppDir << "\\\" -Force\"\n";
+                    << nZipFile << "\\\" -DestinationPath \\\"" << nAppDir << "\\\" -Force\" >> \"%ULOG%\" 2>&1\n";
                 out << "    if errorlevel 1 (\n";
-                out << "        echo  解压失败，请手动更新\n";
+                out << "        echo  解压失败，请手动更新（详细见 %ULOG%）\n";
                 out << "        pause\n";
                 out << "        exit /b 1\n";
                 out << "    )\n";

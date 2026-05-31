@@ -54,3 +54,7 @@ yh.txt
 moc_*.cpp
 qrc_*.cpp
 ui_*.h
+
+# 本地打包脚本（各环境路径不同，不纳入版本库）
+pack.bat
+pack2.bat
