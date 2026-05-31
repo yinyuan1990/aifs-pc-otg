@@ -395,6 +395,72 @@ void JpegEncoder::run()
     cleanupEncoder();
 }
 
+// ============== NaluDiskWriter ==============
+
+NaluDiskWriter::NaluDiskWriter(QObject *parent)
+    : QThread(parent)
+{
+    start();  // 普通优先级，及时落盘
+}
+
+NaluDiskWriter::~NaluDiskWriter()
+{
+    stop();
+    wait();
+}
+
+void NaluDiskWriter::stop()
+{
+    m_running = false;
+    m_condition.wakeAll();
+}
+
+void NaluDiskWriter::submit(const QString &path, const QByteArray &data)
+{
+    if (path.isEmpty() || data.isEmpty()) return;
+    QMutexLocker lock(&m_mutex);
+    m_queue.enqueue({path, data, -1});
+    m_condition.wakeOne();
+}
+
+void NaluDiskWriter::submitBatch(const QVector<QPair<QString, QByteArray>> &tasks, int tag)
+{
+    if (tasks.isEmpty()) return;
+    QMutexLocker lock(&m_mutex);
+    for (int i = 0; i < tasks.size(); ++i) {
+        const int t = (i == tasks.size() - 1) ? tag : -1;  // 最后一帧带 tag
+        m_queue.enqueue({tasks[i].first, tasks[i].second, t});
+    }
+    m_condition.wakeOne();
+}
+
+void NaluDiskWriter::run()
+{
+    while (m_running) {
+        WriteTask task;
+        {
+            QMutexLocker lock(&m_mutex);
+            while (m_queue.isEmpty() && m_running) {
+                m_condition.wait(&m_mutex);
+            }
+            if (!m_running && m_queue.isEmpty()) break;
+            task = m_queue.dequeue();
+        }
+
+        if (!task.path.isEmpty() && !task.data.isEmpty()) {
+            QFile file(task.path);
+            if (file.open(QIODevice::WriteOnly)) {
+                file.write(task.data);
+                file.close();
+            }
+        }
+
+        if (task.batchTag >= 0) {
+            emit batchWritten(task.batchTag);
+        }
+    }
+}
+
 // ============== CaptureManager ==============
 
 CaptureManager::CaptureManager(QObject *parent)
@@ -404,6 +470,12 @@ CaptureManager::CaptureManager(QObject *parent)
     qDebug() << "📦 CaptureManager 构造开始...";
     loadSettings();
     ensureCapturesDir();
+
+    // 后台 NALU 落盘线程（跨线程信号自动走 QueuedConnection 回到主线程）
+    m_diskWriter = new NaluDiskWriter(this);
+    connect(m_diskWriter, &NaluDiskWriter::batchWritten,
+            this, &CaptureManager::onBatchWritten);
+
     qDebug() << "📦 CaptureManager 设置和目录完成";
 
     // 自动注册到 ImageProvider（因为通过 Loader 加载，main.cpp 的 findChild 找不到）
@@ -415,6 +487,9 @@ CaptureManager::CaptureManager(QObject *parent)
 
 CaptureManager::~CaptureManager()
 {
+    if (m_diskWriter) {
+        m_diskWriter->stop();  // 子对象析构时会 wait()，这里先唤醒退出
+    }
     for (auto &state : m_itemDecoders) {
         delete state.decoder;
     }
@@ -659,17 +734,16 @@ void CaptureManager::checkPendingCaptures(qint64 frameIndex)
 
         CaptureItem &item = m_items[pending.itemIndex];
 
-        // 保存到达的帧到磁盘
+        // 保存到达的帧 → 后台线程落盘（主线程只做一次轻量 getFrame 拷贝）
         if (store && frameIndex >= item.startIndex && frameIndex <= pending.targetEndIndex) {
             int offset = static_cast<int>(frameIndex - item.startIndex);
             if (offset >= 0 && offset < item.totalFrames() && store->hasFrame(frameIndex)) {
                 QByteArray data = store->getFrame(frameIndex);
-                QString path = item.naluDir + QString("/%1.nalu").arg(offset, 6, 10, QChar('0'));
-                QFile file(path);
-                if (file.open(QIODevice::WriteOnly)) {
-                    file.write(data);
+                if (!data.isEmpty() && m_diskWriter) {
+                    QString path = item.naluDir + QString("/%1.nalu").arg(offset, 6, 10, QChar('0'));
+                    m_diskWriter->submit(path, data);
+                    item.savedFrameCount++;
                 }
-                item.savedFrameCount++;
             }
         }
 
@@ -758,20 +832,9 @@ void CaptureManager::capture()
         oldestAvailable = store->oldestIndex();
         startIndex = qMax(startIndex, oldestAvailable);
 
-        qint64 idrIndex = -1;
-        for (qint64 idx = eventIndex; idx >= oldestAvailable; --idx) {
-            if (!store->hasFrame(idx)) {
-                continue;
-            }
-            const QByteArray data = store->getFrame(idx);
-            if (store->isKeyFrame(idx)
-                || captureDebugAnnexBHasNalType(data, 5)
-                || captureDebugAnnexBHasNalType(data, 7)) {
-                idrIndex = idx;
-                break;
-            }
-        }
-        if (idrIndex >= 0 && idrIndex < startIndex) {
+        // 用关键帧索引 O(log n) 直接定位最近的 IDR，替代向后逐帧扫描+拷贝
+        qint64 idrIndex = store->findNearestKeyFrame(eventIndex);
+        if (idrIndex >= 0 && idrIndex <= eventIndex && idrIndex < startIndex) {
             captureDebugLog("CAP", QString("extend capture start to sync global=%1 was=%2")
                 .arg(idrIndex).arg(startIndex));
             startIndex = idrIndex;
@@ -824,20 +887,21 @@ void CaptureManager::capture()
         item.liveSnapshot = item.liveSnapshot.transformed(transform, Qt::FastTransformation);
     }
 
-    // 从环形缓冲拷贝已有帧到磁盘
+    // 从环形缓冲取出已有帧（主线程只做轻量 getFrame 拷贝），稍后交后台线程落盘
+    QVector<QPair<QString, QByteArray>> writeTasks;
     if (m_gstPlayer && m_gstPlayer->naluFrameStore()) {
         NaluFrameStore *store = m_gstPlayer->naluFrameStore();
         qint64 saveTo = qMin(endIndex, store->newestIndex());
+        writeTasks.reserve(static_cast<int>(qMax(0LL, saveTo - startIndex + 1)));
         for (qint64 idx = startIndex; idx <= saveTo; idx++) {
             if (store->hasFrame(idx)) {
                 int offset = static_cast<int>(idx - startIndex);
                 QByteArray data = store->getFrame(idx);
-                QString path = item.naluDir + QString("/%1.nalu").arg(offset, 6, 10, QChar('0'));
-                QFile file(path);
-                if (file.open(QIODevice::WriteOnly)) {
-                    file.write(data);
+                if (!data.isEmpty()) {
+                    QString path = item.naluDir + QString("/%1.nalu").arg(offset, 6, 10, QChar('0'));
+                    writeTasks.append({path, data});
+                    item.savedFrameCount++;
                 }
-                item.savedFrameCount++;
             }
         }
     }
@@ -863,12 +927,41 @@ void CaptureManager::capture()
     emit itemAdded(newIndex);
     emit captureComplete(newIndex);
 
-    scheduleFrameDecode(newIndex, item.currentOffset);
+    // 已有帧交后台线程落盘；整批写完后由 onBatchWritten 触发可见帧解码
+    // （此时文件已就绪，避免与异步解码产生“文件未写入”竞态）
+    if (m_diskWriter && !writeTasks.isEmpty()) {
+        m_diskWriter->submitBatch(writeTasks, item.id);
+    } else {
+        // 抓拍瞬间环形缓冲暂无可存帧：先靠兜底画面，后续帧到达后再解码
+        scheduleFrameDecode(newIndex, item.currentOffset);
+    }
+}
+
+void CaptureManager::onBatchWritten(int tag)
+{
+    // tag == CaptureItem.id，后台落盘完成 → 文件已就绪，触发可见帧解码刷新
+    int itemIndex = -1;
+    int currentOffset = 0;
+    int totalFrames = 0;
+    {
+        QMutexLocker lock(&m_mutex);
+        for (int i = 0; i < m_items.size(); ++i) {
+            if (m_items[i].id == tag) {
+                itemIndex = i;
+                currentOffset = m_items[i].currentOffset;
+                totalFrames = m_items[i].totalFrames();
+                break;
+            }
+        }
+    }
+    if (itemIndex < 0) return;
+
+    scheduleFrameDecode(itemIndex, currentOffset);
     for (int d = -3; d <= 3; ++d) {
         if (d == 0) continue;
-        const int off = item.currentOffset + d;
-        if (off >= 0 && off < item.totalFrames()) {
-            scheduleFrameDecode(newIndex, off);
+        const int off = currentOffset + d;
+        if (off >= 0 && off < totalFrames) {
+            scheduleFrameDecode(itemIndex, off);
         }
     }
 }

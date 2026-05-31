@@ -12,6 +12,7 @@
 #include <QDir>
 #include <QDateTime>
 #include <QSet>
+#include <QPair>
 #include <atomic>
 #include "gpupipeline.h"
 #include "gstplayer.h"
@@ -112,6 +113,43 @@ private:
     
     static constexpr int MAX_QUEUE_SIZE = 5;   // 编码队列
     static constexpr int JPEG_QUALITY = 85;
+};
+
+/**
+ * NALU 磁盘写入线程
+ *
+ * 把 .nalu 文件落盘从主线程（同时是渲染线程）移到后台，
+ * 避免抓拍时同步磁盘 I/O 阻塞 onRenderTick 导致直播画面卡顿。
+ */
+class NaluDiskWriter : public QThread
+{
+    Q_OBJECT
+public:
+    explicit NaluDiskWriter(QObject *parent = nullptr);
+    ~NaluDiskWriter();
+
+    // 单帧写入
+    void submit(const QString &path, const QByteArray &data);
+    // 批量写入，整批写完后发出 batchWritten(tag)（tag 用 CaptureItem.id）
+    void submitBatch(const QVector<QPair<QString, QByteArray>> &tasks, int tag);
+    void stop();
+
+signals:
+    void batchWritten(int tag);
+
+protected:
+    void run() override;
+
+private:
+    struct WriteTask {
+        QString path;
+        QByteArray data;
+        int batchTag = -1;   // >=0 表示该任务是某批次的最后一个，写完后发信号
+    };
+    QQueue<WriteTask> m_queue;
+    QMutex m_mutex;
+    QWaitCondition m_condition;
+    std::atomic<bool> m_running{true};
 };
 
 /**
@@ -330,6 +368,7 @@ signals:
 
 private slots:
     void onFrameEncoded(qint64 index);
+    void onBatchWritten(int tag);  // 后台落盘完成后触发可见帧解码
 
 private:
     void removeOldest();
@@ -352,6 +391,7 @@ private:
     QHash<int, ItemDecodeState> m_itemDecoders;
     GpuPipeline *m_gpuPipeline = nullptr;  // GPU 管道（颜色调整）
     GstPlayer *m_gstPlayer = nullptr;      // GStreamer 播放器（NALU 帧存储）
+    NaluDiskWriter *m_diskWriter = nullptr; // NALU 后台落盘线程
     QVector<CaptureItem> m_items;
     QList<PendingCapture> m_pendingCaptures;
     QSettings *m_settings;
