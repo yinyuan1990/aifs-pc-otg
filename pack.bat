@@ -198,6 +198,21 @@ echo    文件复制完成！
 echo ========================================
 echo.
 
+:: ⭐ 生成自动更新用的 release.zip（文件在zip根目录，无子文件夹）
+echo [自动更新] 生成 release.zip ...
+set RELEASE_ZIP=D:\javafx\Acard\aic\Aifs\release.zip
+if exist "%RELEASE_ZIP%" del "%RELEASE_ZIP%"
+pushd "%RELEASE_DIR%"
+tar -a -c -f "%RELEASE_ZIP%" *
+popd
+if exist "%RELEASE_ZIP%" (
+    echo     release.zip 已生成: %RELEASE_ZIP%
+    echo     ⚠ 上传到服务器: http://dl.147258yql.cn/updatesoft/release.zip
+) else (
+    echo     [警告] release.zip 生成失败！
+)
+echo.
+
 :: 检查是否安装了 Inno Setup
 if exist %INNO_SETUP% (
     echo [9/9] 生成安装程序...
