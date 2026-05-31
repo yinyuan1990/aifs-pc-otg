@@ -7944,11 +7944,9 @@ Rectangle {
                     ifFilterWhiteBalanceSlider.value = config.value
             }
             if (ptype === "lutName" || (shouldUpdateAll && config.lutName !== undefined)) {
-                if (config.lutName !== undefined && config.lutName !== "") {
-                    iosFilterPopup.selectedLutName = config.lutName
-                    iosFilterPopup.lutEnabled = true
-                    iosCameraSettingsPopup.lutModeEnabled = true
-                }
+                iosFilterPopup.selectedLutName = "lookup"
+                iosFilterPopup.lutEnabled = true
+                iosCameraSettingsPopup.lutModeEnabled = true
             }
             // ⭐ iOS 滤镜弹框 — 其他 PC 同步滑块值
             if (ptype === "brightness" && config.brightness !== undefined) {
@@ -11347,7 +11345,7 @@ Rectangle {
                 }
                 if (c.switches.hardware !== undefined) hardwareEnabled = !!c.switches.hardware
             }
-            if (c.lut && c.lut.lutName) selectedLutName = c.lut.lutName
+            selectedLutName = "lookup"
             if (c.hardware && c.hardware.gain && c.hardware.gain.default !== undefined)
                 iosCameraSettingsPopup.hardwareBrightness = c.hardware.gain.default
             console.log("✅ [iOS-Pipeline] 开关 filter=" + fEnabled + " lut=" + lutEnabled + " hardware=" + hardwareEnabled)
