@@ -38,6 +38,7 @@ protected:
 private:
     NaluFrameStore *m_store;
     GstCaptureDecoder *m_decoder = nullptr;
+    qint64 m_lastDecodedGlobal = -1;  // 上次成功解码的全局帧号（顺序快路径用）
     std::atomic<bool> m_running{true};
     QMutex m_queueMutex;
     QWaitCondition m_queueCondition;

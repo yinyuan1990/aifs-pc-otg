@@ -742,6 +742,10 @@ void CaptureManager::checkPendingCaptures(qint64 frameIndex)
                 if (!data.isEmpty() && m_diskWriter) {
                     QString path = item.naluDir + QString("/%1.nalu").arg(offset, 6, 10, QChar('0'));
                     m_diskWriter->submit(path, data);
+                    if (store->isKeyFrame(frameIndex)
+                        && (item.keyFrameOffsets.isEmpty() || item.keyFrameOffsets.last() < offset)) {
+                        item.keyFrameOffsets.append(offset);
+                    }
                     item.savedFrameCount++;
                 }
             }
@@ -900,6 +904,7 @@ void CaptureManager::capture()
                 if (!data.isEmpty()) {
                     QString path = item.naluDir + QString("/%1.nalu").arg(offset, 6, 10, QChar('0'));
                     writeTasks.append({path, data});
+                    if (store->isKeyFrame(idx)) item.keyFrameOffsets.append(offset);
                     item.savedFrameCount++;
                 }
             }
@@ -982,19 +987,14 @@ QImage CaptureManager::decodeFromDisk(int itemIndex, int frameOffset)
     const int gen = m_clearGeneration.load(std::memory_order_acquire);
 
     QString naluDir;
+    QVector<int> keyOffsets;
     {
         QMutexLocker lock(&m_mutex);
         if (itemIndex < 0 || itemIndex >= m_items.size()) return QImage();
         const CaptureItem &item = m_items[itemIndex];
         if (frameOffset < 0 || frameOffset >= item.totalFrames()) return QImage();
         naluDir = item.naluDir;
-    }
-
-    QByteArray data = readNaluFile(naluDir, frameOffset);
-    if (data.isEmpty()) {
-        captureDebugLog("CAP", QString("decodeFromDisk file MISSING item=%1 frame=%2")
-            .arg(itemIndex).arg(frameOffset));
-        return QImage();
+        keyOffsets = item.keyFrameOffsets;
     }
 
     if (m_clearGeneration.load(std::memory_order_acquire) != gen) return QImage();
@@ -1009,12 +1009,38 @@ QImage CaptureManager::decodeFromDisk(int itemIndex, int frameOffset)
         captureDebugLog("CAP", QString("decodeFromDisk create decoder item=%1").arg(itemIndex));
     }
 
-    QImage result = state.decoder->decodeNalu(data);
+    // 决定喂入起点：
+    //  - 顺序前进(目标 == 上次+1)：解码器已就位，直接喂这一帧（快路径）
+    //  - 否则：从 <= 目标 的最近关键帧开始重放整条链，保证 P 帧有正确参考，
+    //    避免“单帧/乱序解码 → 解不出 → 退回上一张”造成的重复帧/丢帧
+    int startOffset;
+    if (state.lastOffset >= 0 && frameOffset == state.lastOffset + 1) {
+        startOffset = frameOffset;
+    } else {
+        startOffset = 0;
+        for (int i = keyOffsets.size() - 1; i >= 0; --i) {
+            if (keyOffsets[i] <= frameOffset) { startOffset = keyOffsets[i]; break; }
+        }
+        state.decoder->flush();
+    }
 
-    if (result.isNull()) {
-        captureDebugLog("CAP", QString("decodeFromDisk FAIL item=%1 frame=%2 %3")
-            .arg(itemIndex).arg(frameOffset).arg(captureDebugNaluPreview(data)));
-        return QImage();
+    QImage result;
+    for (int off = startOffset; off <= frameOffset; ++off) {
+        if (m_clearGeneration.load(std::memory_order_acquire) != gen) return QImage();
+        QByteArray data = readNaluFile(naluDir, off);
+        if (data.isEmpty()) {
+            captureDebugLog("CAP", QString("decodeFromDisk file MISSING item=%1 frame=%2")
+                .arg(itemIndex).arg(off));
+            state.lastOffset = -1;  // 链断，下次从关键帧重放
+            return QImage();
+        }
+        result = state.decoder->decodeNalu(data);
+        if (result.isNull()) {
+            captureDebugLog("CAP", QString("decodeFromDisk FAIL item=%1 frame=%2 %3")
+                .arg(itemIndex).arg(off).arg(captureDebugNaluPreview(data)));
+            state.lastOffset = -1;
+            return QImage();
+        }
     }
 
     state.lastOffset = frameOffset;

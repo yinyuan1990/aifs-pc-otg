@@ -668,12 +668,22 @@ void SlowMotionDecodeThread::run()
 
             QImage img;
             if (m_store->hasFrame(request.globalIndex)) {
-                QByteArray data = m_store->getFrame(request.globalIndex);
-                captureDebugLog("SLW", QString("decodeThread %1 key=%2")
-                    .arg(captureDebugNaluPreview(data))
-                    .arg(m_store->isKeyFrame(request.globalIndex) ? "Y" : "N"));
-                img = m_decoder->decodeNalu(data);
+                if (m_lastDecodedGlobal >= 0 && request.globalIndex == m_lastDecodedGlobal + 1) {
+                    // 顺序前进：解码器已就位，直接喂这一帧（快路径）
+                    img = m_decoder->decodeNalu(m_store->getFrame(request.globalIndex));
+                } else {
+                    // 跳帧/乱序：从最近关键帧重放整条链，保证 P 帧有正确参考，
+                    // 避免单帧解码因缺参考而失败/花屏（这会让慢放看着像“没动/倍数无效”）
+                    m_decoder->flush();
+                    const QVector<QPair<QByteArray, qint64>> seq =
+                        m_store->getDecodeSequence(request.globalIndex);
+                    for (const auto &pair : seq) {
+                        img = m_decoder->decodeNalu(pair.first);
+                    }
+                }
+                m_lastDecodedGlobal = img.isNull() ? -1 : request.globalIndex;
             } else {
+                m_lastDecodedGlobal = -1;
                 captureDebugLog("SLW", QString("decodeThread missing global=%1").arg(request.globalIndex));
             }
 
