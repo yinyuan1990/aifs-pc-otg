@@ -11216,14 +11216,14 @@ Rectangle {
         //   pcFreeConfig: 后台开关, 打开后 PC 端显示方向配置
         property bool pcFreeConfig: false
         property var linkageConfig: ({
-            brightness:    { groupId: 1, groupDirection: -1, brightSwitch: false, brightDirection: 1 },
-            gamma:         { groupId: 1, groupDirection: 1,  brightSwitch: false, brightDirection: 1 },
-            contrast:      { groupId: 0, groupDirection: 1,  brightSwitch: false, brightDirection: 1 },
-            saturation:    { groupId: 0, groupDirection: 1,  brightSwitch: false, brightDirection: 1 },
-            exposure:      { groupId: 0, groupDirection: 1,  brightSwitch: false, brightDirection: 1 },
-            sharpness:     { groupId: 0, groupDirection: 1,  brightSwitch: false, brightDirection: 1 },
-            highlightLift: { groupId: 0, groupDirection: 1,  brightSwitch: false, brightDirection: 1 },
-            gain:          { groupId: 0, groupDirection: 1,  brightSwitch: false, brightDirection: 1 }
+            brightness:    { groupEnabled: true, groupId: 1, groupDirection: -1, brightSwitch: false, brightDirection: 1 },
+            gamma:         { groupEnabled: true, groupId: 1, groupDirection: 1,  brightSwitch: false, brightDirection: 1 },
+            contrast:      { groupEnabled: true, groupId: 0, groupDirection: 1,  brightSwitch: false, brightDirection: 1 },
+            saturation:    { groupEnabled: true, groupId: 0, groupDirection: 1,  brightSwitch: false, brightDirection: 1 },
+            exposure:      { groupEnabled: true, groupId: 0, groupDirection: 1,  brightSwitch: false, brightDirection: 1 },
+            sharpness:     { groupEnabled: true, groupId: 0, groupDirection: 1,  brightSwitch: false, brightDirection: 1 },
+            highlightLift: { groupEnabled: true, groupId: 0, groupDirection: 1,  brightSwitch: false, brightDirection: 1 },
+            gain:          { groupEnabled: true, groupId: 0, groupDirection: 1,  brightSwitch: false, brightDirection: 1 }
         })
         property var linkageConfigDefault: null
         property string editingGroupParam: ""
@@ -11268,6 +11268,7 @@ Rectangle {
             for (var i = 0; i < params.length; i++) {
                 var key = params[i]
                 if (c[key]) {
+                    if (c[key].groupEnabled !== undefined) lc[key].groupEnabled = c[key].groupEnabled
                     if (c[key].groupId !== undefined) lc[key].groupId = c[key].groupId
                     if (c[key].groupDirection !== undefined) lc[key].groupDirection = c[key].groupDirection
                     if (c[key].brightSwitch !== undefined) lc[key].brightSwitch = c[key].brightSwitch
@@ -11449,7 +11450,7 @@ Rectangle {
         function applyLinkedDelta(sourceId, rawDelta) {
             var lc = linkageConfig
             var sc = lc[sourceId]
-            if (!sc || sc.groupId === 0) return
+            if (!sc || sc.groupId === 0 || !sc.groupEnabled) return
             var sourceRange = getParamRange(sourceId)
             if (sourceRange === 0) return
             var deltaPercent = rawDelta / sourceRange
@@ -11459,7 +11460,7 @@ Rectangle {
                 var tid = params[i]
                 if (tid === sourceId) continue
                 var tc = lc[tid]
-                if (!tc || tc.groupId !== sc.groupId) continue
+                if (!tc || tc.groupId !== sc.groupId || !tc.groupEnabled) continue
                 var dirMul = tc.groupDirection / sc.groupDirection
                 var targetRange = getParamRange(tid)
                 var targetDelta = deltaPercent * targetRange * dirMul
@@ -11784,6 +11785,7 @@ Rectangle {
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: 8
+                    Text { Layout.preferredWidth: 20; text: iosFilterPopup.linkageConfig.brightness.groupEnabled ? "●" : "○"; font.pixelSize: 16; color: iosFilterPopup.linkageConfig.brightness.groupEnabled ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.brightness.groupEnabled = !lc.brightness.groupEnabled; iosFilterPopup.linkageConfig = lc } } }
                     Text { Layout.preferredWidth: 30; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.brightness.groupId > 0 ? "组" + iosFilterPopup.linkageConfig.brightness.groupId : "—"; font.family: "PingFang HK"; font.pixelSize: 11; color: iosFilterPopup.linkageConfig.brightness.groupId > 0 ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { iosFilterPopup.editingGroupParam = "brightness"; iosFilterPopup.groupIdInput = iosFilterPopup.linkageConfig.brightness.groupId; groupIdDialog.open() } } }
                     Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.brightness.groupDirection === -1 ? "←" : "→"; font.pixelSize: 16; font.bold: true; color: iosFilterPopup.linkageConfig.brightness.groupId > 0 ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; enabled: iosFilterPopup.linkageConfig.brightness.groupId > 0; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.brightness.groupDirection *= -1; iosFilterPopup.linkageConfig = lc } } }
                     Text { text: "亮度"; font.family: "PingFang HK"; font.pixelSize: 20; font.bold: true; color: "#E53935"; Layout.preferredWidth: 70 }
@@ -11841,6 +11843,7 @@ Rectangle {
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: 8
+                    Text { Layout.preferredWidth: 20; text: iosFilterPopup.linkageConfig.gamma.groupEnabled ? "●" : "○"; font.pixelSize: 16; color: iosFilterPopup.linkageConfig.gamma.groupEnabled ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.gamma.groupEnabled = !lc.gamma.groupEnabled; iosFilterPopup.linkageConfig = lc } } }
                     Text { Layout.preferredWidth: 30; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.gamma.groupId > 0 ? "组" + iosFilterPopup.linkageConfig.gamma.groupId : "—"; font.family: "PingFang HK"; font.pixelSize: 11; color: iosFilterPopup.linkageConfig.gamma.groupId > 0 ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { iosFilterPopup.editingGroupParam = "gamma"; iosFilterPopup.groupIdInput = iosFilterPopup.linkageConfig.gamma.groupId; groupIdDialog.open() } } }
                     Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.gamma.groupDirection === -1 ? "←" : "→"; font.pixelSize: 16; font.bold: true; color: iosFilterPopup.linkageConfig.gamma.groupId > 0 ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; enabled: iosFilterPopup.linkageConfig.gamma.groupId > 0; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.gamma.groupDirection *= -1; iosFilterPopup.linkageConfig = lc } } }
                     Text { text: "伽马"; font.family: "PingFang HK"; font.pixelSize: 20; font.bold: true; color: "#E53935"; Layout.preferredWidth: 70 }
@@ -11897,6 +11900,7 @@ Rectangle {
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: 8
+                    Text { Layout.preferredWidth: 20; text: iosFilterPopup.linkageConfig.contrast.groupEnabled ? "●" : "○"; font.pixelSize: 16; color: iosFilterPopup.linkageConfig.contrast.groupEnabled ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.contrast.groupEnabled = !lc.contrast.groupEnabled; iosFilterPopup.linkageConfig = lc } } }
                     Text { Layout.preferredWidth: 30; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.contrast.groupId > 0 ? "组" + iosFilterPopup.linkageConfig.contrast.groupId : "—"; font.family: "PingFang HK"; font.pixelSize: 11; color: iosFilterPopup.linkageConfig.contrast.groupId > 0 ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { iosFilterPopup.editingGroupParam = "contrast"; iosFilterPopup.groupIdInput = iosFilterPopup.linkageConfig.contrast.groupId; groupIdDialog.open() } } }
                     Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.contrast.groupDirection === -1 ? "←" : "→"; font.pixelSize: 16; font.bold: true; color: iosFilterPopup.linkageConfig.contrast.groupId > 0 ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; enabled: iosFilterPopup.linkageConfig.contrast.groupId > 0; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.contrast.groupDirection *= -1; iosFilterPopup.linkageConfig = lc } } }
                     Text { text: "对比度"; font.family: "PingFang HK"; font.pixelSize: 20; font.bold: true; color: "#E53935"; Layout.preferredWidth: 70 }
@@ -11953,6 +11957,7 @@ Rectangle {
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: 8
+                    Text { Layout.preferredWidth: 20; text: iosFilterPopup.linkageConfig.saturation.groupEnabled ? "●" : "○"; font.pixelSize: 16; color: iosFilterPopup.linkageConfig.saturation.groupEnabled ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.saturation.groupEnabled = !lc.saturation.groupEnabled; iosFilterPopup.linkageConfig = lc } } }
                     Text { Layout.preferredWidth: 30; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.saturation.groupId > 0 ? "组" + iosFilterPopup.linkageConfig.saturation.groupId : "—"; font.family: "PingFang HK"; font.pixelSize: 11; color: iosFilterPopup.linkageConfig.saturation.groupId > 0 ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { iosFilterPopup.editingGroupParam = "saturation"; iosFilterPopup.groupIdInput = iosFilterPopup.linkageConfig.saturation.groupId; groupIdDialog.open() } } }
                     Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.saturation.groupDirection === -1 ? "←" : "→"; font.pixelSize: 16; font.bold: true; color: iosFilterPopup.linkageConfig.saturation.groupId > 0 ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; enabled: iosFilterPopup.linkageConfig.saturation.groupId > 0; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.saturation.groupDirection *= -1; iosFilterPopup.linkageConfig = lc } } }
                     Text { text: "红外模式"; font.family: "PingFang HK"; font.pixelSize: 20; font.bold: true; color: "#E53935"; Layout.preferredWidth: 90 }
@@ -12009,6 +12014,7 @@ Rectangle {
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: 8
+                    Text { Layout.preferredWidth: 20; text: iosFilterPopup.linkageConfig.exposure.groupEnabled ? "●" : "○"; font.pixelSize: 16; color: iosFilterPopup.linkageConfig.exposure.groupEnabled ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.exposure.groupEnabled = !lc.exposure.groupEnabled; iosFilterPopup.linkageConfig = lc } } }
                     Text { Layout.preferredWidth: 30; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.exposure.groupId > 0 ? "组" + iosFilterPopup.linkageConfig.exposure.groupId : "—"; font.family: "PingFang HK"; font.pixelSize: 11; color: iosFilterPopup.linkageConfig.exposure.groupId > 0 ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { iosFilterPopup.editingGroupParam = "exposure"; iosFilterPopup.groupIdInput = iosFilterPopup.linkageConfig.exposure.groupId; groupIdDialog.open() } } }
                     Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.exposure.groupDirection === -1 ? "←" : "→"; font.pixelSize: 16; font.bold: true; color: iosFilterPopup.linkageConfig.exposure.groupId > 0 ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; enabled: iosFilterPopup.linkageConfig.exposure.groupId > 0; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.exposure.groupDirection *= -1; iosFilterPopup.linkageConfig = lc } } }
                     Text { text: "曝光度"; font.family: "PingFang HK"; font.pixelSize: 20; font.bold: true; color: "#E53935"; Layout.preferredWidth: 70 }
@@ -12090,6 +12096,7 @@ Rectangle {
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: 8
+                    Text { Layout.preferredWidth: 20; text: iosFilterPopup.linkageConfig.sharpness.groupEnabled ? "●" : "○"; font.pixelSize: 16; color: iosFilterPopup.linkageConfig.sharpness.groupEnabled ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.sharpness.groupEnabled = !lc.sharpness.groupEnabled; iosFilterPopup.linkageConfig = lc } } }
                     Text { Layout.preferredWidth: 30; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.sharpness.groupId > 0 ? "组" + iosFilterPopup.linkageConfig.sharpness.groupId : "—"; font.family: "PingFang HK"; font.pixelSize: 11; color: iosFilterPopup.linkageConfig.sharpness.groupId > 0 ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { iosFilterPopup.editingGroupParam = "sharpness"; iosFilterPopup.groupIdInput = iosFilterPopup.linkageConfig.sharpness.groupId; groupIdDialog.open() } } }
                     Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.sharpness.groupDirection === -1 ? "←" : "→"; font.pixelSize: 16; font.bold: true; color: iosFilterPopup.linkageConfig.sharpness.groupId > 0 ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; enabled: iosFilterPopup.linkageConfig.sharpness.groupId > 0; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.sharpness.groupDirection *= -1; iosFilterPopup.linkageConfig = lc } } }
                     Text { text: "清晰度(P)"; font.family: "PingFang HK"; font.pixelSize: 16; font.bold: true; color: "#E53935"; Layout.preferredWidth: 130 }
@@ -12156,6 +12163,7 @@ Rectangle {
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: 8
+                    Text { Layout.preferredWidth: 20; text: iosFilterPopup.linkageConfig.highlightLift.groupEnabled ? "●" : "○"; font.pixelSize: 16; color: iosFilterPopup.linkageConfig.highlightLift.groupEnabled ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.highlightLift.groupEnabled = !lc.highlightLift.groupEnabled; iosFilterPopup.linkageConfig = lc } } }
                     Text { Layout.preferredWidth: 30; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.highlightLift.groupId > 0 ? "组" + iosFilterPopup.linkageConfig.highlightLift.groupId : "—"; font.family: "PingFang HK"; font.pixelSize: 11; color: iosFilterPopup.linkageConfig.highlightLift.groupId > 0 ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { iosFilterPopup.editingGroupParam = "highlightLift"; iosFilterPopup.groupIdInput = iosFilterPopup.linkageConfig.highlightLift.groupId; groupIdDialog.open() } } }
                     Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.highlightLift.groupDirection === -1 ? "←" : "→"; font.pixelSize: 16; font.bold: true; color: iosFilterPopup.linkageConfig.highlightLift.groupId > 0 ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; enabled: iosFilterPopup.linkageConfig.highlightLift.groupId > 0; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.highlightLift.groupDirection *= -1; iosFilterPopup.linkageConfig = lc } } }
                     Text { text: "逆光对比(B)"; font.family: "PingFang HK"; font.pixelSize: 16; font.bold: true; color: "#E53935"; Layout.preferredWidth: 130 }
@@ -12212,6 +12220,7 @@ Rectangle {
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: 8
+                    Text { Layout.preferredWidth: 20; text: iosFilterPopup.linkageConfig.gain.groupEnabled ? "●" : "○"; font.pixelSize: 16; color: iosFilterPopup.linkageConfig.gain.groupEnabled ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.gain.groupEnabled = !lc.gain.groupEnabled; iosFilterPopup.linkageConfig = lc } } }
                     Text { Layout.preferredWidth: 30; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.gain.groupId > 0 ? "组" + iosFilterPopup.linkageConfig.gain.groupId : "—"; font.family: "PingFang HK"; font.pixelSize: 11; color: iosFilterPopup.linkageConfig.gain.groupId > 0 ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { iosFilterPopup.editingGroupParam = "gain"; iosFilterPopup.groupIdInput = iosFilterPopup.linkageConfig.gain.groupId; groupIdDialog.open() } } }
                     Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.gain.groupDirection === -1 ? "←" : "→"; font.pixelSize: 16; font.bold: true; color: iosFilterPopup.linkageConfig.gain.groupId > 0 ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; enabled: iosFilterPopup.linkageConfig.gain.groupId > 0; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.gain.groupDirection *= -1; iosFilterPopup.linkageConfig = lc } } }
                     Text { text: "增益(G)"; font.family: "PingFang HK"; font.pixelSize: 16; font.bold: true; color: "#E53935"; Layout.preferredWidth: 130 }
