@@ -138,7 +138,11 @@ public:
     // ⭐ 拉取 iOS 滤镜默认值 (后台动态配置, 用于 PC iosFilterPopup 滑块的 from/to/默认值/步进/联动)
     //   成功时发 iosFilterDefaultsReceived(configJson) 信号, 失败发 iosFilterDefaultsFailed.
     Q_INVOKABLE void getIosFilterDefaults();
-    
+
+    // ⭐ 拉取 iOS 三链路开关/硬件默认值/LUT (GET /api/config/ios-pipeline)
+    //   成功时发 iosPipelineReceived(configJson) 信号, 失败发 iosPipelineFailed.
+    Q_INVOKABLE void getIosPipeline();
+
     // 更新对焦距离
     Q_INVOKABLE void updateFocusDistance(double value);
     
@@ -261,7 +265,11 @@ signals:
     //   configJson 是后端 SystemConfig 表中存的整段 JSON 字符串, QML 端解析后应用到滑块属性
     void iosFilterDefaultsReceived(const QString &configJson);
     void iosFilterDefaultsFailed(int code, const QString &message);
-    
+
+    // ⭐ iOS 三链路开关/硬件/LUT 配置 ({switches, hardware, lut} 的 JSON 字符串)
+    void iosPipelineReceived(const QString &configJson);
+    void iosPipelineFailed(int code, const QString &message);
+
 private:
     explicit HttpClient(QObject *parent = nullptr);
     ~HttpClient();

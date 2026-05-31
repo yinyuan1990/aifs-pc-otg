@@ -7379,10 +7379,12 @@ Rectangle {
             //    那次 push 因 STOMP 未连而失败, 此处 onStompConnected 兜底再发一次.
             //    多发无副作用 (iOS 收到相同值不会有视觉抖动).
             if (deviceId && deviceId !== "") {
-                iosFilterPopup.pushAllStomp()
+                // ⭐ 连上后走账号级「第一次下发」(若 HTTP 比 WS 快、已在 applyServerDefaults 推过，这里 no-op)
+                iosFilterPopup.tryAutoPush()
                 sendFilterModeConfig()
                 sendLutModeConfig()
-                sendTestBrightnessConfig(iosCameraSettingsPopup.hardwareBrightness)
+                // 增益只在硬件链路开关打开时下发；白平衡始终自动不下发
+                if (iosFilterPopup.hardwareEnabled) sendTestBrightnessConfig(iosCameraSettingsPopup.hardwareBrightness)
                 sendBitrateConfig()
             }
         }
@@ -7521,7 +7523,12 @@ Rectangle {
             //    captureManager.exposure 也同步重置 — 因为 iosCameraSettingsPopup.open() 会从这里读初值,
             //    不写它的话, 下次打开相机设定时仍会显示账号切换前的旧值.
             //    注意: 启动时 iosFilterPopup.Component.onCompleted 已经拉过一次, 此处覆盖账号切换场景.
+            // ⭐ 账号切换/登录 → 重置「第一次下发」状态，重新拉取滤镜默认值 + 三链路开关，对新账号重新首推一次
+            iosFilterPopup.filterLoaded = false
+            iosFilterPopup.pipelineLoaded = false
+            iosFilterPopup.lastAutoPushAccount = ""
             HttpClient.getIosFilterDefaults()
+            HttpClient.getIosPipeline()
             captureManager.exposure = 50
             iosCameraSettingsPopup.exposureValue = 50
 
@@ -11109,7 +11116,8 @@ Rectangle {
                 ifFilterHardwareBrightnessSlider.value = iosCameraSettingsPopup.hardwareBrightness
             if (typeof ifFilterWhiteBalanceSlider !== 'undefined')
                 ifFilterWhiteBalanceSlider.value = iosCameraSettingsPopup.hardwareWhiteBalance
-            pushAllStomp()
+            // ⭐ 打开弹框只在「该账号第一次」自动下发；之后重开不再覆盖设备当前状态
+            tryAutoPush()
         }
         function close() { visible = false }
 
@@ -11135,6 +11143,13 @@ Rectangle {
         property string selectedLutName: "lookup"
         property bool   videoHDREnabled: false
         property bool   autoHDREnabled: false
+        // ⭐ 硬件链路开关（增益 + 白平衡；白平衡始终自动，只手动纠正才下发）
+        property bool   hardwareEnabled: true
+        // ⭐ 三链路开关由后端 GET /api/config/ios-pipeline 的 switches 初始化（两者都要：后端初始化 + 操作员可改，下发以弹框开关为准）
+        // ⭐ 账号级「第一次下发」：滤镜默认值 + 三链路开关都加载完、且该账号尚未推过时，才自动推一次
+        property string lastAutoPushAccount: ""
+        property bool   filterLoaded: false
+        property bool   pipelineLoaded: false
         // autoWhiteBalanceEnabled 已移除 — 改为"运用白平衡"单次触发
         readonly property var lutOptions: [
             { name: "lookup",                 label: "标准" },
@@ -11231,13 +11246,10 @@ Rectangle {
             iosCameraSettingsPopup.exposureValue = 50
             captureManager.exposure = 50
 
-            // ⭐ 自动推送给 iOS — 不再依赖用户按 P 打开滤镜弹框才生效
-            //   场景:
-            //     • 启动时 Component.onCompleted 拉默认值 → 此时未登录, sendConfigUpdate 因无 deviceId 静默 noop, 无副作用
-            //     • 登录/切换账号时 onLoginSuccess 重新拉 → 此时 deviceId 已设, STOMP 已连, iOS 收到全量参数, 滤镜立即生效
-            //   ⚠️ 别移到 onLoginSuccess 直接调 — 那里 getIosFilterDefaults 是异步, 还没到 applyServerDefaults
-            //   就 push 会推到旧值/默认值, 拿不到后端最新.
-            iosFilterPopup.pushAllStomp()
+            // ⭐ 滤镜默认值已就绪 → 走账号级「第一次下发」(需三链路开关也已加载)
+            //   不再每次拉到就全量推；改由 tryAutoPush 控制「每账号只首推一次」
+            iosFilterPopup.filterLoaded = true
+            iosFilterPopup.tryAutoPush()
         }
 
         Component.onCompleted: {
@@ -11245,8 +11257,57 @@ Rectangle {
             HttpClient.iosFilterDefaultsReceived.connect(applyServerDefaults)
             HttpClient.iosFilterDefaultsFailed.connect(function(code, msg) {
                 console.warn("🎨 [iOS-Filter] 拉默认值失败 (用前端 fallback): code=" + code + ", msg=" + msg)
+                iosFilterPopup.filterLoaded = true   // 失败也标记加载完, 用前端 fallback 值
+                iosFilterPopup.tryAutoPush()
+            })
+            // ⭐ 三链路开关/硬件/LUT 配置
+            HttpClient.iosPipelineReceived.connect(applyServerPipeline)
+            HttpClient.iosPipelineFailed.connect(function(code, msg) {
+                console.warn("🔀 [iOS-Pipeline] 拉配置失败 (用前端 fallback): code=" + code + ", msg=" + msg)
+                iosFilterPopup.pipelineLoaded = true
+                iosFilterPopup.tryAutoPush()
             })
             HttpClient.getIosFilterDefaults()
+            HttpClient.getIosPipeline()
+        }
+
+        // ⭐ 应用后端三链路配置 (switches / hardware / lut) — 初始化弹框开关与硬件默认值
+        function applyServerPipeline(configJson) {
+            var c
+            try { c = JSON.parse(configJson) }
+            catch (e) {
+                console.warn("🔀 [iOS-Pipeline] JSON 解析失败:", e)
+                pipelineLoaded = true; tryAutoPush(); return
+            }
+            if (c.switches) {
+                if (c.switches.filter !== undefined) {
+                    fEnabled = !!c.switches.filter
+                    iosCameraSettingsPopup.filterModeEnabled = fEnabled
+                }
+                if (c.switches.lut !== undefined) {
+                    lutEnabled = !!c.switches.lut
+                    iosCameraSettingsPopup.lutModeEnabled = lutEnabled
+                }
+                if (c.switches.hardware !== undefined) hardwareEnabled = !!c.switches.hardware
+            }
+            if (c.lut && c.lut.lutName) selectedLutName = c.lut.lutName
+            if (c.hardware && c.hardware.gain && c.hardware.gain.default !== undefined)
+                iosCameraSettingsPopup.hardwareBrightness = c.hardware.gain.default
+            console.log("✅ [iOS-Pipeline] 开关 filter=" + fEnabled + " lut=" + lutEnabled + " hardware=" + hardwareEnabled)
+            pipelineLoaded = true
+            tryAutoPush()
+        }
+
+        // ⭐ 账号级「第一次自动下发」：滤镜默认值 + 三链路开关都加载完、且该账号尚未推过时，推一次全量
+        //   账号切换会在 onLoginSuccess 重置 lastAutoPushAccount/filterLoaded/pipelineLoaded，从而对新账号重新首推
+        function tryAutoPush() {
+            var acct = HttpClient.loggedInUsername() || ""
+            if (acct === "") return                          // 未登录不推
+            if (!filterLoaded || !pipelineLoaded) return     // 两份配置都到齐才推
+            if (acct === lastAutoPushAccount) return          // 该账号已首推过, 不重复
+            lastAutoPushAccount = acct
+            console.log("⬆️ [iOS-Filter] 账号[" + acct + "] 首次自动下发")
+            pushAllStomp()
         }
 
         // 内部 prev 值 — 用于计算每次 onMoved 的 delta (slider 的 value 已经是新值)
@@ -11308,24 +11369,33 @@ Rectangle {
             sendConfigUpdate(ptype, c)
         }
 
-        // ⭐ STOMP 全量推送 — 还原时用一次发齐
+        // ⭐ STOMP 全量推送 — 只下发「开关打开」的链路；白平衡任何时候都不在这里推（只手动纠正）
         function pushAllStomp() {
+            // 滤镜链路：始终告知 iOS 开关状态；仅在打开时下发各滤镜值
             pushParam("filterEnabled", iosFilterPopup.fEnabled)
-            pushParam("brightness",    iosFilterPopup.fBrightness)
-            pushParam("contrast",      iosFilterPopup.fContrast)
-            pushParam("saturation",    iosFilterPopup.fSaturation)
-            pushParam("redBoost",      iosFilterPopup.fRedBoost)
-            pushParam("gamma",         iosFilterPopup.fGamma)
-            pushParam("exposure",      Math.log2(iosFilterPopup.fExposure))
-            pushParam("blackPoint",    iosFilterPopup.fBlackPoint)
-            pushParam("sharpness",     iosFilterPopup.fSharpness)
-            pushParam("highlightLift", iosFilterPopup.fHighlightLift)
+            if (iosFilterPopup.fEnabled) {
+                pushParam("brightness",    iosFilterPopup.fBrightness)
+                pushParam("contrast",      iosFilterPopup.fContrast)
+                pushParam("saturation",    iosFilterPopup.fSaturation)
+                pushParam("redBoost",      iosFilterPopup.fRedBoost)
+                pushParam("gamma",         iosFilterPopup.fGamma)
+                pushParam("exposure",      Math.log2(iosFilterPopup.fExposure))
+                pushParam("blackPoint",    iosFilterPopup.fBlackPoint)
+                pushParam("sharpness",     iosFilterPopup.fSharpness)
+                pushParam("highlightLift", iosFilterPopup.fHighlightLift)
+            }
             sendConfigUpdate("videoHDR", { "videoHDR": iosFilterPopup.videoHDREnabled })
             sendConfigUpdate("autoHDR", { "autoHDR": iosFilterPopup.autoHDREnabled })
-            // 运用白平衡是单次触发，不在 pushAll 里推
+            // 硬件链路：仅在打开时下发增益(0-100→iOS 映射到 ISO)；白平衡始终自动，不在此下发
+            if (iosFilterPopup.hardwareEnabled) {
+                sendTestBrightnessConfig(iosCameraSettingsPopup.hardwareBrightness)
+            }
+            // LUT 链路：开=启用并下发 LUT 名；关=明确关闭
             if (iosFilterPopup.lutEnabled) {
                 sendConfigUpdate("test_mode", { "cmd": "test_mode", "enabled": true })
                 pushParam("lutName", iosFilterPopup.selectedLutName)
+            } else {
+                sendConfigUpdate("test_mode", { "cmd": "test_mode", "enabled": false })
             }
         }
 
@@ -11355,6 +11425,13 @@ Rectangle {
             fEnabled = enabled
             iosCameraSettingsPopup.filterModeEnabled = enabled
             pushParam("filterEnabled", enabled)
+        }
+
+        // ⭐ 硬件链路开关（增益）。开=下发当前增益默认值；白平衡始终自动，不在此下发
+        function pushHardwareEnabled(enabled) {
+            hardwareEnabled = enabled
+            if (enabled) sendTestBrightnessConfig(iosCameraSettingsPopup.hardwareBrightness)
+            console.log("🎛️ 硬件链路:", enabled ? "开启" : "关闭")
         }
 
         // ⭐ 切换 LUT 图
@@ -12198,6 +12275,7 @@ Rectangle {
                         model: [
                             { label: "滤镜模式", checked: iosFilterPopup.fEnabled, action: "filter" },
                             { label: "LUT模式", checked: iosFilterPopup.lutEnabled, action: "lut" },
+                            { label: "硬件", checked: iosFilterPopup.hardwareEnabled, action: "hardware" },
                             { label: "Video HDR", checked: iosFilterPopup.videoHDREnabled, action: "videoHDR" },
                             { label: "自动HDR", checked: iosFilterPopup.autoHDREnabled, action: "autoHDR" }
                         ]
@@ -12231,6 +12309,7 @@ Rectangle {
                                     onClicked: {
                                         if (modelData.action === "filter") iosFilterPopup.pushFilterEnabled(!iosFilterPopup.fEnabled)
                                         else if (modelData.action === "lut") iosFilterPopup.pushLutEnabled(!iosFilterPopup.lutEnabled)
+                                        else if (modelData.action === "hardware") iosFilterPopup.pushHardwareEnabled(!iosFilterPopup.hardwareEnabled)
                                         else if (modelData.action === "videoHDR") iosFilterPopup.pushVideoHDREnabled(!iosFilterPopup.videoHDREnabled)
                                         else if (modelData.action === "autoHDR") iosFilterPopup.pushAutoHDREnabled(!iosFilterPopup.autoHDREnabled)
                                         // applyWhiteBalance 已移到独立按钮

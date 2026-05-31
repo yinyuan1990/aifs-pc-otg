@@ -1315,6 +1315,40 @@ void HttpClient::getIosFilterDefaults()
     });
 }
 
+// ⭐ 拉取 iOS 三链路开关/硬件/LUT 配置 (后台动态配置)
+//   后端 GET /api/config/ios-pipeline 返回 { "config": "<JSON 字符串>" }，JSON = {switches, hardware, lut}
+//   成功发 iosPipelineReceived(configJson), QML 端解析后初始化弹框开关/硬件默认值/LUT 名
+void HttpClient::getIosPipeline()
+{
+    QString endpoint = "/api/config/ios-pipeline";
+    QNetworkReply *reply = get(endpoint);
+
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        reply->deleteLater();
+        int httpCode = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        QByteArray body = reply->readAll();
+
+        qDebug() << "[IosPipeline] Response <-" << httpCode << body.left(400);
+
+        if (reply->error() != QNetworkReply::NoError && httpCode != 200) {
+            emit iosPipelineFailed(httpCode, reply->errorString());
+            return;
+        }
+        QJsonParseError jerr;
+        QJsonDocument doc = QJsonDocument::fromJson(body, &jerr);
+        if (jerr.error != QJsonParseError::NoError || !doc.isObject()) {
+            emit iosPipelineFailed(-1, QString("响应非 JSON: %1").arg(jerr.errorString()));
+            return;
+        }
+        QString cfgStr = doc.object().value("config").toString();
+        if (cfgStr.isEmpty()) {
+            emit iosPipelineFailed(-1, "config 字段为空");
+            return;
+        }
+        emit iosPipelineReceived(cfgStr);
+    });
+}
+
 void HttpClient::sendCameraSettingUpdate(const QString &ptype, const QJsonObject &config)
 {
     if (m_currentDeviceId.isEmpty()) {
