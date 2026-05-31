@@ -11123,6 +11123,34 @@ Rectangle {
         }
         function close() { visible = false }
 
+        // ⭐ 联动编号输入弹框
+        Dialog {
+            id: groupIdDialog
+            title: "设置联动编号"
+            modal: true
+            anchors.centerIn: parent
+            width: 260; height: 160
+            standardButtons: Dialog.Ok | Dialog.Cancel
+            onAccepted: {
+                var v = parseInt(groupIdSpinBox.value)
+                if (isNaN(v) || v < 0) v = 0
+                if (v > 100) v = 100
+                var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig))
+                lc[iosFilterPopup.editingGroupParam].groupId = v
+                iosFilterPopup.linkageConfig = lc
+            }
+            Column {
+                anchors.fill: parent; spacing: 12
+                Text { text: "输入编号 0-100（0=不联动）"; font.family: "PingFang HK"; font.pixelSize: 14; color: "#546E7A" }
+                SpinBox {
+                    id: groupIdSpinBox
+                    from: 0; to: 100; value: iosFilterPopup.groupIdInput
+                    editable: true
+                    width: 200
+                }
+            }
+        }
+
         // 拖动状态
         property point dragStart: Qt.point(0, 0)
         property bool dragging: false
@@ -11200,6 +11228,8 @@ Rectangle {
             gain:          { groupId: 0, groupDirection: 1,  brightSwitch: false, brightDirection: 1 }
         })
         property var linkageConfigDefault: null
+        property string editingGroupParam: ""
+        property int groupIdInput: 0
 
         // ⭐ 应用从后台拉到的默认配置 JSON
         //   后端 GET /api/config/ios-filter-defaults 返回 { config: "<JSON>" }
@@ -11756,7 +11786,7 @@ Rectangle {
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: 8
-                    Text { Layout.preferredWidth: 30; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.brightness.groupId > 0 ? "组" + iosFilterPopup.linkageConfig.brightness.groupId : "—"; font.family: "PingFang HK"; font.pixelSize: 11; color: iosFilterPopup.linkageConfig.brightness.groupId > 0 ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; acceptedButtons: Qt.LeftButton | Qt.RightButton; onClicked: function(mouse) { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); if (mouse.button === Qt.RightButton) lc.brightness.groupId = Math.max(0, lc.brightness.groupId - 1); else lc.brightness.groupId = Math.min(100, lc.brightness.groupId + 1); iosFilterPopup.linkageConfig = lc } } }
+                    Text { Layout.preferredWidth: 30; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.brightness.groupId > 0 ? "组" + iosFilterPopup.linkageConfig.brightness.groupId : "—"; font.family: "PingFang HK"; font.pixelSize: 11; color: iosFilterPopup.linkageConfig.brightness.groupId > 0 ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { iosFilterPopup.editingGroupParam = "brightness"; iosFilterPopup.groupIdInput = iosFilterPopup.linkageConfig.brightness.groupId; groupIdDialog.open() } } }
                     Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.brightness.groupDirection === -1 ? "←" : "→"; font.pixelSize: 16; font.bold: true; color: iosFilterPopup.linkageConfig.brightness.groupId > 0 ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; enabled: iosFilterPopup.linkageConfig.brightness.groupId > 0; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.brightness.groupDirection *= -1; iosFilterPopup.linkageConfig = lc } } }
                     Text { text: "亮度"; font.family: "PingFang HK"; font.pixelSize: 20; font.bold: true; color: "#E53935"; Layout.preferredWidth: 70 }
                     Slider {
@@ -11813,7 +11843,7 @@ Rectangle {
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: 8
-                    Text { Layout.preferredWidth: 30; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.gamma.groupId > 0 ? "组" + iosFilterPopup.linkageConfig.gamma.groupId : "—"; font.family: "PingFang HK"; font.pixelSize: 11; color: iosFilterPopup.linkageConfig.gamma.groupId > 0 ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; acceptedButtons: Qt.LeftButton | Qt.RightButton; onClicked: function(mouse) { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); if (mouse.button === Qt.RightButton) lc.gamma.groupId = Math.max(0, lc.gamma.groupId - 1); else lc.gamma.groupId = Math.min(100, lc.gamma.groupId + 1); iosFilterPopup.linkageConfig = lc } } }
+                    Text { Layout.preferredWidth: 30; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.gamma.groupId > 0 ? "组" + iosFilterPopup.linkageConfig.gamma.groupId : "—"; font.family: "PingFang HK"; font.pixelSize: 11; color: iosFilterPopup.linkageConfig.gamma.groupId > 0 ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { iosFilterPopup.editingGroupParam = "gamma"; iosFilterPopup.groupIdInput = iosFilterPopup.linkageConfig.gamma.groupId; groupIdDialog.open() } } }
                     Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.gamma.groupDirection === -1 ? "←" : "→"; font.pixelSize: 16; font.bold: true; color: iosFilterPopup.linkageConfig.gamma.groupId > 0 ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; enabled: iosFilterPopup.linkageConfig.gamma.groupId > 0; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.gamma.groupDirection *= -1; iosFilterPopup.linkageConfig = lc } } }
                     Text { text: "伽马"; font.family: "PingFang HK"; font.pixelSize: 20; font.bold: true; color: "#E53935"; Layout.preferredWidth: 70 }
                     Slider {
@@ -11869,7 +11899,7 @@ Rectangle {
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: 8
-                    Text { Layout.preferredWidth: 30; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.contrast.groupId > 0 ? "组" + iosFilterPopup.linkageConfig.contrast.groupId : "—"; font.family: "PingFang HK"; font.pixelSize: 11; color: iosFilterPopup.linkageConfig.contrast.groupId > 0 ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; acceptedButtons: Qt.LeftButton | Qt.RightButton; onClicked: function(mouse) { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); if (mouse.button === Qt.RightButton) lc.contrast.groupId = Math.max(0, lc.contrast.groupId - 1); else lc.contrast.groupId = Math.min(100, lc.contrast.groupId + 1); iosFilterPopup.linkageConfig = lc } } }
+                    Text { Layout.preferredWidth: 30; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.contrast.groupId > 0 ? "组" + iosFilterPopup.linkageConfig.contrast.groupId : "—"; font.family: "PingFang HK"; font.pixelSize: 11; color: iosFilterPopup.linkageConfig.contrast.groupId > 0 ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { iosFilterPopup.editingGroupParam = "contrast"; iosFilterPopup.groupIdInput = iosFilterPopup.linkageConfig.contrast.groupId; groupIdDialog.open() } } }
                     Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.contrast.groupDirection === -1 ? "←" : "→"; font.pixelSize: 16; font.bold: true; color: iosFilterPopup.linkageConfig.contrast.groupId > 0 ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; enabled: iosFilterPopup.linkageConfig.contrast.groupId > 0; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.contrast.groupDirection *= -1; iosFilterPopup.linkageConfig = lc } } }
                     Text { text: "对比度"; font.family: "PingFang HK"; font.pixelSize: 20; font.bold: true; color: "#E53935"; Layout.preferredWidth: 70 }
                     Slider {
@@ -11925,7 +11955,7 @@ Rectangle {
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: 8
-                    Text { Layout.preferredWidth: 30; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.saturation.groupId > 0 ? "组" + iosFilterPopup.linkageConfig.saturation.groupId : "—"; font.family: "PingFang HK"; font.pixelSize: 11; color: iosFilterPopup.linkageConfig.saturation.groupId > 0 ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; acceptedButtons: Qt.LeftButton | Qt.RightButton; onClicked: function(mouse) { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); if (mouse.button === Qt.RightButton) lc.saturation.groupId = Math.max(0, lc.saturation.groupId - 1); else lc.saturation.groupId = Math.min(100, lc.saturation.groupId + 1); iosFilterPopup.linkageConfig = lc } } }
+                    Text { Layout.preferredWidth: 30; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.saturation.groupId > 0 ? "组" + iosFilterPopup.linkageConfig.saturation.groupId : "—"; font.family: "PingFang HK"; font.pixelSize: 11; color: iosFilterPopup.linkageConfig.saturation.groupId > 0 ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { iosFilterPopup.editingGroupParam = "saturation"; iosFilterPopup.groupIdInput = iosFilterPopup.linkageConfig.saturation.groupId; groupIdDialog.open() } } }
                     Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.saturation.groupDirection === -1 ? "←" : "→"; font.pixelSize: 16; font.bold: true; color: iosFilterPopup.linkageConfig.saturation.groupId > 0 ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; enabled: iosFilterPopup.linkageConfig.saturation.groupId > 0; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.saturation.groupDirection *= -1; iosFilterPopup.linkageConfig = lc } } }
                     Text { text: "红外模式"; font.family: "PingFang HK"; font.pixelSize: 20; font.bold: true; color: "#E53935"; Layout.preferredWidth: 90 }
                     Slider {
@@ -11981,7 +12011,7 @@ Rectangle {
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: 8
-                    Text { Layout.preferredWidth: 30; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.exposure.groupId > 0 ? "组" + iosFilterPopup.linkageConfig.exposure.groupId : "—"; font.family: "PingFang HK"; font.pixelSize: 11; color: iosFilterPopup.linkageConfig.exposure.groupId > 0 ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; acceptedButtons: Qt.LeftButton | Qt.RightButton; onClicked: function(mouse) { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); if (mouse.button === Qt.RightButton) lc.exposure.groupId = Math.max(0, lc.exposure.groupId - 1); else lc.exposure.groupId = Math.min(100, lc.exposure.groupId + 1); iosFilterPopup.linkageConfig = lc } } }
+                    Text { Layout.preferredWidth: 30; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.exposure.groupId > 0 ? "组" + iosFilterPopup.linkageConfig.exposure.groupId : "—"; font.family: "PingFang HK"; font.pixelSize: 11; color: iosFilterPopup.linkageConfig.exposure.groupId > 0 ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { iosFilterPopup.editingGroupParam = "exposure"; iosFilterPopup.groupIdInput = iosFilterPopup.linkageConfig.exposure.groupId; groupIdDialog.open() } } }
                     Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.exposure.groupDirection === -1 ? "←" : "→"; font.pixelSize: 16; font.bold: true; color: iosFilterPopup.linkageConfig.exposure.groupId > 0 ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; enabled: iosFilterPopup.linkageConfig.exposure.groupId > 0; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.exposure.groupDirection *= -1; iosFilterPopup.linkageConfig = lc } } }
                     Text { text: "曝光度"; font.family: "PingFang HK"; font.pixelSize: 20; font.bold: true; color: "#E53935"; Layout.preferredWidth: 70 }
                     Slider {
@@ -12062,7 +12092,7 @@ Rectangle {
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: 8
-                    Text { Layout.preferredWidth: 30; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.sharpness.groupId > 0 ? "组" + iosFilterPopup.linkageConfig.sharpness.groupId : "—"; font.family: "PingFang HK"; font.pixelSize: 11; color: iosFilterPopup.linkageConfig.sharpness.groupId > 0 ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; acceptedButtons: Qt.LeftButton | Qt.RightButton; onClicked: function(mouse) { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); if (mouse.button === Qt.RightButton) lc.sharpness.groupId = Math.max(0, lc.sharpness.groupId - 1); else lc.sharpness.groupId = Math.min(100, lc.sharpness.groupId + 1); iosFilterPopup.linkageConfig = lc } } }
+                    Text { Layout.preferredWidth: 30; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.sharpness.groupId > 0 ? "组" + iosFilterPopup.linkageConfig.sharpness.groupId : "—"; font.family: "PingFang HK"; font.pixelSize: 11; color: iosFilterPopup.linkageConfig.sharpness.groupId > 0 ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { iosFilterPopup.editingGroupParam = "sharpness"; iosFilterPopup.groupIdInput = iosFilterPopup.linkageConfig.sharpness.groupId; groupIdDialog.open() } } }
                     Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.sharpness.groupDirection === -1 ? "←" : "→"; font.pixelSize: 16; font.bold: true; color: iosFilterPopup.linkageConfig.sharpness.groupId > 0 ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; enabled: iosFilterPopup.linkageConfig.sharpness.groupId > 0; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.sharpness.groupDirection *= -1; iosFilterPopup.linkageConfig = lc } } }
                     Text { text: "清晰度(P)"; font.family: "PingFang HK"; font.pixelSize: 16; font.bold: true; color: "#E53935"; Layout.preferredWidth: 130 }
                     Slider {
@@ -12128,7 +12158,7 @@ Rectangle {
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: 8
-                    Text { Layout.preferredWidth: 30; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.highlightLift.groupId > 0 ? "组" + iosFilterPopup.linkageConfig.highlightLift.groupId : "—"; font.family: "PingFang HK"; font.pixelSize: 11; color: iosFilterPopup.linkageConfig.highlightLift.groupId > 0 ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; acceptedButtons: Qt.LeftButton | Qt.RightButton; onClicked: function(mouse) { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); if (mouse.button === Qt.RightButton) lc.highlightLift.groupId = Math.max(0, lc.highlightLift.groupId - 1); else lc.highlightLift.groupId = Math.min(100, lc.highlightLift.groupId + 1); iosFilterPopup.linkageConfig = lc } } }
+                    Text { Layout.preferredWidth: 30; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.highlightLift.groupId > 0 ? "组" + iosFilterPopup.linkageConfig.highlightLift.groupId : "—"; font.family: "PingFang HK"; font.pixelSize: 11; color: iosFilterPopup.linkageConfig.highlightLift.groupId > 0 ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { iosFilterPopup.editingGroupParam = "highlightLift"; iosFilterPopup.groupIdInput = iosFilterPopup.linkageConfig.highlightLift.groupId; groupIdDialog.open() } } }
                     Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.highlightLift.groupDirection === -1 ? "←" : "→"; font.pixelSize: 16; font.bold: true; color: iosFilterPopup.linkageConfig.highlightLift.groupId > 0 ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; enabled: iosFilterPopup.linkageConfig.highlightLift.groupId > 0; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.highlightLift.groupDirection *= -1; iosFilterPopup.linkageConfig = lc } } }
                     Text { text: "逆光对比(B)"; font.family: "PingFang HK"; font.pixelSize: 16; font.bold: true; color: "#E53935"; Layout.preferredWidth: 130 }
                     Slider {
@@ -12184,7 +12214,7 @@ Rectangle {
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: 8
-                    Text { Layout.preferredWidth: 30; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.gain.groupId > 0 ? "组" + iosFilterPopup.linkageConfig.gain.groupId : "—"; font.family: "PingFang HK"; font.pixelSize: 11; color: iosFilterPopup.linkageConfig.gain.groupId > 0 ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; acceptedButtons: Qt.LeftButton | Qt.RightButton; onClicked: function(mouse) { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); if (mouse.button === Qt.RightButton) lc.gain.groupId = Math.max(0, lc.gain.groupId - 1); else lc.gain.groupId = Math.min(100, lc.gain.groupId + 1); iosFilterPopup.linkageConfig = lc } } }
+                    Text { Layout.preferredWidth: 30; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.gain.groupId > 0 ? "组" + iosFilterPopup.linkageConfig.gain.groupId : "—"; font.family: "PingFang HK"; font.pixelSize: 11; color: iosFilterPopup.linkageConfig.gain.groupId > 0 ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { iosFilterPopup.editingGroupParam = "gain"; iosFilterPopup.groupIdInput = iosFilterPopup.linkageConfig.gain.groupId; groupIdDialog.open() } } }
                     Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.gain.groupDirection === -1 ? "←" : "→"; font.pixelSize: 16; font.bold: true; color: iosFilterPopup.linkageConfig.gain.groupId > 0 ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; enabled: iosFilterPopup.linkageConfig.gain.groupId > 0; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.gain.groupDirection *= -1; iosFilterPopup.linkageConfig = lc } } }
                     Text { text: "增益(G)"; font.family: "PingFang HK"; font.pixelSize: 16; font.bold: true; color: "#E53935"; Layout.preferredWidth: 130 }
                     Slider {
