@@ -4351,8 +4351,8 @@ Rectangle {
 
             // ⭐ 显式设置滑块值（因为 onMoved 会打破绑定）
             exposureBiasSlider.value = exposureValue
-            cameraBrightnessSlider.value = iosFilterPopup.fContrast        // 对比度滑块 → iOS 滤镜的 contrast
-            cameraFakeExposureSlider.value = iosFilterPopup.fBrightness   // 曝光度滑块 → iOS 滤镜的 brightness
+            cameraBrightnessSlider.value = overallContrastValue           // 综合亮度-对比度
+            cameraFakeExposureSlider.value = overallExposureValue         // 综合亮度-曝光度
             cameraSaturationSlider.value = iosFilterPopup.fSaturation     // 红外模式滑块 → iOS 滤镜的 saturation
 
             visible = true
@@ -4370,7 +4370,9 @@ Rectangle {
         
         // 相机设定参数
         property double focusValue: 0.5
-        property int exposureValue: 50   // ⭐ 综合亮度: 0..100, 中点 50 = iOS 滤镜全部 default
+        property int exposureValue: 50        // ⭐ 综合亮度: 0..100, 中点 50
+        property int overallContrastValue: 50 // ⭐ 综合亮度-对比度: 0..100, 中点 50
+        property int overallExposureValue: 50 // ⭐ 综合亮度-曝光度: 0..100, 中点 50
         property int flickerValue: Math.min(240, getMaxFlickerValue())  // 范围 60-400，直接下发60-400
         property int fpsValue: 30
         property int clarityValue: 50
@@ -4474,6 +4476,8 @@ Rectangle {
                                 // 综合亮度：回中点 50，参照登录逻辑（onLoginSuccess 也是这样做）
                                 captureManager.exposure = 50
                                 iosCameraSettingsPopup.exposureValue = 50
+                                iosCameraSettingsPopup.overallContrastValue = 50
+                                iosCameraSettingsPopup.overallExposureValue = 50
                                 exposureBiasSlider.value = 50
                                 iosFilterPopup.syncFromOverallBrightness(50)
 
@@ -5046,25 +5050,27 @@ Rectangle {
                 spacing: 10
 
                 Text {
-                    text: "对比度"
+                    text: "综合亮度-对比度"
                     font.family: "PingFang HK"
-                    font.pixelSize: 16
+                    font.pixelSize: 14
                     color: "#263238"
-                    Layout.preferredWidth: 60
+                    Layout.preferredWidth: 110
                 }
 
                 Slider {
                     id: cameraBrightnessSlider
                     Layout.fillWidth: true
-                    from: iosFilterPopup.contrastFrom
-                    to: iosFilterPopup.contrastTo
-                    stepSize: iosFilterPopup.contrastStep
-                    value: iosFilterPopup.fContrast
+                    from: 0
+                    to: 100
+                    stepSize: 1
+                    value: iosCameraSettingsPopup.overallContrastValue
                     onMoved: {
-                        iosFilterPopup.syncSingle("contrast", value)
+                        iosCameraSettingsPopup.overallContrastValue = value
+                        iosFilterPopup.syncFromOverallContrast(value)
                     }
                     onPressedChanged: if (!pressed) {
-                        iosFilterPopup.syncSingle("contrast", value)
+                        iosCameraSettingsPopup.overallContrastValue = value
+                        iosFilterPopup.syncFromOverallContrast(value)
                     }
                     
                     background: Rectangle {
@@ -5096,21 +5102,21 @@ Rectangle {
                         color: "#4DB6AC"
                     }
                     
-                    // ⭐ 鼠标滚轮支持 — 对比度
                     MouseArea {
                         anchors.fill: parent
                         acceptedButtons: Qt.NoButton
                         onWheel: function(wheel) {
-                            var delta = wheel.angleDelta.y > 0 ? cameraBrightnessSlider.stepSize : -cameraBrightnessSlider.stepSize
-                            var newValue = cameraBrightnessSlider.value + delta
-                            newValue = Math.max(cameraBrightnessSlider.from, Math.min(cameraBrightnessSlider.to, newValue))
-                            iosFilterPopup.syncSingle("contrast", newValue)
+                            var dir = wheel.angleDelta.y > 0 ? 1 : -1
+                            var nv = Math.max(0, Math.min(100, cameraBrightnessSlider.value + dir))
+                            cameraBrightnessSlider.value = nv
+                            iosCameraSettingsPopup.overallContrastValue = nv
+                            iosFilterPopup.syncFromOverallContrast(nv)
                         }
                     }
                 }
 
                 Text {
-                    text: iosFilterPopup.fContrast.toFixed(2)
+                    text: iosCameraSettingsPopup.overallContrastValue
                     font.family: "PingFang HK"
                     font.pixelSize: 16
                     color: "#263238"
@@ -5138,31 +5144,28 @@ Rectangle {
                 spacing: 10
 
                 Text {
-                    text: "曝光度"   // ⚠️ 迷惑名字, 实际驱动 brightness
+                    text: "综合亮度-曝光度"
                     font.family: "PingFang HK"
-                    font.pixelSize: 16
+                    font.pixelSize: 14
                     color: "#263238"
-                    Layout.preferredWidth: 60
+                    Layout.preferredWidth: 110
                 }
 
                 Slider {
-                    id: cameraFakeExposureSlider   // ⚠️ 名字带 fake — 实际是 brightness
+                    id: cameraFakeExposureSlider
                     Layout.fillWidth: true
-                    from: iosFilterPopup.brightnessFrom
-                    to:   iosFilterPopup.brightnessTo
-                    stepSize: iosFilterPopup.brightnessStep
-                    value: iosFilterPopup.fBrightness     // 双向同步同一底层
-
-                    // ⚠️ 拖动只动 brightness 一个值 — 不级联其他联动参数
-                    //    syncSingle("brightness", v) 会:
-                    //      • 写 fBrightness / prevBrightness (所有绑定 fBrightness 的 UI 自动刷新:
-                    //        iOS 滤镜弹框里的"亮度"滑块、本身这个"曝光度"滑块的右侧数字)
-                    //      • 显式 ifMasterSlider.value = v 修复绑定被打断的情况
-                    //      • pushParam → STOMP 推给 iOS
-                    //    ⚠️ 不调 applyLinkedDelta — 即便勾了 linkGamma/linkContrast 等也不会跟动.
-                    //    只有 综合亮度 滑块才会走多参数级联.
-                    onMoved: iosFilterPopup.syncSingle("brightness", value)
-                    onPressedChanged: if (!pressed) iosFilterPopup.syncSingle("brightness", value)
+                    from: 0
+                    to: 100
+                    stepSize: 1
+                    value: iosCameraSettingsPopup.overallExposureValue
+                    onMoved: {
+                        iosCameraSettingsPopup.overallExposureValue = value
+                        iosFilterPopup.syncFromOverallExposure(value)
+                    }
+                    onPressedChanged: if (!pressed) {
+                        iosCameraSettingsPopup.overallExposureValue = value
+                        iosFilterPopup.syncFromOverallExposure(value)
+                    }
 
                     background: Rectangle {
                         x: cameraFakeExposureSlider.leftPadding
@@ -5193,22 +5196,22 @@ Rectangle {
                         color: "#4DB6AC"
                     }
 
-                    // ⭐ 鼠标滚轮 — 走 syncSingle, 跟 onMoved 一样不级联其他联动参数
                     MouseArea {
                         anchors.fill: parent
                         acceptedButtons: Qt.NoButton
                         onWheel: function(wheel) {
                             if (wheel.angleDelta.y === 0) return
                             var dir = wheel.angleDelta.y > 0 ? 1 : -1
-                            var nv = cameraFakeExposureSlider.value + dir * cameraFakeExposureSlider.stepSize
-                            iosFilterPopup.syncSingle("brightness", nv)   // ⚠️ 单值同步, 不级联
+                            var nv = Math.max(0, Math.min(100, cameraFakeExposureSlider.value + dir))
+                            cameraFakeExposureSlider.value = nv
+                            iosCameraSettingsPopup.overallExposureValue = nv
+                            iosFilterPopup.syncFromOverallExposure(nv)
                         }
                     }
                 }
 
                 Text {
-                    // 显示真实的 brightness 数值 (即便标签叫"曝光度")
-                    text: iosFilterPopup.fBrightness.toFixed(2)
+                    text: iosCameraSettingsPopup.overallExposureValue
                     font.family: "PingFang HK"
                     font.pixelSize: 16
                     color: "#263238"
@@ -7533,6 +7536,8 @@ Rectangle {
             HttpClient.getIosPipeline()
             captureManager.exposure = 50
             iosCameraSettingsPopup.exposureValue = 50
+                                iosCameraSettingsPopup.overallContrastValue = 50
+                                iosCameraSettingsPopup.overallExposureValue = 50
 
             // ⭐ 保存 ICE 服务器列表（P2P STUN/TURN 配置）
             if (iceServersFromLogin && iceServersFromLogin.length > 0) {
@@ -11102,7 +11107,7 @@ Rectangle {
     //   所以这里去掉了"保存为系统默认"按钮和登录默认值拉取.
     Window {
         id: iosFilterPopup
-        width: iosFilterPopup.pcFreeConfig ? 780 : 560
+        width: iosFilterPopup.pcFreeConfig ? 920 : 560
         height: 820
         flags: Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
         color: "transparent"
@@ -11216,14 +11221,14 @@ Rectangle {
         //   pcFreeConfig: 后台开关, 打开后 PC 端显示方向配置
         property bool pcFreeConfig: false
         property var linkageConfig: ({
-            brightness:    { groupEnabled: true, groupId: 1, groupDirection: -1, brightSwitch: false, brightDirection: 1 },
-            gamma:         { groupEnabled: true, groupId: 1, groupDirection: 1,  brightSwitch: false, brightDirection: 1 },
-            contrast:      { groupEnabled: true, groupId: 0, groupDirection: 1,  brightSwitch: false, brightDirection: 1 },
-            saturation:    { groupEnabled: true, groupId: 0, groupDirection: 1,  brightSwitch: false, brightDirection: 1 },
-            exposure:      { groupEnabled: true, groupId: 0, groupDirection: 1,  brightSwitch: false, brightDirection: 1 },
-            sharpness:     { groupEnabled: true, groupId: 0, groupDirection: 1,  brightSwitch: false, brightDirection: 1 },
-            highlightLift: { groupEnabled: true, groupId: 0, groupDirection: 1,  brightSwitch: false, brightDirection: 1 },
-            gain:          { groupEnabled: true, groupId: 0, groupDirection: 1,  brightSwitch: false, brightDirection: 1 }
+            brightness:    { groupEnabled: true, groupId: 1, groupDirection: -1, brightSwitch: false, brightDirection: 1, brightContrastSwitch: false, brightContrastDirection: 1, brightExposureSwitch: false, brightExposureDirection: 1 },
+            gamma:         { groupEnabled: true, groupId: 1, groupDirection: 1,  brightSwitch: false, brightDirection: 1, brightContrastSwitch: false, brightContrastDirection: 1, brightExposureSwitch: false, brightExposureDirection: 1 },
+            contrast:      { groupEnabled: true, groupId: 0, groupDirection: 1,  brightSwitch: false, brightDirection: 1, brightContrastSwitch: false, brightContrastDirection: 1, brightExposureSwitch: false, brightExposureDirection: 1 },
+            saturation:    { groupEnabled: true, groupId: 0, groupDirection: 1,  brightSwitch: false, brightDirection: 1, brightContrastSwitch: false, brightContrastDirection: 1, brightExposureSwitch: false, brightExposureDirection: 1 },
+            exposure:      { groupEnabled: true, groupId: 0, groupDirection: 1,  brightSwitch: false, brightDirection: 1, brightContrastSwitch: false, brightContrastDirection: 1, brightExposureSwitch: false, brightExposureDirection: 1 },
+            sharpness:     { groupEnabled: true, groupId: 0, groupDirection: 1,  brightSwitch: false, brightDirection: 1, brightContrastSwitch: false, brightContrastDirection: 1, brightExposureSwitch: false, brightExposureDirection: 1 },
+            highlightLift: { groupEnabled: true, groupId: 0, groupDirection: 1,  brightSwitch: false, brightDirection: 1, brightContrastSwitch: false, brightContrastDirection: 1, brightExposureSwitch: false, brightExposureDirection: 1 },
+            gain:          { groupEnabled: true, groupId: 0, groupDirection: 1,  brightSwitch: false, brightDirection: 1, brightContrastSwitch: false, brightContrastDirection: 1, brightExposureSwitch: false, brightExposureDirection: 1 }
         })
         property var linkageConfigDefault: null
         property string editingGroupParam: ""
@@ -11273,6 +11278,10 @@ Rectangle {
                     if (c[key].groupDirection !== undefined) lc[key].groupDirection = c[key].groupDirection
                     if (c[key].brightSwitch !== undefined) lc[key].brightSwitch = c[key].brightSwitch
                     if (c[key].brightDirection !== undefined) lc[key].brightDirection = c[key].brightDirection
+                    if (c[key].brightContrastSwitch !== undefined) lc[key].brightContrastSwitch = c[key].brightContrastSwitch
+                    if (c[key].brightContrastDirection !== undefined) lc[key].brightContrastDirection = c[key].brightContrastDirection
+                    if (c[key].brightExposureSwitch !== undefined) lc[key].brightExposureSwitch = c[key].brightExposureSwitch
+                    if (c[key].brightExposureDirection !== undefined) lc[key].brightExposureDirection = c[key].brightExposureDirection
                 }
             }
             iosFilterPopup.linkageConfig = lc
@@ -11302,6 +11311,8 @@ Rectangle {
             console.log("✅ [iOS-Filter] 已应用后台默认值")
 
             iosCameraSettingsPopup.exposureValue = 50
+                                iosCameraSettingsPopup.overallContrastValue = 50
+                                iosCameraSettingsPopup.overallExposureValue = 50
             captureManager.exposure = 50
 
             iosFilterPopup.filterLoaded = true
@@ -11589,11 +11600,82 @@ Rectangle {
             if (typeof cameraSaturationSlider   !== 'undefined') cameraSaturationSlider.value   = iosFilterPopup.fSaturation
         }
 
-        // ⭐ 相机设定弹框里 对比度 / 曝光度(实际驱动 brightness) / 红外模式(saturation) 滑块用这个
-        //    特点: 只设自己一个底层值 + 推 iOS + 同步刷新 iOS 滤镜弹框对应滑块的 value (绑定可能被打断)
-        //    ⚠️ 不调 applyLinkedDelta — 即不触发"亮度联动" 级联
-        //       (区别: iOS 滤镜弹框里的滑块 onMoved 会调 applyLinkedDelta; 相机设定里的不调.
-        //        只有 综合亮度 滑块才走多参数级联.)
+        // ⭐ 综合亮度-对比度(0-100) → 驱动所有 brightContrastSwitch=true 的参数
+        function syncFromOverallContrast(X) {
+            var t = (X - 50) / 50
+            var lc = linkageConfig
+            function setOne(pid, currProp, prevProp, defProp, fromProp, toProp) {
+                var cfg = lc[pid]
+                if (!cfg || !cfg.brightContrastSwitch) return
+                var def = iosFilterPopup[defProp]
+                var lo  = iosFilterPopup[fromProp]
+                var hi  = iosFilterPopup[toProp]
+                var actualT = cfg.brightContrastDirection === -1 ? -t : t
+                var v   = actualT < 0 ? def + actualT * (def - lo) : def + actualT * (hi - def)
+                v = clampVal(v, lo, hi)
+                iosFilterPopup[currProp] = v
+                iosFilterPopup[prevProp] = v
+                if (pid === "gain") { sendTestBrightnessConfig(Math.round(v)) }
+                else if (pid === "exposure") { pushParam("exposure", Math.log2(v)) }
+                else { pushParam(pid, v) }
+            }
+            setOne("brightness",    "fBrightness",    "prevBrightness",    "brightnessDefault",    "brightnessFrom",    "brightnessTo")
+            setOne("gamma",         "fGamma",         "prevGamma",         "gammaDefault",         "gammaFrom",         "gammaTo")
+            setOne("contrast",      "fContrast",      "prevContrast",      "contrastDefault",      "contrastFrom",      "contrastTo")
+            setOne("saturation",    "fSaturation",    "prevSaturation",    "saturationDefault",    "saturationFrom",    "saturationTo")
+            setOne("exposure",      "fExposure",      "prevExposure",      "exposureDefault",      "exposureFrom",      "exposureTo")
+            setOne("sharpness",     "fSharpness",     "prevSharpness",     "sharpnessDefault",     "sharpnessFrom",     "sharpnessTo")
+            setOne("highlightLift", "fHighlightLift", "prevHighlightLift", "highlightLiftDefault", "highlightLiftFrom", "highlightLiftTo")
+            setOne("gain",          "fGain",          "prevGain",          "gainDefault",          "gainFrom",          "gainTo")
+            if (typeof ifMasterSlider     !== 'undefined') ifMasterSlider.value     = iosFilterPopup.fBrightness
+            if (typeof ifGammaSlider      !== 'undefined') ifGammaSlider.value      = iosFilterPopup.fGamma
+            if (typeof ifContrastSlider   !== 'undefined') ifContrastSlider.value   = iosFilterPopup.fContrast
+            if (typeof ifSaturationSlider !== 'undefined') ifSaturationSlider.value = iosFilterPopup.fSaturation
+            if (typeof ifExposureSlider   !== 'undefined') ifExposureSlider.value   = iosFilterPopup.fExposure
+            if (typeof ifSharpnessSlider  !== 'undefined') ifSharpnessSlider.value  = iosFilterPopup.fSharpness
+            if (typeof ifHighlightLiftSlider !== 'undefined') ifHighlightLiftSlider.value = iosFilterPopup.fHighlightLift
+            if (typeof ifGainSlider       !== 'undefined') ifGainSlider.value       = iosFilterPopup.fGain
+        }
+
+        // ⭐ 综合亮度-曝光度(0-100) → 驱动所有 brightExposureSwitch=true 的参数
+        function syncFromOverallExposure(X) {
+            var t = (X - 50) / 50
+            var lc = linkageConfig
+            function setOne(pid, currProp, prevProp, defProp, fromProp, toProp) {
+                var cfg = lc[pid]
+                if (!cfg || !cfg.brightExposureSwitch) return
+                var def = iosFilterPopup[defProp]
+                var lo  = iosFilterPopup[fromProp]
+                var hi  = iosFilterPopup[toProp]
+                var actualT = cfg.brightExposureDirection === -1 ? -t : t
+                var v   = actualT < 0 ? def + actualT * (def - lo) : def + actualT * (hi - def)
+                v = clampVal(v, lo, hi)
+                iosFilterPopup[currProp] = v
+                iosFilterPopup[prevProp] = v
+                if (pid === "gain") { sendTestBrightnessConfig(Math.round(v)) }
+                else if (pid === "exposure") { pushParam("exposure", Math.log2(v)) }
+                else { pushParam(pid, v) }
+            }
+            setOne("brightness",    "fBrightness",    "prevBrightness",    "brightnessDefault",    "brightnessFrom",    "brightnessTo")
+            setOne("gamma",         "fGamma",         "prevGamma",         "gammaDefault",         "gammaFrom",         "gammaTo")
+            setOne("contrast",      "fContrast",      "prevContrast",      "contrastDefault",      "contrastFrom",      "contrastTo")
+            setOne("saturation",    "fSaturation",    "prevSaturation",    "saturationDefault",    "saturationFrom",    "saturationTo")
+            setOne("exposure",      "fExposure",      "prevExposure",      "exposureDefault",      "exposureFrom",      "exposureTo")
+            setOne("sharpness",     "fSharpness",     "prevSharpness",     "sharpnessDefault",     "sharpnessFrom",     "sharpnessTo")
+            setOne("highlightLift", "fHighlightLift", "prevHighlightLift", "highlightLiftDefault", "highlightLiftFrom", "highlightLiftTo")
+            setOne("gain",          "fGain",          "prevGain",          "gainDefault",          "gainFrom",          "gainTo")
+            if (typeof ifMasterSlider     !== 'undefined') ifMasterSlider.value     = iosFilterPopup.fBrightness
+            if (typeof ifGammaSlider      !== 'undefined') ifGammaSlider.value      = iosFilterPopup.fGamma
+            if (typeof ifContrastSlider   !== 'undefined') ifContrastSlider.value   = iosFilterPopup.fContrast
+            if (typeof ifSaturationSlider !== 'undefined') ifSaturationSlider.value = iosFilterPopup.fSaturation
+            if (typeof ifExposureSlider   !== 'undefined') ifExposureSlider.value   = iosFilterPopup.fExposure
+            if (typeof ifSharpnessSlider  !== 'undefined') ifSharpnessSlider.value  = iosFilterPopup.fSharpness
+            if (typeof ifHighlightLiftSlider !== 'undefined') ifHighlightLiftSlider.value = iosFilterPopup.fHighlightLift
+            if (typeof ifGainSlider       !== 'undefined') ifGainSlider.value       = iosFilterPopup.fGain
+        }
+
+        // ⭐ 相机设定弹框里 红外模式(saturation) 滑块用这个
+        //    特点: 只设自己一个底层值 + 推 iOS
         function syncSingle(ptype, v) {
             if (ptype === "brightness") {
                 v = clampVal(v, brightnessFrom, brightnessTo)
@@ -11728,6 +11810,8 @@ Rectangle {
                                 if (typeof ifGainSlider       !== 'undefined') ifGainSlider.value       = iosFilterPopup.gainDefault
                                 iosCameraSettingsPopup.hardwareBrightness = Math.round(iosFilterPopup.gainDefault)
                                 iosCameraSettingsPopup.exposureValue = 50
+                                iosCameraSettingsPopup.overallContrastValue = 50
+                                iosCameraSettingsPopup.overallExposureValue = 50
                                 iosFilterPopup.pushAllStomp()
                             }
                         }
@@ -11785,7 +11869,7 @@ Rectangle {
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: 8
-                    Text { Layout.preferredWidth: 20; text: iosFilterPopup.linkageConfig.brightness.groupEnabled ? "●" : "○"; font.pixelSize: 16; color: iosFilterPopup.linkageConfig.brightness.groupEnabled ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.brightness.groupEnabled = !lc.brightness.groupEnabled; iosFilterPopup.linkageConfig = lc } } }
+                    Text { Layout.preferredWidth: 28; text: iosFilterPopup.linkageConfig.brightness.groupEnabled ? "●" : "○"; font.pixelSize: 22; color: iosFilterPopup.linkageConfig.brightness.groupEnabled ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.brightness.groupEnabled = !lc.brightness.groupEnabled; iosFilterPopup.linkageConfig = lc } } }
                     Text { Layout.preferredWidth: 30; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.brightness.groupId > 0 ? "组" + iosFilterPopup.linkageConfig.brightness.groupId : "—"; font.family: "PingFang HK"; font.pixelSize: 11; color: iosFilterPopup.linkageConfig.brightness.groupId > 0 ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { iosFilterPopup.editingGroupParam = "brightness"; iosFilterPopup.groupIdInput = iosFilterPopup.linkageConfig.brightness.groupId; groupIdDialog.open() } } }
                     Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.brightness.groupDirection === -1 ? "←" : "→"; font.pixelSize: 16; font.bold: true; color: iosFilterPopup.linkageConfig.brightness.groupId > 0 ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; enabled: iosFilterPopup.linkageConfig.brightness.groupId > 0; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.brightness.groupDirection *= -1; iosFilterPopup.linkageConfig = lc } } }
                     Text { text: "亮度"; font.family: "PingFang HK"; font.pixelSize: 20; font.bold: true; color: "#E53935"; Layout.preferredWidth: 70 }
@@ -11836,6 +11920,10 @@ Rectangle {
                     Text { text: iosFilterPopup.fBrightness.toFixed(2); font.family: "PingFang HK"; font.pixelSize: 16; color: "#263238"; Layout.preferredWidth: 50 }
                     Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.brightness.brightSwitch ? "☀" : "·"; font.pixelSize: 14; color: iosFilterPopup.linkageConfig.brightness.brightSwitch ? "#FF9800" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.brightness.brightSwitch = !lc.brightness.brightSwitch; iosFilterPopup.linkageConfig = lc } } }
                     Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.brightness.brightDirection === -1 ? "←" : "→"; font.pixelSize: 16; font.bold: true; color: iosFilterPopup.linkageConfig.brightness.brightSwitch ? "#FF9800" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; enabled: iosFilterPopup.linkageConfig.brightness.brightSwitch; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.brightness.brightDirection *= -1; iosFilterPopup.linkageConfig = lc } } }
+                    Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.brightness.brightContrastSwitch ? "◆" : "·"; font.pixelSize: 14; color: iosFilterPopup.linkageConfig.brightness.brightContrastSwitch ? "#2196F3" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.brightness.brightContrastSwitch = !lc.brightness.brightContrastSwitch; iosFilterPopup.linkageConfig = lc } } }
+                    Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.brightness.brightContrastDirection === -1 ? "←" : "→"; font.pixelSize: 16; font.bold: true; color: iosFilterPopup.linkageConfig.brightness.brightContrastSwitch ? "#2196F3" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; enabled: iosFilterPopup.linkageConfig.brightness.brightContrastSwitch; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.brightness.brightContrastDirection *= -1; iosFilterPopup.linkageConfig = lc } } }
+                    Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.brightness.brightExposureSwitch ? "◇" : "·"; font.pixelSize: 14; color: iosFilterPopup.linkageConfig.brightness.brightExposureSwitch ? "#9C27B0" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.brightness.brightExposureSwitch = !lc.brightness.brightExposureSwitch; iosFilterPopup.linkageConfig = lc } } }
+                    Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.brightness.brightExposureDirection === -1 ? "←" : "→"; font.pixelSize: 16; font.bold: true; color: iosFilterPopup.linkageConfig.brightness.brightExposureSwitch ? "#9C27B0" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; enabled: iosFilterPopup.linkageConfig.brightness.brightExposureSwitch; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.brightness.brightExposureDirection *= -1; iosFilterPopup.linkageConfig = lc } } }
                 }
 
                 // ===== 伽马滑块 (range 0.8/1.10/2.0, stepSize 0.01 ⭐ 比亮度细一倍) =====
@@ -11843,7 +11931,7 @@ Rectangle {
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: 8
-                    Text { Layout.preferredWidth: 20; text: iosFilterPopup.linkageConfig.gamma.groupEnabled ? "●" : "○"; font.pixelSize: 16; color: iosFilterPopup.linkageConfig.gamma.groupEnabled ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.gamma.groupEnabled = !lc.gamma.groupEnabled; iosFilterPopup.linkageConfig = lc } } }
+                    Text { Layout.preferredWidth: 28; text: iosFilterPopup.linkageConfig.gamma.groupEnabled ? "●" : "○"; font.pixelSize: 22; color: iosFilterPopup.linkageConfig.gamma.groupEnabled ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.gamma.groupEnabled = !lc.gamma.groupEnabled; iosFilterPopup.linkageConfig = lc } } }
                     Text { Layout.preferredWidth: 30; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.gamma.groupId > 0 ? "组" + iosFilterPopup.linkageConfig.gamma.groupId : "—"; font.family: "PingFang HK"; font.pixelSize: 11; color: iosFilterPopup.linkageConfig.gamma.groupId > 0 ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { iosFilterPopup.editingGroupParam = "gamma"; iosFilterPopup.groupIdInput = iosFilterPopup.linkageConfig.gamma.groupId; groupIdDialog.open() } } }
                     Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.gamma.groupDirection === -1 ? "←" : "→"; font.pixelSize: 16; font.bold: true; color: iosFilterPopup.linkageConfig.gamma.groupId > 0 ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; enabled: iosFilterPopup.linkageConfig.gamma.groupId > 0; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.gamma.groupDirection *= -1; iosFilterPopup.linkageConfig = lc } } }
                     Text { text: "伽马"; font.family: "PingFang HK"; font.pixelSize: 20; font.bold: true; color: "#E53935"; Layout.preferredWidth: 70 }
@@ -11894,13 +11982,17 @@ Rectangle {
                     Text { text: iosFilterPopup.fGamma.toFixed(2); font.family: "PingFang HK"; font.pixelSize: 16; color: "#263238"; Layout.preferredWidth: 50 }
                     Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.gamma.brightSwitch ? "☀" : "·"; font.pixelSize: 14; color: iosFilterPopup.linkageConfig.gamma.brightSwitch ? "#FF9800" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.gamma.brightSwitch = !lc.gamma.brightSwitch; iosFilterPopup.linkageConfig = lc } } }
                     Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.gamma.brightDirection === -1 ? "←" : "→"; font.pixelSize: 16; font.bold: true; color: iosFilterPopup.linkageConfig.gamma.brightSwitch ? "#FF9800" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; enabled: iosFilterPopup.linkageConfig.gamma.brightSwitch; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.gamma.brightDirection *= -1; iosFilterPopup.linkageConfig = lc } } }
+                    Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.gamma.brightContrastSwitch ? "◆" : "·"; font.pixelSize: 14; color: iosFilterPopup.linkageConfig.gamma.brightContrastSwitch ? "#2196F3" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.gamma.brightContrastSwitch = !lc.gamma.brightContrastSwitch; iosFilterPopup.linkageConfig = lc } } }
+                    Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.gamma.brightContrastDirection === -1 ? "←" : "→"; font.pixelSize: 16; font.bold: true; color: iosFilterPopup.linkageConfig.gamma.brightContrastSwitch ? "#2196F3" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; enabled: iosFilterPopup.linkageConfig.gamma.brightContrastSwitch; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.gamma.brightContrastDirection *= -1; iosFilterPopup.linkageConfig = lc } } }
+                    Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.gamma.brightExposureSwitch ? "◇" : "·"; font.pixelSize: 14; color: iosFilterPopup.linkageConfig.gamma.brightExposureSwitch ? "#9C27B0" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.gamma.brightExposureSwitch = !lc.gamma.brightExposureSwitch; iosFilterPopup.linkageConfig = lc } } }
+                    Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.gamma.brightExposureDirection === -1 ? "←" : "→"; font.pixelSize: 16; font.bold: true; color: iosFilterPopup.linkageConfig.gamma.brightExposureSwitch ? "#9C27B0" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; enabled: iosFilterPopup.linkageConfig.gamma.brightExposureSwitch; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.gamma.brightExposureDirection *= -1; iosFilterPopup.linkageConfig = lc } } }
                 }
 
                 // ===== 对比度滑块 (0.8/1.10/1.30, stepSize 0.02) =====
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: 8
-                    Text { Layout.preferredWidth: 20; text: iosFilterPopup.linkageConfig.contrast.groupEnabled ? "●" : "○"; font.pixelSize: 16; color: iosFilterPopup.linkageConfig.contrast.groupEnabled ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.contrast.groupEnabled = !lc.contrast.groupEnabled; iosFilterPopup.linkageConfig = lc } } }
+                    Text { Layout.preferredWidth: 28; text: iosFilterPopup.linkageConfig.contrast.groupEnabled ? "●" : "○"; font.pixelSize: 22; color: iosFilterPopup.linkageConfig.contrast.groupEnabled ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.contrast.groupEnabled = !lc.contrast.groupEnabled; iosFilterPopup.linkageConfig = lc } } }
                     Text { Layout.preferredWidth: 30; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.contrast.groupId > 0 ? "组" + iosFilterPopup.linkageConfig.contrast.groupId : "—"; font.family: "PingFang HK"; font.pixelSize: 11; color: iosFilterPopup.linkageConfig.contrast.groupId > 0 ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { iosFilterPopup.editingGroupParam = "contrast"; iosFilterPopup.groupIdInput = iosFilterPopup.linkageConfig.contrast.groupId; groupIdDialog.open() } } }
                     Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.contrast.groupDirection === -1 ? "←" : "→"; font.pixelSize: 16; font.bold: true; color: iosFilterPopup.linkageConfig.contrast.groupId > 0 ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; enabled: iosFilterPopup.linkageConfig.contrast.groupId > 0; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.contrast.groupDirection *= -1; iosFilterPopup.linkageConfig = lc } } }
                     Text { text: "对比度"; font.family: "PingFang HK"; font.pixelSize: 20; font.bold: true; color: "#E53935"; Layout.preferredWidth: 70 }
@@ -11951,13 +12043,17 @@ Rectangle {
                     Text { text: iosFilterPopup.fContrast.toFixed(2); font.family: "PingFang HK"; font.pixelSize: 16; color: "#263238"; Layout.preferredWidth: 50 }
                     Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.contrast.brightSwitch ? "☀" : "·"; font.pixelSize: 14; color: iosFilterPopup.linkageConfig.contrast.brightSwitch ? "#FF9800" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.contrast.brightSwitch = !lc.contrast.brightSwitch; iosFilterPopup.linkageConfig = lc } } }
                     Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.contrast.brightDirection === -1 ? "←" : "→"; font.pixelSize: 16; font.bold: true; color: iosFilterPopup.linkageConfig.contrast.brightSwitch ? "#FF9800" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; enabled: iosFilterPopup.linkageConfig.contrast.brightSwitch; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.contrast.brightDirection *= -1; iosFilterPopup.linkageConfig = lc } } }
+                    Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.contrast.brightContrastSwitch ? "◆" : "·"; font.pixelSize: 14; color: iosFilterPopup.linkageConfig.contrast.brightContrastSwitch ? "#2196F3" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.contrast.brightContrastSwitch = !lc.contrast.brightContrastSwitch; iosFilterPopup.linkageConfig = lc } } }
+                    Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.contrast.brightContrastDirection === -1 ? "←" : "→"; font.pixelSize: 16; font.bold: true; color: iosFilterPopup.linkageConfig.contrast.brightContrastSwitch ? "#2196F3" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; enabled: iosFilterPopup.linkageConfig.contrast.brightContrastSwitch; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.contrast.brightContrastDirection *= -1; iosFilterPopup.linkageConfig = lc } } }
+                    Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.contrast.brightExposureSwitch ? "◇" : "·"; font.pixelSize: 14; color: iosFilterPopup.linkageConfig.contrast.brightExposureSwitch ? "#9C27B0" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.contrast.brightExposureSwitch = !lc.contrast.brightExposureSwitch; iosFilterPopup.linkageConfig = lc } } }
+                    Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.contrast.brightExposureDirection === -1 ? "←" : "→"; font.pixelSize: 16; font.bold: true; color: iosFilterPopup.linkageConfig.contrast.brightExposureSwitch ? "#9C27B0" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; enabled: iosFilterPopup.linkageConfig.contrast.brightExposureSwitch; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.contrast.brightExposureDirection *= -1; iosFilterPopup.linkageConfig = lc } } }
                 }
 
                 // ===== 红外模式 (饱和度) (0.0/1.10/2.0, stepSize 0.02, 0=黑白) =====
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: 8
-                    Text { Layout.preferredWidth: 20; text: iosFilterPopup.linkageConfig.saturation.groupEnabled ? "●" : "○"; font.pixelSize: 16; color: iosFilterPopup.linkageConfig.saturation.groupEnabled ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.saturation.groupEnabled = !lc.saturation.groupEnabled; iosFilterPopup.linkageConfig = lc } } }
+                    Text { Layout.preferredWidth: 28; text: iosFilterPopup.linkageConfig.saturation.groupEnabled ? "●" : "○"; font.pixelSize: 22; color: iosFilterPopup.linkageConfig.saturation.groupEnabled ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.saturation.groupEnabled = !lc.saturation.groupEnabled; iosFilterPopup.linkageConfig = lc } } }
                     Text { Layout.preferredWidth: 30; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.saturation.groupId > 0 ? "组" + iosFilterPopup.linkageConfig.saturation.groupId : "—"; font.family: "PingFang HK"; font.pixelSize: 11; color: iosFilterPopup.linkageConfig.saturation.groupId > 0 ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { iosFilterPopup.editingGroupParam = "saturation"; iosFilterPopup.groupIdInput = iosFilterPopup.linkageConfig.saturation.groupId; groupIdDialog.open() } } }
                     Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.saturation.groupDirection === -1 ? "←" : "→"; font.pixelSize: 16; font.bold: true; color: iosFilterPopup.linkageConfig.saturation.groupId > 0 ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; enabled: iosFilterPopup.linkageConfig.saturation.groupId > 0; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.saturation.groupDirection *= -1; iosFilterPopup.linkageConfig = lc } } }
                     Text { text: "红外模式"; font.family: "PingFang HK"; font.pixelSize: 20; font.bold: true; color: "#E53935"; Layout.preferredWidth: 90 }
@@ -12008,13 +12104,17 @@ Rectangle {
                     Text { text: iosFilterPopup.fSaturation.toFixed(2); font.family: "PingFang HK"; font.pixelSize: 16; color: "#263238"; Layout.preferredWidth: 50 }
                     Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.saturation.brightSwitch ? "☀" : "·"; font.pixelSize: 14; color: iosFilterPopup.linkageConfig.saturation.brightSwitch ? "#FF9800" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.saturation.brightSwitch = !lc.saturation.brightSwitch; iosFilterPopup.linkageConfig = lc } } }
                     Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.saturation.brightDirection === -1 ? "←" : "→"; font.pixelSize: 16; font.bold: true; color: iosFilterPopup.linkageConfig.saturation.brightSwitch ? "#FF9800" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; enabled: iosFilterPopup.linkageConfig.saturation.brightSwitch; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.saturation.brightDirection *= -1; iosFilterPopup.linkageConfig = lc } } }
+                    Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.saturation.brightContrastSwitch ? "◆" : "·"; font.pixelSize: 14; color: iosFilterPopup.linkageConfig.saturation.brightContrastSwitch ? "#2196F3" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.saturation.brightContrastSwitch = !lc.saturation.brightContrastSwitch; iosFilterPopup.linkageConfig = lc } } }
+                    Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.saturation.brightContrastDirection === -1 ? "←" : "→"; font.pixelSize: 16; font.bold: true; color: iosFilterPopup.linkageConfig.saturation.brightContrastSwitch ? "#2196F3" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; enabled: iosFilterPopup.linkageConfig.saturation.brightContrastSwitch; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.saturation.brightContrastDirection *= -1; iosFilterPopup.linkageConfig = lc } } }
+                    Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.saturation.brightExposureSwitch ? "◇" : "·"; font.pixelSize: 14; color: iosFilterPopup.linkageConfig.saturation.brightExposureSwitch ? "#9C27B0" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.saturation.brightExposureSwitch = !lc.saturation.brightExposureSwitch; iosFilterPopup.linkageConfig = lc } } }
+                    Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.saturation.brightExposureDirection === -1 ? "←" : "→"; font.pixelSize: 16; font.bold: true; color: iosFilterPopup.linkageConfig.saturation.brightExposureSwitch ? "#9C27B0" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; enabled: iosFilterPopup.linkageConfig.saturation.brightExposureSwitch; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.saturation.brightExposureDirection *= -1; iosFilterPopup.linkageConfig = lc } } }
                 }
 
                 // ===== 曝光度滑块 (0.6/1.10/1.6, stepSize 0.02, PC 端线性倍数, 发送 log2) =====
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: 8
-                    Text { Layout.preferredWidth: 20; text: iosFilterPopup.linkageConfig.exposure.groupEnabled ? "●" : "○"; font.pixelSize: 16; color: iosFilterPopup.linkageConfig.exposure.groupEnabled ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.exposure.groupEnabled = !lc.exposure.groupEnabled; iosFilterPopup.linkageConfig = lc } } }
+                    Text { Layout.preferredWidth: 28; text: iosFilterPopup.linkageConfig.exposure.groupEnabled ? "●" : "○"; font.pixelSize: 22; color: iosFilterPopup.linkageConfig.exposure.groupEnabled ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.exposure.groupEnabled = !lc.exposure.groupEnabled; iosFilterPopup.linkageConfig = lc } } }
                     Text { Layout.preferredWidth: 30; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.exposure.groupId > 0 ? "组" + iosFilterPopup.linkageConfig.exposure.groupId : "—"; font.family: "PingFang HK"; font.pixelSize: 11; color: iosFilterPopup.linkageConfig.exposure.groupId > 0 ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { iosFilterPopup.editingGroupParam = "exposure"; iosFilterPopup.groupIdInput = iosFilterPopup.linkageConfig.exposure.groupId; groupIdDialog.open() } } }
                     Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.exposure.groupDirection === -1 ? "←" : "→"; font.pixelSize: 16; font.bold: true; color: iosFilterPopup.linkageConfig.exposure.groupId > 0 ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; enabled: iosFilterPopup.linkageConfig.exposure.groupId > 0; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.exposure.groupDirection *= -1; iosFilterPopup.linkageConfig = lc } } }
                     Text { text: "曝光度"; font.family: "PingFang HK"; font.pixelSize: 20; font.bold: true; color: "#E53935"; Layout.preferredWidth: 70 }
@@ -12065,6 +12165,10 @@ Rectangle {
                     Text { text: iosFilterPopup.fExposure.toFixed(2); font.family: "PingFang HK"; font.pixelSize: 16; color: "#263238"; Layout.preferredWidth: 50 }
                     Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.exposure.brightSwitch ? "☀" : "·"; font.pixelSize: 14; color: iosFilterPopup.linkageConfig.exposure.brightSwitch ? "#FF9800" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.exposure.brightSwitch = !lc.exposure.brightSwitch; iosFilterPopup.linkageConfig = lc } } }
                     Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.exposure.brightDirection === -1 ? "←" : "→"; font.pixelSize: 16; font.bold: true; color: iosFilterPopup.linkageConfig.exposure.brightSwitch ? "#FF9800" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; enabled: iosFilterPopup.linkageConfig.exposure.brightSwitch; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.exposure.brightDirection *= -1; iosFilterPopup.linkageConfig = lc } } }
+                    Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.exposure.brightContrastSwitch ? "◆" : "·"; font.pixelSize: 14; color: iosFilterPopup.linkageConfig.exposure.brightContrastSwitch ? "#2196F3" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.exposure.brightContrastSwitch = !lc.exposure.brightContrastSwitch; iosFilterPopup.linkageConfig = lc } } }
+                    Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.exposure.brightContrastDirection === -1 ? "←" : "→"; font.pixelSize: 16; font.bold: true; color: iosFilterPopup.linkageConfig.exposure.brightContrastSwitch ? "#2196F3" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; enabled: iosFilterPopup.linkageConfig.exposure.brightContrastSwitch; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.exposure.brightContrastDirection *= -1; iosFilterPopup.linkageConfig = lc } } }
+                    Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.exposure.brightExposureSwitch ? "◇" : "·"; font.pixelSize: 14; color: iosFilterPopup.linkageConfig.exposure.brightExposureSwitch ? "#9C27B0" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.exposure.brightExposureSwitch = !lc.exposure.brightExposureSwitch; iosFilterPopup.linkageConfig = lc } } }
+                    Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.exposure.brightExposureDirection === -1 ? "←" : "→"; font.pixelSize: 16; font.bold: true; color: iosFilterPopup.linkageConfig.exposure.brightExposureSwitch ? "#9C27B0" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; enabled: iosFilterPopup.linkageConfig.exposure.brightExposureSwitch; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.exposure.brightExposureDirection *= -1; iosFilterPopup.linkageConfig = lc } } }
                 }
 
                 Rectangle {
@@ -12096,7 +12200,7 @@ Rectangle {
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: 8
-                    Text { Layout.preferredWidth: 20; text: iosFilterPopup.linkageConfig.sharpness.groupEnabled ? "●" : "○"; font.pixelSize: 16; color: iosFilterPopup.linkageConfig.sharpness.groupEnabled ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.sharpness.groupEnabled = !lc.sharpness.groupEnabled; iosFilterPopup.linkageConfig = lc } } }
+                    Text { Layout.preferredWidth: 28; text: iosFilterPopup.linkageConfig.sharpness.groupEnabled ? "●" : "○"; font.pixelSize: 22; color: iosFilterPopup.linkageConfig.sharpness.groupEnabled ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.sharpness.groupEnabled = !lc.sharpness.groupEnabled; iosFilterPopup.linkageConfig = lc } } }
                     Text { Layout.preferredWidth: 30; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.sharpness.groupId > 0 ? "组" + iosFilterPopup.linkageConfig.sharpness.groupId : "—"; font.family: "PingFang HK"; font.pixelSize: 11; color: iosFilterPopup.linkageConfig.sharpness.groupId > 0 ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { iosFilterPopup.editingGroupParam = "sharpness"; iosFilterPopup.groupIdInput = iosFilterPopup.linkageConfig.sharpness.groupId; groupIdDialog.open() } } }
                     Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.sharpness.groupDirection === -1 ? "←" : "→"; font.pixelSize: 16; font.bold: true; color: iosFilterPopup.linkageConfig.sharpness.groupId > 0 ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; enabled: iosFilterPopup.linkageConfig.sharpness.groupId > 0; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.sharpness.groupDirection *= -1; iosFilterPopup.linkageConfig = lc } } }
                     Text { text: "清晰度(P)"; font.family: "PingFang HK"; font.pixelSize: 16; font.bold: true; color: "#E53935"; Layout.preferredWidth: 130 }
@@ -12147,6 +12251,10 @@ Rectangle {
                     Text { text: iosFilterPopup.fSharpness.toFixed(2); font.family: "PingFang HK"; font.pixelSize: 16; color: "#263238"; Layout.preferredWidth: 50 }
                     Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.sharpness.brightSwitch ? "☀" : "·"; font.pixelSize: 14; color: iosFilterPopup.linkageConfig.sharpness.brightSwitch ? "#FF9800" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.sharpness.brightSwitch = !lc.sharpness.brightSwitch; iosFilterPopup.linkageConfig = lc } } }
                     Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.sharpness.brightDirection === -1 ? "←" : "→"; font.pixelSize: 16; font.bold: true; color: iosFilterPopup.linkageConfig.sharpness.brightSwitch ? "#FF9800" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; enabled: iosFilterPopup.linkageConfig.sharpness.brightSwitch; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.sharpness.brightDirection *= -1; iosFilterPopup.linkageConfig = lc } } }
+                    Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.sharpness.brightContrastSwitch ? "◆" : "·"; font.pixelSize: 14; color: iosFilterPopup.linkageConfig.sharpness.brightContrastSwitch ? "#2196F3" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.sharpness.brightContrastSwitch = !lc.sharpness.brightContrastSwitch; iosFilterPopup.linkageConfig = lc } } }
+                    Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.sharpness.brightContrastDirection === -1 ? "←" : "→"; font.pixelSize: 16; font.bold: true; color: iosFilterPopup.linkageConfig.sharpness.brightContrastSwitch ? "#2196F3" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; enabled: iosFilterPopup.linkageConfig.sharpness.brightContrastSwitch; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.sharpness.brightContrastDirection *= -1; iosFilterPopup.linkageConfig = lc } } }
+                    Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.sharpness.brightExposureSwitch ? "◇" : "·"; font.pixelSize: 14; color: iosFilterPopup.linkageConfig.sharpness.brightExposureSwitch ? "#9C27B0" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.sharpness.brightExposureSwitch = !lc.sharpness.brightExposureSwitch; iosFilterPopup.linkageConfig = lc } } }
+                    Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.sharpness.brightExposureDirection === -1 ? "←" : "→"; font.pixelSize: 16; font.bold: true; color: iosFilterPopup.linkageConfig.sharpness.brightExposureSwitch ? "#9C27B0" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; enabled: iosFilterPopup.linkageConfig.sharpness.brightExposureSwitch; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.sharpness.brightExposureDirection *= -1; iosFilterPopup.linkageConfig = lc } } }
                 }
 
                 // ===== 白平衡(WD) — iOS 无 STOMP =====
@@ -12163,7 +12271,7 @@ Rectangle {
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: 8
-                    Text { Layout.preferredWidth: 20; text: iosFilterPopup.linkageConfig.highlightLift.groupEnabled ? "●" : "○"; font.pixelSize: 16; color: iosFilterPopup.linkageConfig.highlightLift.groupEnabled ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.highlightLift.groupEnabled = !lc.highlightLift.groupEnabled; iosFilterPopup.linkageConfig = lc } } }
+                    Text { Layout.preferredWidth: 28; text: iosFilterPopup.linkageConfig.highlightLift.groupEnabled ? "●" : "○"; font.pixelSize: 22; color: iosFilterPopup.linkageConfig.highlightLift.groupEnabled ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.highlightLift.groupEnabled = !lc.highlightLift.groupEnabled; iosFilterPopup.linkageConfig = lc } } }
                     Text { Layout.preferredWidth: 30; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.highlightLift.groupId > 0 ? "组" + iosFilterPopup.linkageConfig.highlightLift.groupId : "—"; font.family: "PingFang HK"; font.pixelSize: 11; color: iosFilterPopup.linkageConfig.highlightLift.groupId > 0 ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { iosFilterPopup.editingGroupParam = "highlightLift"; iosFilterPopup.groupIdInput = iosFilterPopup.linkageConfig.highlightLift.groupId; groupIdDialog.open() } } }
                     Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.highlightLift.groupDirection === -1 ? "←" : "→"; font.pixelSize: 16; font.bold: true; color: iosFilterPopup.linkageConfig.highlightLift.groupId > 0 ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; enabled: iosFilterPopup.linkageConfig.highlightLift.groupId > 0; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.highlightLift.groupDirection *= -1; iosFilterPopup.linkageConfig = lc } } }
                     Text { text: "逆光对比(B)"; font.family: "PingFang HK"; font.pixelSize: 16; font.bold: true; color: "#E53935"; Layout.preferredWidth: 130 }
@@ -12214,13 +12322,17 @@ Rectangle {
                     Text { text: iosFilterPopup.fHighlightLift.toFixed(2); font.family: "PingFang HK"; font.pixelSize: 16; color: "#263238"; Layout.preferredWidth: 50 }
                     Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.highlightLift.brightSwitch ? "☀" : "·"; font.pixelSize: 14; color: iosFilterPopup.linkageConfig.highlightLift.brightSwitch ? "#FF9800" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.highlightLift.brightSwitch = !lc.highlightLift.brightSwitch; iosFilterPopup.linkageConfig = lc } } }
                     Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.highlightLift.brightDirection === -1 ? "←" : "→"; font.pixelSize: 16; font.bold: true; color: iosFilterPopup.linkageConfig.highlightLift.brightSwitch ? "#FF9800" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; enabled: iosFilterPopup.linkageConfig.highlightLift.brightSwitch; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.highlightLift.brightDirection *= -1; iosFilterPopup.linkageConfig = lc } } }
+                    Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.highlightLift.brightContrastSwitch ? "◆" : "·"; font.pixelSize: 14; color: iosFilterPopup.linkageConfig.highlightLift.brightContrastSwitch ? "#2196F3" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.highlightLift.brightContrastSwitch = !lc.highlightLift.brightContrastSwitch; iosFilterPopup.linkageConfig = lc } } }
+                    Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.highlightLift.brightContrastDirection === -1 ? "←" : "→"; font.pixelSize: 16; font.bold: true; color: iosFilterPopup.linkageConfig.highlightLift.brightContrastSwitch ? "#2196F3" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; enabled: iosFilterPopup.linkageConfig.highlightLift.brightContrastSwitch; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.highlightLift.brightContrastDirection *= -1; iosFilterPopup.linkageConfig = lc } } }
+                    Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.highlightLift.brightExposureSwitch ? "◇" : "·"; font.pixelSize: 14; color: iosFilterPopup.linkageConfig.highlightLift.brightExposureSwitch ? "#9C27B0" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.highlightLift.brightExposureSwitch = !lc.highlightLift.brightExposureSwitch; iosFilterPopup.linkageConfig = lc } } }
+                    Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.highlightLift.brightExposureDirection === -1 ? "←" : "→"; font.pixelSize: 16; font.bold: true; color: iosFilterPopup.linkageConfig.highlightLift.brightExposureSwitch ? "#9C27B0" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; enabled: iosFilterPopup.linkageConfig.highlightLift.brightExposureSwitch; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.highlightLift.brightExposureDirection *= -1; iosFilterPopup.linkageConfig = lc } } }
                 }
 
                 // ===== 增益(G) — 移入滤镜联动区 =====
                 RowLayout {
                     Layout.fillWidth: true
                     spacing: 8
-                    Text { Layout.preferredWidth: 20; text: iosFilterPopup.linkageConfig.gain.groupEnabled ? "●" : "○"; font.pixelSize: 16; color: iosFilterPopup.linkageConfig.gain.groupEnabled ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.gain.groupEnabled = !lc.gain.groupEnabled; iosFilterPopup.linkageConfig = lc } } }
+                    Text { Layout.preferredWidth: 28; text: iosFilterPopup.linkageConfig.gain.groupEnabled ? "●" : "○"; font.pixelSize: 22; color: iosFilterPopup.linkageConfig.gain.groupEnabled ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.gain.groupEnabled = !lc.gain.groupEnabled; iosFilterPopup.linkageConfig = lc } } }
                     Text { Layout.preferredWidth: 30; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.gain.groupId > 0 ? "组" + iosFilterPopup.linkageConfig.gain.groupId : "—"; font.family: "PingFang HK"; font.pixelSize: 11; color: iosFilterPopup.linkageConfig.gain.groupId > 0 ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { iosFilterPopup.editingGroupParam = "gain"; iosFilterPopup.groupIdInput = iosFilterPopup.linkageConfig.gain.groupId; groupIdDialog.open() } } }
                     Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.gain.groupDirection === -1 ? "←" : "→"; font.pixelSize: 16; font.bold: true; color: iosFilterPopup.linkageConfig.gain.groupId > 0 ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; enabled: iosFilterPopup.linkageConfig.gain.groupId > 0; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.gain.groupDirection *= -1; iosFilterPopup.linkageConfig = lc } } }
                     Text { text: "增益(G)"; font.family: "PingFang HK"; font.pixelSize: 16; font.bold: true; color: "#E53935"; Layout.preferredWidth: 130 }
@@ -12274,6 +12386,10 @@ Rectangle {
                     }
                     Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.gain.brightSwitch ? "☀" : "·"; font.pixelSize: 14; color: iosFilterPopup.linkageConfig.gain.brightSwitch ? "#FF9800" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.gain.brightSwitch = !lc.gain.brightSwitch; iosFilterPopup.linkageConfig = lc } } }
                     Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.gain.brightDirection === -1 ? "←" : "→"; font.pixelSize: 16; font.bold: true; color: iosFilterPopup.linkageConfig.gain.brightSwitch ? "#FF9800" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; enabled: iosFilterPopup.linkageConfig.gain.brightSwitch; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.gain.brightDirection *= -1; iosFilterPopup.linkageConfig = lc } } }
+                    Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.gain.brightContrastSwitch ? "◆" : "·"; font.pixelSize: 14; color: iosFilterPopup.linkageConfig.gain.brightContrastSwitch ? "#2196F3" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.gain.brightContrastSwitch = !lc.gain.brightContrastSwitch; iosFilterPopup.linkageConfig = lc } } }
+                    Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.gain.brightContrastDirection === -1 ? "←" : "→"; font.pixelSize: 16; font.bold: true; color: iosFilterPopup.linkageConfig.gain.brightContrastSwitch ? "#2196F3" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; enabled: iosFilterPopup.linkageConfig.gain.brightContrastSwitch; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.gain.brightContrastDirection *= -1; iosFilterPopup.linkageConfig = lc } } }
+                    Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.gain.brightExposureSwitch ? "◇" : "·"; font.pixelSize: 14; color: iosFilterPopup.linkageConfig.gain.brightExposureSwitch ? "#9C27B0" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.gain.brightExposureSwitch = !lc.gain.brightExposureSwitch; iosFilterPopup.linkageConfig = lc } } }
+                    Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.gain.brightExposureDirection === -1 ? "←" : "→"; font.pixelSize: 16; font.bold: true; color: iosFilterPopup.linkageConfig.gain.brightExposureSwitch ? "#9C27B0" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; enabled: iosFilterPopup.linkageConfig.gain.brightExposureSwitch; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.gain.brightExposureDirection *= -1; iosFilterPopup.linkageConfig = lc } } }
                 }
 
                 Rectangle {
