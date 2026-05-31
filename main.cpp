@@ -405,15 +405,15 @@ int main(int argc, char *argv[])
     // 清空 yh.txt（统计日志）
     QFile yhFile(appDirPath + "/yh.txt");
     if (yhFile.exists()) {
-        yhFile.open(QIODevice::WriteOnly | QIODevice::Truncate);
-        yhFile.close();
+        if (yhFile.open(QIODevice::WriteOnly | QIODevice::Truncate))
+            yhFile.close();
     }
     
     // 清空 zp.txt（缩放日志）
     QFile zpFile(appDirPath + "/zp.txt");
     if (zpFile.exists()) {
-        zpFile.open(QIODevice::WriteOnly | QIODevice::Truncate);
-        zpFile.close();
+        if (zpFile.open(QIODevice::WriteOnly | QIODevice::Truncate))
+            zpFile.close();
     }
     
     // 清空 phoenix_log.txt（主日志）- 使用 Truncate 而非 Append

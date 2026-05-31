@@ -1076,7 +1076,7 @@ void CaptureManager::clearAll()
     setCurrentItemIndex(-1);
 
     if (!dirsToDelete.isEmpty()) {
-        QtConcurrent::run([dirsToDelete]() {
+        (void)QtConcurrent::run([dirsToDelete]() {
             for (const QString &dir : dirsToDelete) {
                 QDir(dir).removeRecursively();
             }
@@ -1126,7 +1126,7 @@ void CaptureManager::removeItem(int index)
     emit countChanged();
 
     if (!dirToDelete.isEmpty()) {
-        QtConcurrent::run([dirToDelete]() {
+        (void)QtConcurrent::run([dirToDelete]() {
             QDir(dirToDelete).removeRecursively();
         });
     }
@@ -1602,9 +1602,7 @@ void CaptureManager::zoomLog(const QString &msg)
     static bool opened = false;
     
     if (!opened) {
-        // 首次打开时清空文件
-        file.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text);
-        opened = true;
+        opened = file.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text);
     }
     
     if (file.isOpen()) {
