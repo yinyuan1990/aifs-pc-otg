@@ -12508,8 +12508,7 @@ Rectangle {
                     Repeater {
                         model: [
                             { label: "滤镜模式", checked: iosFilterPopup.fEnabled, action: "filter" },
-                            { label: "Video HDR", checked: iosFilterPopup.videoHDREnabled, action: "videoHDR" },
-                            { label: "自动HDR", checked: iosFilterPopup.autoHDREnabled, action: "autoHDR" }
+                            { label: "LUT模式", checked: iosFilterPopup.lutEnabled, action: "lut" }
                         ]
 
                         delegate: RowLayout {
