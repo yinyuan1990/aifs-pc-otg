@@ -11459,8 +11459,8 @@ Rectangle {
         // ⭐ 分组联动：同 groupId 的参数按百分比同步, 方向由 groupDirection 决定
         //   rawDelta: 源参数的原始值变化量（非步进数）
         function applyLinkedDelta(sourceId, rawDelta) {
-            var lc = linkageConfig
-            var sc = lc[sourceId]
+            var cfg = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig))
+            var sc = cfg[sourceId]
             if (!sc || sc.groupId === 0 || !sc.groupEnabled) return
             var sourceRange = getParamRange(sourceId)
             if (sourceRange === 0) return
@@ -11470,7 +11470,7 @@ Rectangle {
             for (var i = 0; i < params.length; i++) {
                 var tid = params[i]
                 if (tid === sourceId) continue
-                var tc = lc[tid]
+                var tc = cfg[tid]
                 if (!tc || tc.groupId !== sc.groupId || !tc.groupEnabled) continue
                 var dirMul = tc.groupDirection / sc.groupDirection
                 var targetRange = getParamRange(tid)
