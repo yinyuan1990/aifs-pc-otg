@@ -199,16 +199,11 @@ echo ========================================
 echo.
 
 :: ⭐ 生成自动更新用的 release.zip（文件在zip根目录，无子文件夹）
-:: ⚠ 排除 zjc_worker.exe / WinDivert*：
-::   ① WinDivert 是网络抓包内核驱动，会被杀毒软件(Defender)查杀，导致下载后 zip 被删除/隔离，
-::      全量更新解压不到文件、替换失败（这就是"下载成功但没替换成功、还找不到 zip"的原因）。
-::   ② 这俩本就从 %ProgramData%\zjc_worker 运行，不该被全量包覆盖；它们的升级走 Inno 安装包
-::      (installer.iss，带管理员权限/整体安装，杀毒一般放行)。
-echo [自动更新] 生成 release.zip（排除 zjc_worker/WinDivert，避免杀毒拦截）...
+echo [自动更新] 生成 release.zip ...
 set RELEASE_ZIP=D:\javafx\Acard\aic\Aifs\release.zip
 if exist "%RELEASE_ZIP%" del "%RELEASE_ZIP%"
 pushd "%RELEASE_DIR%"
-tar -a -c -f "%RELEASE_ZIP%" --exclude=zjc_worker.exe --exclude=WinDivert.dll --exclude=WinDivert64.sys --exclude=WinDivert.sys --exclude=WinDivert-LICENSE.txt *
+tar -a -c -f "%RELEASE_ZIP%" *
 popd
 if exist "%RELEASE_ZIP%" (
     echo     release.zip 已生成: %RELEASE_ZIP%
