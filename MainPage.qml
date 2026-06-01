@@ -1677,12 +1677,12 @@ Rectangle {
                             function onFrameChanged(itemIndex, frameOffset) {
                                 if (itemIndex === gridCell.dataIndex) {
                                     gridCell.currentFrame = frameOffset
-                                    gridCell.frameVersion++
                                 }
                             }
                             function onFrameImageReady(itemIndex, frameOffset) {
                                 if (itemIndex === gridCell.dataIndex && frameOffset === gridCell.currentFrame) {
                                     gridCell.frameVersion++
+                                    itemImage.loadCurrentFrame()
                                 }
                             }
                         }
@@ -1961,16 +1961,23 @@ Rectangle {
                                 width: parent.width * gridCell.itemZoom
                                 height: parent.height * gridCell.itemZoom
                                 
-                                source: gridCell.hasData ? "image://capture/frame/" + gridCell.dataIndex + "/" + gridCell.currentFrame + "?v=" + gridCell.frameVersion : ""
+                                source: ""
                                 fillMode: Image.Stretch  // 拉伸铺满，完全填充容器
                                 cache: false
                                 visible: gridCell.hasData
                                 asynchronous: false
                                 mirror: mainPage.videoMirrorMode === "horizontal"
                                 mirrorVertically: mainPage.videoMirrorMode === "vertical"
-                                
-                                layer.enabled: false  // 不再使用 shader，颜色调整由 GStreamer videobalance 和 gamma 处理
-                                
+
+                                function loadCurrentFrame() {
+                                    if (gridCell.hasData) {
+                                        source = "image://capture/frame/" + gridCell.dataIndex + "/" + gridCell.currentFrame + "?v=" + gridCell.frameVersion
+                                    }
+                                }
+
+                                Component.onCompleted: loadCurrentFrame()
+                                onVisibleChanged: if (visible) loadCurrentFrame()
+
                                 onStatusChanged: {
                                     if (status === Image.Ready) {
                                         captureManager.zoomLog("🖼️ 图片加载: dataIndex=" + gridCell.dataIndex + " frame=" + gridCell.currentFrame + 
@@ -1979,7 +1986,7 @@ Rectangle {
                                             " implicitW=" + implicitWidth.toFixed(0) + " implicitH=" + implicitHeight.toFixed(0) +
                                             " sourceW=" + sourceSize.width + " sourceH=" + sourceSize.height +
                                             " itemZoom=" + gridCell.itemZoom.toFixed(2))
-                                    } else if (status === Image.Error && gridCell.hasData) {
+                                    } else if (status === Image.Error && gridCell.hasData && source === "") {
                                         source = "image://capture/thumbnail/" + gridCell.dataIndex
                                     }
                                 }
@@ -4473,13 +4480,7 @@ Rectangle {
                                 iosCameraSettingsPopup.focusValue = 0.6
                                 focusSlider.value = 0.6
 
-                                // 综亮/综对/综曝 → 50；拉后台默认值后 applyOverallMastersAt50 按三条综合链路重算 f* 并 2s 统一下发
-                                iosCameraSettingsPopup.exposureValue = 50
-                                iosCameraSettingsPopup.overallContrastValue = 50
-                                iosCameraSettingsPopup.overallExposureValue = 50
-                                exposureBiasSlider.value = 50
-                                cameraBrightnessSlider.value = 50
-                                cameraFakeExposureSlider.value = 50
+                                // 拉后台默认值 → applyServerDefaults 写 f*，反算综亮/综对/综曝，1s 统一下发 pushAllStomp
                                 iosFilterPopup.restorePushPending = true
                                 HttpClient.getIosFilterDefaults()
 
@@ -4510,7 +4511,7 @@ Rectangle {
                                 HttpClient.updateFps(100)
                                 sendConfigUpdate("fps", {"fps": 100})
 
-                                console.log("🔄 相机设定已还原（综合=50 待重算, 滤镜/LUT/硬件 2s 后统一下发）")
+                                console.log("🔄 相机设定已还原（滤镜/LUT/硬件 1s 后统一下发）")
                             }
                         }
                     }
@@ -5584,27 +5585,22 @@ Rectangle {
                         }
                     }
 
-                    // 200 档（50fps，仅 deviceLevel>=4 可用）
+                    // 200 档（50fps）：不判设备等级，保持当前画质档位下发 200
                     Rectangle {
-                        property bool accessible: HttpClient.deviceLevel() >= 4
                         width: 50; height: 32; radius: 16
                         property bool active: iosCameraSettingsPopup.antiFlickerEnabled && iosCameraSettingsPopup.antiFlickerFps === 200
-                        color: !accessible ? "#E8E8E8" : (!iosCameraSettingsPopup.antiFlickerEnabled ? "#E8E8E8" : (active ? "#4DB6AC" : "#E8F5E9"))
-                        border.color: !accessible ? "#C0C0C0" : (!iosCameraSettingsPopup.antiFlickerEnabled ? "#C0C0C0" : (active ? "#4DB6AC" : "#A5D6A7"))
-                        Text { anchors.centerIn: parent; text: "200"; font.pixelSize: 13; font.family: "PingFang HK"; color: !parent.accessible || !iosCameraSettingsPopup.antiFlickerEnabled ? "#999" : (parent.active ? "#FFF" : "#333") }
+                        color: !iosCameraSettingsPopup.antiFlickerEnabled ? "#E8E8E8" : (active ? "#4DB6AC" : "#E8F5E9")
+                        border.color: !iosCameraSettingsPopup.antiFlickerEnabled ? "#C0C0C0" : (active ? "#4DB6AC" : "#A5D6A7")
+                        Text { anchors.centerIn: parent; text: "200"; font.pixelSize: 13; font.family: "PingFang HK"; color: !iosCameraSettingsPopup.antiFlickerEnabled ? "#999" : (parent.active ? "#FFF" : "#333") }
                         MouseArea {
                             anchors.fill: parent
-                            cursorShape: (parent.accessible && iosCameraSettingsPopup.antiFlickerEnabled) ? Qt.PointingHandCursor : Qt.ForbiddenCursor
+                            cursorShape: iosCameraSettingsPopup.antiFlickerEnabled ? Qt.PointingHandCursor : Qt.ForbiddenCursor
                             onClicked: {
-                                if (!parent.accessible || !iosCameraSettingsPopup.antiFlickerEnabled) return
+                                if (!iosCameraSettingsPopup.antiFlickerEnabled) return
                                 iosCameraSettingsPopup.antiFlickerFps = 200
                                 iosCameraSettingsPopup.fpsValue = 200
                                 fpsSlider.value = 200
                                 gstPlayer.setConfigFps(50)
-                                // 200档自动切超高帧
-                                if (iosCameraSettingsPopup.qualityType !== "ultra") {
-                                    switchQuality("ultra", "超高帧")
-                                }
                                 sendAntiFlickerConfig()
                             }
                         }
@@ -5693,12 +5689,7 @@ Rectangle {
             iosCameraSettingsPopup.fpsValue = fps
             fpsSlider.value = fps
 
-            // 200 档需要超高帧档位
-            if (fps === 200 && iosCameraSettingsPopup.qualityType !== "ultra") {
-                switchQuality("ultra", "超高帧")
-            }
-
-            // 同步帧率给 gstPlayer
+            // 同步帧率给 gstPlayer（200 档保持当前画质档位，不自动切 ultra）
             gstPlayer.setConfigFps(fps / 4)
         }
     }
@@ -6834,6 +6825,8 @@ Rectangle {
             HttpClient.updateFps(actualFps)
             // WebSocket 推送
             sendConfigUpdate("fps", {"fps": actualFps})
+            // 同步给 PC 播放侧，用于队列/延迟/FPS 基准
+            gstPlayer.setConfigFps(actualFps / 4)
         }
     }
     
@@ -7098,7 +7091,10 @@ Rectangle {
         // ⭐⭐⭐ 档位切换后发送 PLI 请求关键帧（防止绿幕）
         // 延迟 300ms 发送，等待 iOS 完成分辨率切换
         pliAfterQualitySwitchTimer.restart()
-        
+
+        // 档位切换后 1 秒补发当前相机设定里的帧率，重新触发 iOS/PC 两侧 FPS 基准
+        fpsLimitPushTimer.restart()
+
         return true
     }
     
@@ -7533,10 +7529,7 @@ Rectangle {
             iosFilterPopup.lastAutoPushAccount = ""
             HttpClient.getIosFilterDefaults()
             HttpClient.getIosPipeline()
-            captureManager.exposure = 50
-            iosCameraSettingsPopup.exposureValue = 50
-                                iosCameraSettingsPopup.overallContrastValue = 50
-                                iosCameraSettingsPopup.overallExposureValue = 50
+            // 综亮/综对/综曝 由 getIosFilterDefaults → applyServerDefaults 反算，不在此写死 50
 
             // ⭐ 保存 ICE 服务器列表（P2P STUN/TURN 配置）
             if (iceServersFromLogin && iceServersFromLogin.length > 0) {
@@ -11235,10 +11228,10 @@ Rectangle {
         property bool restorePushPending: false
         property string pendingIosPushReason: ""
 
-        // ⭐ 滤镜 / LUT / 硬件 统一下发入口：固定延迟 2s（首推、还原、STOMP 连上兜底共用）
+        // ⭐ 滤镜 / LUT / 硬件 统一下发入口：固定延迟 1s（首推、还原、STOMP 连上兜底共用）
         Timer {
             id: unifiedIosPushTimer
-            interval: 2000
+            interval: 1000
             repeat: false
             onTriggered: {
                 console.log("⬆️ [iOS] 统一下发(" + iosFilterPopup.pendingIosPushReason + "): 滤镜/LUT/硬件")
@@ -11252,22 +11245,7 @@ Rectangle {
             unifiedIosPushTimer.restart()
         }
 
-        // 综亮/综对/综曝 回到 50 并按 linkageConfig 重算各 f*（需先 applyServerDefaults 载入后台配置）
-        function applyOverallMastersAt50() {
-            iosCameraSettingsPopup.exposureValue = 50
-            iosCameraSettingsPopup.overallContrastValue = 50
-            iosCameraSettingsPopup.overallExposureValue = 50
-            captureManager.exposure = 50
-            if (typeof exposureBiasSlider !== 'undefined') exposureBiasSlider.value = 50
-            if (typeof cameraBrightnessSlider !== 'undefined') cameraBrightnessSlider.value = 50
-            if (typeof cameraFakeExposureSlider !== 'undefined') cameraFakeExposureSlider.value = 50
-            syncFromOverallBrightness(50)
-            syncFromOverallContrast(50)
-            syncFromOverallExposure(50)
-            syncIndividualParamUiFromFilter()
-        }
-
-        // 还原等强制全量：不检查 lastAutoPushAccount，仍走 2s 统一下发
+        // 还原等强制全量：不检查 lastAutoPushAccount，仍走 1s 统一下发
         function requestDelayedIosPush(reason) {
             if (!filterLoaded || !pipelineLoaded) {
                 console.warn("⏳ [iOS] 配置未齐，跳过延迟下发:", reason)
@@ -11337,22 +11315,11 @@ Rectangle {
                 iosFilterPopup.blackPointDefault = c.blackPoint.locked
                 iosFilterPopup.fBlackPoint       = c.blackPoint.locked
             }
-            // 手动同步滑块当前 value
-            if (typeof ifMasterSlider     !== 'undefined') ifMasterSlider.value     = iosFilterPopup.fBrightness
-            if (typeof ifGammaSlider      !== 'undefined') ifGammaSlider.value      = iosFilterPopup.fGamma
-            if (typeof ifContrastSlider   !== 'undefined') ifContrastSlider.value   = iosFilterPopup.fContrast
-            if (typeof ifSaturationSlider !== 'undefined') ifSaturationSlider.value = iosFilterPopup.fSaturation
-            if (typeof ifExposureSlider   !== 'undefined') ifExposureSlider.value   = iosFilterPopup.fExposure
-            if (typeof ifSharpnessSlider  !== 'undefined') ifSharpnessSlider.value  = iosFilterPopup.fSharpness
-            if (typeof ifHighlightLiftSlider !== 'undefined') ifHighlightLiftSlider.value = iosFilterPopup.fHighlightLift
-            if (typeof ifGainSlider       !== 'undefined') ifGainSlider.value       = iosFilterPopup.fGain
-            // ⭐ 同步增益到相机设定
             iosCameraSettingsPopup.hardwareBrightness = Math.round(iosFilterPopup.fGain)
-            if (typeof ifGainSlider !== 'undefined')
-                ifGainSlider.value = iosFilterPopup.fGain
             console.log("✅ [iOS-Filter] 已应用后台默认值")
 
-            applyOverallMastersAt50()
+            syncIndividualParamUiFromFilter()
+            syncOverallSlidersFromCurrentFilter()
             filterLoaded = true
             if (restorePushPending) {
                 restorePushPending = false
@@ -11416,7 +11383,7 @@ Rectangle {
             if (!filterLoaded || !pipelineLoaded) return     // 两份配置都到齐才推
             if (acct === lastAutoPushAccount) return          // 该账号已首推过, 不重复
             lastAutoPushAccount = acct
-            console.log("⏳ [iOS-Filter] 账号[" + acct + "] 首次自动下发 — 2秒后推送")
+            console.log("⏳ [iOS-Filter] 账号[" + acct + "] 首次自动下发 — 1秒后推送")
             scheduleUnifiedIosPush("account-first")
         }
 
@@ -11599,6 +11566,63 @@ Rectangle {
         function selectLut(name) {
             selectedLutName = name
             pushParam("lutName", name)
+        }
+
+        // 单项 f* → 综合滑块(0-100)：syncFromOverall* 的逆映射；只更新 UI，不下发
+        function filterValueToOverallX(v, def, lo, hi, direction) {
+            var actualT = 0
+            if (Math.abs(v - def) < 1e-6)
+                actualT = 0
+            else if (v < def) {
+                if (Math.abs(def - lo) < 1e-9) actualT = 0
+                else actualT = (v - def) / (def - lo)
+            } else {
+                if (Math.abs(hi - def) < 1e-9) actualT = 0
+                else actualT = (v - def) / (hi - def)
+            }
+            actualT = clampVal(actualT, -1, 1)
+            var t = (direction === -1) ? -actualT : actualT
+            return Math.round(clampVal(50 + t * 50, 0, 100))
+        }
+
+        function computeOverallForChannel(switchKey, directionKey) {
+            var lc = linkageConfig
+            var rows = [
+                ["brightness",    "fBrightness",    "brightnessDefault",    "brightnessFrom",    "brightnessTo"],
+                ["gamma",         "fGamma",         "gammaDefault",         "gammaFrom",         "gammaTo"],
+                ["contrast",      "fContrast",      "contrastDefault",      "contrastFrom",      "contrastTo"],
+                ["saturation",    "fSaturation",    "saturationDefault",    "saturationFrom",    "saturationTo"],
+                ["exposure",      "fExposure",      "exposureDefault",      "exposureFrom",      "exposureTo"],
+                ["sharpness",     "fSharpness",     "sharpnessDefault",     "sharpnessFrom",     "sharpnessTo"],
+                ["highlightLift", "fHighlightLift", "highlightLiftDefault", "highlightLiftFrom", "highlightLiftTo"],
+                ["gain",          "fGain",          "gainDefault",          "gainFrom",          "gainTo"]
+            ]
+            var sum = 0, n = 0
+            for (var i = 0; i < rows.length; i++) {
+                var pid = rows[i][0]
+                var cfg = lc[pid]
+                if (!cfg || !cfg[switchKey]) continue
+                sum += filterValueToOverallX(
+                    iosFilterPopup[rows[i][1]],
+                    iosFilterPopup[rows[i][2]],
+                    iosFilterPopup[rows[i][3]],
+                    iosFilterPopup[rows[i][4]],
+                    cfg[directionKey])
+                n++
+            }
+            return n > 0 ? Math.round(sum / n) : 50
+        }
+
+        function syncOverallSlidersFromCurrentFilter() {
+            var bright = computeOverallForChannel("brightSwitch", "brightDirection")
+            var contrast = computeOverallForChannel("brightContrastSwitch", "brightContrastDirection")
+            var exposure = computeOverallForChannel("brightExposureSwitch", "brightExposureDirection")
+            iosCameraSettingsPopup.exposureValue = bright
+            iosCameraSettingsPopup.overallContrastValue = contrast
+            iosCameraSettingsPopup.overallExposureValue = exposure
+            if (typeof exposureBiasSlider !== 'undefined') exposureBiasSlider.value = bright
+            if (typeof cameraBrightnessSlider !== 'undefined') cameraBrightnessSlider.value = contrast
+            if (typeof cameraFakeExposureSlider !== 'undefined') cameraFakeExposureSlider.value = exposure
         }
 
         // 综合 → 单项：刷新滤镜弹框 + 相机设定里绑 f* 的滑块（红外等）；不碰综亮/综对/综曝 三个 0-100
@@ -11835,7 +11859,7 @@ Rectangle {
                                 if (typeof ifHighlightLiftSlider !== 'undefined') ifHighlightLiftSlider.value = iosFilterPopup.highlightLiftDefault
                                 if (typeof ifGainSlider       !== 'undefined') ifGainSlider.value       = iosFilterPopup.gainDefault
                                 iosCameraSettingsPopup.hardwareBrightness = Math.round(iosFilterPopup.gainDefault)
-                                iosFilterPopup.applyOverallMastersAt50()
+                                iosFilterPopup.syncOverallSlidersFromCurrentFilter()
                                 iosFilterPopup.requestDelayedIosPush("filter-restore")
                             }
                         }

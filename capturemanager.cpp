@@ -1133,7 +1133,7 @@ void CaptureManager::gotoFrame(int itemIndex, int frameOffset)
     emit frameChanged(itemIndex, frameOffset);
 
     scheduleFrameDecode(itemIndex, frameOffset);
-    for (int d = -2; d <= 2; ++d) {
+    for (int d = -1; d <= 1; ++d) {
         if (d == 0) continue;
         const int off = frameOffset + d;
         if (off >= 0 && off < totalFrames) {
