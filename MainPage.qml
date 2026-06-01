@@ -5219,7 +5219,7 @@ Rectangle {
                 }
             }
 
-            // 第7行：红外模式（独立调节，不受综合亮度联动影响）
+            // 第7行：红外模式（绑 fSaturation；若后台勾选综亮/综对/综曝 则随对应综合滑块联动）
             RowLayout {
                 Layout.fillWidth: true
                 spacing: 10
@@ -11431,6 +11431,7 @@ Rectangle {
                 var nv = clampVal(val, saturationFrom, saturationTo)
                 prevSaturation = nv; fSaturation = nv
                 if (typeof ifSaturationSlider !== 'undefined') ifSaturationSlider.value = nv
+                if (typeof cameraSaturationSlider !== 'undefined') cameraSaturationSlider.value = nv
                 pushParam("saturation", nv)
             } else if (pid === "exposure") {
                 var nv = clampVal(val, exposureFrom, exposureTo)
@@ -11557,6 +11558,19 @@ Rectangle {
             pushParam("lutName", name)
         }
 
+        // 综合 → 单项：刷新滤镜弹框 + 相机设定里绑 f* 的滑块（红外等）；不碰综亮/综对/综曝 三个 0-100
+        function syncIndividualParamUiFromFilter() {
+            if (typeof ifMasterSlider     !== 'undefined') ifMasterSlider.value     = fBrightness
+            if (typeof ifGammaSlider      !== 'undefined') ifGammaSlider.value      = fGamma
+            if (typeof ifContrastSlider   !== 'undefined') ifContrastSlider.value   = fContrast
+            if (typeof ifSaturationSlider !== 'undefined') ifSaturationSlider.value = fSaturation
+            if (typeof ifExposureSlider   !== 'undefined') ifExposureSlider.value   = fExposure
+            if (typeof ifSharpnessSlider  !== 'undefined') ifSharpnessSlider.value  = fSharpness
+            if (typeof ifHighlightLiftSlider !== 'undefined') ifHighlightLiftSlider.value = fHighlightLift
+            if (typeof ifGainSlider       !== 'undefined') ifGainSlider.value       = fGain
+            if (typeof cameraSaturationSlider !== 'undefined') cameraSaturationSlider.value = fSaturation
+        }
+
         // ⭐ 综合亮度(0-100) → 驱动所有 brightSwitch=true 的参数
         //   X=0 → from (最暗), X=50 → default (出厂), X=100 → to (最亮)
         //   方向由 brightDirection 决定: -1 时 X 增大→值减小, 1 时 X 增大→值增大
@@ -11586,16 +11600,7 @@ Rectangle {
             setOne("sharpness",     "fSharpness",     "prevSharpness",     "sharpnessDefault",     "sharpnessFrom",     "sharpnessTo")
             setOne("highlightLift", "fHighlightLift", "prevHighlightLift", "highlightLiftDefault", "highlightLiftFrom", "highlightLiftTo")
             setOne("gain",          "fGain",          "prevGain",          "gainDefault",          "gainFrom",          "gainTo")
-            // 同步滑块
-            if (typeof ifMasterSlider     !== 'undefined') ifMasterSlider.value     = iosFilterPopup.fBrightness
-            if (typeof ifGammaSlider      !== 'undefined') ifGammaSlider.value      = iosFilterPopup.fGamma
-            if (typeof ifContrastSlider   !== 'undefined') ifContrastSlider.value   = iosFilterPopup.fContrast
-            if (typeof ifSaturationSlider !== 'undefined') ifSaturationSlider.value = iosFilterPopup.fSaturation
-            if (typeof ifExposureSlider   !== 'undefined') ifExposureSlider.value   = iosFilterPopup.fExposure
-            if (typeof ifSharpnessSlider  !== 'undefined') ifSharpnessSlider.value  = iosFilterPopup.fSharpness
-            if (typeof ifHighlightLiftSlider !== 'undefined') ifHighlightLiftSlider.value = iosFilterPopup.fHighlightLift
-            if (typeof ifGainSlider       !== 'undefined') ifGainSlider.value       = iosFilterPopup.fGain
-            // 综亮/综对/综曝 三个 0-100 主旋钮各自独立，不在此回写相机设定弹框滑块
+            syncIndividualParamUiFromFilter()
         }
 
         // ⭐ 综合亮度-对比度(0-100) → 驱动所有 brightContrastSwitch=true 的参数
@@ -11625,14 +11630,7 @@ Rectangle {
             setOne("sharpness",     "fSharpness",     "prevSharpness",     "sharpnessDefault",     "sharpnessFrom",     "sharpnessTo")
             setOne("highlightLift", "fHighlightLift", "prevHighlightLift", "highlightLiftDefault", "highlightLiftFrom", "highlightLiftTo")
             setOne("gain",          "fGain",          "prevGain",          "gainDefault",          "gainFrom",          "gainTo")
-            if (typeof ifMasterSlider     !== 'undefined') ifMasterSlider.value     = iosFilterPopup.fBrightness
-            if (typeof ifGammaSlider      !== 'undefined') ifGammaSlider.value      = iosFilterPopup.fGamma
-            if (typeof ifContrastSlider   !== 'undefined') ifContrastSlider.value   = iosFilterPopup.fContrast
-            if (typeof ifSaturationSlider !== 'undefined') ifSaturationSlider.value = iosFilterPopup.fSaturation
-            if (typeof ifExposureSlider   !== 'undefined') ifExposureSlider.value   = iosFilterPopup.fExposure
-            if (typeof ifSharpnessSlider  !== 'undefined') ifSharpnessSlider.value  = iosFilterPopup.fSharpness
-            if (typeof ifHighlightLiftSlider !== 'undefined') ifHighlightLiftSlider.value = iosFilterPopup.fHighlightLift
-            if (typeof ifGainSlider       !== 'undefined') ifGainSlider.value       = iosFilterPopup.fGain
+            syncIndividualParamUiFromFilter()
         }
 
         // ⭐ 综合亮度-曝光度(0-100) → 驱动所有 brightExposureSwitch=true 的参数
@@ -11662,18 +11660,10 @@ Rectangle {
             setOne("sharpness",     "fSharpness",     "prevSharpness",     "sharpnessDefault",     "sharpnessFrom",     "sharpnessTo")
             setOne("highlightLift", "fHighlightLift", "prevHighlightLift", "highlightLiftDefault", "highlightLiftFrom", "highlightLiftTo")
             setOne("gain",          "fGain",          "prevGain",          "gainDefault",          "gainFrom",          "gainTo")
-            if (typeof ifMasterSlider     !== 'undefined') ifMasterSlider.value     = iosFilterPopup.fBrightness
-            if (typeof ifGammaSlider      !== 'undefined') ifGammaSlider.value      = iosFilterPopup.fGamma
-            if (typeof ifContrastSlider   !== 'undefined') ifContrastSlider.value   = iosFilterPopup.fContrast
-            if (typeof ifSaturationSlider !== 'undefined') ifSaturationSlider.value = iosFilterPopup.fSaturation
-            if (typeof ifExposureSlider   !== 'undefined') ifExposureSlider.value   = iosFilterPopup.fExposure
-            if (typeof ifSharpnessSlider  !== 'undefined') ifSharpnessSlider.value  = iosFilterPopup.fSharpness
-            if (typeof ifHighlightLiftSlider !== 'undefined') ifHighlightLiftSlider.value = iosFilterPopup.fHighlightLift
-            if (typeof ifGainSlider       !== 'undefined') ifGainSlider.value       = iosFilterPopup.fGain
+            syncIndividualParamUiFromFilter()
         }
 
-        // ⭐ 相机设定弹框里 红外模式(saturation) 滑块用这个
-        //    特点: 只设自己一个底层值 + 推 iOS
+        // ⭐ 相机设定弹框里 红外模式(saturation) 等单项滑块：只改 f* + 推 iOS，不反写综亮/综对/综曝
         function syncSingle(ptype, v) {
             if (ptype === "brightness") {
                 v = clampVal(v, brightnessFrom, brightnessTo)
@@ -11689,7 +11679,6 @@ Rectangle {
                 v = clampVal(v, saturationFrom, saturationTo)
                 fSaturation = v;  prevSaturation = v
                 if (typeof ifSaturationSlider !== 'undefined') ifSaturationSlider.value = v
-                // ⭐ Bug3 修复：同步更新相机设定的"红外模式"滑块
                 if (typeof cameraSaturationSlider !== 'undefined') cameraSaturationSlider.value = v
                 pushParam("saturation", v)
             }
