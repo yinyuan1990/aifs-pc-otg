@@ -4473,15 +4473,14 @@ Rectangle {
                                 iosCameraSettingsPopup.focusValue = 0.6
                                 focusSlider.value = 0.6
 
-                                // 综合亮度：回中点 50，参照登录逻辑（onLoginSuccess 也是这样做）
-                                captureManager.exposure = 50
+                                // 综亮/综对/综曝 → 50；拉后台默认值后 applyOverallMastersAt50 按三条综合链路重算 f* 并 2s 统一下发
                                 iosCameraSettingsPopup.exposureValue = 50
                                 iosCameraSettingsPopup.overallContrastValue = 50
                                 iosCameraSettingsPopup.overallExposureValue = 50
                                 exposureBiasSlider.value = 50
-                                iosFilterPopup.syncFromOverallBrightness(50)
-
-                                // 对比度 / 曝光度 / 红外模式 → 重新拉服务器默认值（与登录后行为一致）
+                                cameraBrightnessSlider.value = 50
+                                cameraFakeExposureSlider.value = 50
+                                iosFilterPopup.restorePushPending = true
                                 HttpClient.getIosFilterDefaults()
 
                                 // 清晰度：50
@@ -4511,7 +4510,7 @@ Rectangle {
                                 HttpClient.updateFps(100)
                                 sendConfigUpdate("fps", {"fps": 100})
 
-                                console.log("🔄 相机设定已还原（综合亮度=50, fps=100, 抗频闪关闭, 色彩参数走服务器默认值）")
+                                console.log("🔄 相机设定已还原（综合=50 待重算, 滤镜/LUT/硬件 2s 后统一下发）")
                             }
                         }
                     }
@@ -11233,6 +11232,49 @@ Rectangle {
         property var linkageConfigDefault: null
         property string editingGroupParam: ""
         property int groupIdInput: 0
+        property bool restorePushPending: false
+        property string pendingIosPushReason: ""
+
+        // ⭐ 滤镜 / LUT / 硬件 统一下发入口：固定延迟 2s（首推、还原、STOMP 连上兜底共用）
+        Timer {
+            id: unifiedIosPushTimer
+            interval: 2000
+            repeat: false
+            onTriggered: {
+                console.log("⬆️ [iOS] 统一下发(" + iosFilterPopup.pendingIosPushReason + "): 滤镜/LUT/硬件")
+                iosFilterPopup.pushAllStomp()
+                iosFilterPopup.pendingIosPushReason = ""
+            }
+        }
+
+        function scheduleUnifiedIosPush(reason) {
+            pendingIosPushReason = reason || ""
+            unifiedIosPushTimer.restart()
+        }
+
+        // 综亮/综对/综曝 回到 50 并按 linkageConfig 重算各 f*（需先 applyServerDefaults 载入后台配置）
+        function applyOverallMastersAt50() {
+            iosCameraSettingsPopup.exposureValue = 50
+            iosCameraSettingsPopup.overallContrastValue = 50
+            iosCameraSettingsPopup.overallExposureValue = 50
+            captureManager.exposure = 50
+            if (typeof exposureBiasSlider !== 'undefined') exposureBiasSlider.value = 50
+            if (typeof cameraBrightnessSlider !== 'undefined') cameraBrightnessSlider.value = 50
+            if (typeof cameraFakeExposureSlider !== 'undefined') cameraFakeExposureSlider.value = 50
+            syncFromOverallBrightness(50)
+            syncFromOverallContrast(50)
+            syncFromOverallExposure(50)
+            syncIndividualParamUiFromFilter()
+        }
+
+        // 还原等强制全量：不检查 lastAutoPushAccount，仍走 2s 统一下发
+        function requestDelayedIosPush(reason) {
+            if (!filterLoaded || !pipelineLoaded) {
+                console.warn("⏳ [iOS] 配置未齐，跳过延迟下发:", reason)
+                return
+            }
+            scheduleUnifiedIosPush(reason || "manual")
+        }
 
         // ⭐ 应用从后台拉到的默认配置 JSON
         //   后端 GET /api/config/ios-filter-defaults 返回 { config: "<JSON>" }
@@ -11310,13 +11352,14 @@ Rectangle {
                 ifGainSlider.value = iosFilterPopup.fGain
             console.log("✅ [iOS-Filter] 已应用后台默认值")
 
-            iosCameraSettingsPopup.exposureValue = 50
-                                iosCameraSettingsPopup.overallContrastValue = 50
-                                iosCameraSettingsPopup.overallExposureValue = 50
-            captureManager.exposure = 50
-
-            iosFilterPopup.filterLoaded = true
-            iosFilterPopup.tryAutoPush()
+            applyOverallMastersAt50()
+            filterLoaded = true
+            if (restorePushPending) {
+                restorePushPending = false
+                requestDelayedIosPush("camera-restore")
+            } else {
+                tryAutoPush()
+            }
         }
 
         Component.onCompleted: {
@@ -11373,8 +11416,8 @@ Rectangle {
             if (!filterLoaded || !pipelineLoaded) return     // 两份配置都到齐才推
             if (acct === lastAutoPushAccount) return          // 该账号已首推过, 不重复
             lastAutoPushAccount = acct
-            console.log("⬆️ [iOS-Filter] 账号[" + acct + "] 首次自动下发")
-            pushAllStomp()
+            console.log("⏳ [iOS-Filter] 账号[" + acct + "] 首次自动下发 — 2秒后推送")
+            scheduleUnifiedIosPush("account-first")
         }
 
         // 内部 prev 值 — 用于计算每次 onMoved 的 delta (slider 的 value 已经是新值)
@@ -11792,10 +11835,8 @@ Rectangle {
                                 if (typeof ifHighlightLiftSlider !== 'undefined') ifHighlightLiftSlider.value = iosFilterPopup.highlightLiftDefault
                                 if (typeof ifGainSlider       !== 'undefined') ifGainSlider.value       = iosFilterPopup.gainDefault
                                 iosCameraSettingsPopup.hardwareBrightness = Math.round(iosFilterPopup.gainDefault)
-                                iosCameraSettingsPopup.exposureValue = 50
-                                iosCameraSettingsPopup.overallContrastValue = 50
-                                iosCameraSettingsPopup.overallExposureValue = 50
-                                iosFilterPopup.pushAllStomp()
+                                iosFilterPopup.applyOverallMastersAt50()
+                                iosFilterPopup.requestDelayedIosPush("filter-restore")
                             }
                         }
                     }
@@ -12049,10 +12090,14 @@ Rectangle {
                             var delta = value - iosFilterPopup.prevSaturation
                             iosFilterPopup.prevSaturation = value
                             iosFilterPopup.fSaturation = value
+                            if (typeof cameraSaturationSlider !== 'undefined') cameraSaturationSlider.value = value
                             iosFilterPopup.pushParam("saturation", value)
                             iosFilterPopup.applyLinkedDelta("saturation", delta)
                         }
-                        onPressedChanged: if (!pressed) iosFilterPopup.pushParam("saturation", value)
+                        onPressedChanged: if (!pressed) {
+                            if (typeof cameraSaturationSlider !== 'undefined') cameraSaturationSlider.value = value
+                            iosFilterPopup.pushParam("saturation", value)
+                        }
                         background: Rectangle {
                             x: ifSaturationSlider.leftPadding
                             y: ifSaturationSlider.topPadding + ifSaturationSlider.availableHeight / 2 - height / 2
