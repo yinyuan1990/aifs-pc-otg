@@ -2364,8 +2364,8 @@ Rectangle {
                                     { label: "高清", type: "standard" },
                                     { label: "超清", type: "high" },
                                     { label: "超高清", type: "p4k" },
-                                    { label: "超高帧", type: "ultra" },
-                                    { label: "超快帧", type: "ultrafast" }
+                                    { label: "超高帧", type: "ultra" }
+                                    // 超快帧：暂不开放，已从档位列表隐藏
                                 ]
                                 
                                 Rectangle {
@@ -5482,11 +5482,12 @@ Rectangle {
                         }
                     }
 
-                    // 超快帧（等级4+后端开关，240fps高速模式）
+                    // 超快帧（等级4+后端开关，240fps高速模式）— 暂不开放，UI 隐藏
                     Rectangle {
+                        visible: false
+                        width: 0
+                        height: 0
                         property bool accessible: isQualityAccessible("超快帧")
-                        width: 60
-                        height: 32
                         radius: 16
                         color: !accessible ? "#E8E8E8" : (mainPage.highSpeed240Enabled ? "#4DB6AC" : "#E8F5E9")
                         border.color: !accessible ? "#C0C0C0" : (mainPage.highSpeed240Enabled ? "#4DB6AC" : "#A5D6A7")
