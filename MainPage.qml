@@ -1160,7 +1160,35 @@ Rectangle {
                         }
                     }
                 }
-                
+
+                // ⭐ 滚轮帧数（步长）显示：默认1，按 F5–F8 跟随 frameStep 变化
+                Rectangle {
+                    width: wheelStepText.width + 16
+                    height: 24
+                    radius: 4
+                    color: "#E8F5E9"
+                    border.color: "#A5D6A7"
+                    border.width: 1
+                    anchors.verticalCenter: parent.verticalCenter
+
+                    Text {
+                        id: wheelStepText
+                        anchors.centerIn: parent
+                        text: "滚轮帧数: " + mainPage.frameStep
+                        font.family: "PingFang HK"
+                        font.pixelSize: 12
+                        color: "#263238"
+                    }
+
+                    MouseArea {
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        ToolTip.visible: containsMouse
+                        ToolTip.text: "F5=1 F6=2 F7=3 F8=4 帧"
+                        ToolTip.delay: 300
+                    }
+                }
+
             }
             
             // 中间弹性空间
