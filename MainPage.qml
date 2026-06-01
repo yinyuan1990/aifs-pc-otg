@@ -5585,18 +5585,19 @@ Rectangle {
                         }
                     }
 
-                    // 200 档（50fps）：不判设备等级，保持当前画质档位下发 200
+                    // 200 档（50fps）：deviceLevel<4 灰显不可点；可选时保持当前画质档位下发，不切 ultra
                     Rectangle {
+                        property bool accessible: HttpClient.deviceLevel() >= 4
                         width: 50; height: 32; radius: 16
                         property bool active: iosCameraSettingsPopup.antiFlickerEnabled && iosCameraSettingsPopup.antiFlickerFps === 200
-                        color: !iosCameraSettingsPopup.antiFlickerEnabled ? "#E8E8E8" : (active ? "#4DB6AC" : "#E8F5E9")
-                        border.color: !iosCameraSettingsPopup.antiFlickerEnabled ? "#C0C0C0" : (active ? "#4DB6AC" : "#A5D6A7")
-                        Text { anchors.centerIn: parent; text: "200"; font.pixelSize: 13; font.family: "PingFang HK"; color: !iosCameraSettingsPopup.antiFlickerEnabled ? "#999" : (parent.active ? "#FFF" : "#333") }
+                        color: !accessible ? "#E8E8E8" : (!iosCameraSettingsPopup.antiFlickerEnabled ? "#E8E8E8" : (active ? "#4DB6AC" : "#E8F5E9"))
+                        border.color: !accessible ? "#C0C0C0" : (!iosCameraSettingsPopup.antiFlickerEnabled ? "#C0C0C0" : (active ? "#4DB6AC" : "#A5D6A7"))
+                        Text { anchors.centerIn: parent; text: "200"; font.pixelSize: 13; font.family: "PingFang HK"; color: !parent.accessible || !iosCameraSettingsPopup.antiFlickerEnabled ? "#999" : (parent.active ? "#FFF" : "#333") }
                         MouseArea {
                             anchors.fill: parent
-                            cursorShape: iosCameraSettingsPopup.antiFlickerEnabled ? Qt.PointingHandCursor : Qt.ForbiddenCursor
+                            cursorShape: (parent.accessible && iosCameraSettingsPopup.antiFlickerEnabled) ? Qt.PointingHandCursor : Qt.ForbiddenCursor
                             onClicked: {
-                                if (!iosCameraSettingsPopup.antiFlickerEnabled) return
+                                if (!parent.accessible || !iosCameraSettingsPopup.antiFlickerEnabled) return
                                 iosCameraSettingsPopup.antiFlickerFps = 200
                                 iosCameraSettingsPopup.fpsValue = 200
                                 fpsSlider.value = 200
