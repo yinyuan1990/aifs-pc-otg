@@ -1677,6 +1677,9 @@ Rectangle {
                             function onFrameChanged(itemIndex, frameOffset) {
                                 if (itemIndex === gridCell.dataIndex) {
                                     gridCell.currentFrame = frameOffset
+                                    // 已缓存 → 立即换图(无白屏)；未缓存 → 保持当前画面, 等 frameImageReady 再换
+                                    if (captureManager.isFrameCached(itemIndex, frameOffset))
+                                        itemImage.loadCurrentFrame()
                                 }
                             }
                             function onFrameImageReady(itemIndex, frameOffset) {

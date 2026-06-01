@@ -1287,6 +1287,14 @@ QImage CaptureManager::getFrameImage(int itemIndex, int frameOffset)
     return QImage();
 }
 
+bool CaptureManager::isFrameCached(int itemIndex, int frameOffset)
+{
+    if (itemIndex < 0 || itemIndex >= m_items.size()) return false;
+    QMutexLocker decodeLock(&m_decodeMutex);
+    QImage tmp;
+    return tryGetFrameCache(itemIndex, frameOffset, &tmp);
+}
+
 void CaptureManager::setVideoRotation(int rotation)
 {
     rotation = ((rotation % 360) + 360) % 360;

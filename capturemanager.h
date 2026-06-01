@@ -330,6 +330,9 @@ public:
     
     // 获取帧图像
     Q_INVOKABLE QImage getFrameImage(int itemIndex, int frameOffset);
+
+    // 该帧是否已在解码缓存中（QML 用来决定立即换图还是等 frameImageReady）
+    Q_INVOKABLE bool isFrameCached(int itemIndex, int frameOffset);
     
     // 当前帧索引
     Q_INVOKABLE qint64 currentFrameIndex() const;
