@@ -162,10 +162,11 @@ struct CaptureItem {
     qint64 endIndex = 0;        // 结束帧索引
     int currentOffset = 0;      // 当前显示偏移
     qint64 timestamp = 0;
-    QString naluDir;            // NALU 文件磁盘目录
-    QVector<int> keyFrameOffsets; // 关键帧偏移列表（相对于 startIndex）
-    int savedFrameCount = 0;    // 已保存到磁盘的帧数
-    QImage liveSnapshot;        // 抓拍瞬间的直播画面（永久兜底）
+    QString naluDir;            // 旧 NALU 目录（兼容旧 item）
+    QVector<int> keyFrameOffsets; // 旧关键帧偏移列表（兼容旧 item）
+    int savedFrameCount = 0;    // 已保存/可用帧数
+    int h264ValidRangeId = -1;  // H.264 独立帧文件保护范围
+    QImage liveSnapshot;        // 抓拍瞬间的直播画面（仅缩略/首屏兜底）
 
     int totalFrames() const { return static_cast<int>(endIndex - startIndex + 1); }
     int eventOffset() const { return static_cast<int>(eventIndex - startIndex); }

@@ -11,6 +11,8 @@
 #include <QProcess>
 #include <QTimer>
 #include <atomic>
+#include <QSet>
+#include <QHash>
 #include "naluframestore.h"
 #include <gst/gst.h>
 #include <gst/app/gstappsrc.h>
@@ -64,6 +66,17 @@ public:
     // NALU 帧存储（H.264 ring buffer，替代 JPEG 文件）
     NaluFrameStore* naluFrameStore() const { return m_naluStore; }
     QByteArray spsPpsAnnexB() const { return m_spsPpsAnnexB; }
+
+    QString h264FrameDirectory() const { return m_h264FrameDirectory; }
+    QString h264SessionPrefix() const { return m_h264SessionPrefix; }
+    QString h264FramePath(qint64 frameIndex) const;
+    bool hasH264Frame(qint64 frameIndex) const;
+    QByteArray readH264Frame(qint64 frameIndex) const;
+    qint64 newestH264Frame() const { return m_newestH264Frame.load(std::memory_order_acquire); }
+    qint64 oldestH264Frame() const { return m_oldestH264Frame.load(std::memory_order_acquire); }
+    int registerH264ValidRange(qint64 start, qint64 end);
+    void updateH264ValidRange(int id, qint64 start, qint64 end);
+    void unregisterH264ValidRange(int id);
 
     QImage grabCurrentFrame();
 
@@ -138,7 +151,9 @@ signals:
     void webrtcDisconnected();
     void webrtcStatusChanged(const QString &status);
     void naluReady(const QByteArray &nalu, bool isKeyFrame);  // 兼容旧接口
-    
+    void h264FrameStored(qint64 frameIndex);
+    void h264FrameMissing(qint64 frameIndex);
+
     // P2P 信令信号（发给 WebSocket 中转）
     void sendSdpAnswer(const QString &sdp, const QString &toDevice);
     void sendIceCandidate(const QString &candidate, const QString &sdpMid, int sdpMLineIndex, const QString &toDevice);
@@ -174,6 +189,8 @@ private:
     static GstFlowReturn onNaluStoreSample(GstAppSink *sink, gpointer userData);
 
     bool linkNaluTeeBranch();
+    bool createH264FrameBranch();
+    bool linkRawFrameTeeBranch(GstElement *upstreamTail, GstElement *displayHead);
     void extractSpsPpsFromCaps();
     void storeNaluFromBuffer(GstBuffer *buffer);
     static void onPadAdded(GstElement *element, GstPad *pad, gpointer userData);
@@ -212,7 +229,37 @@ private:
     // 显示分支
     GstElement *m_displayQueue = nullptr;  // 显示队列
     GstElement *m_clockSync = nullptr;
-    
+
+    // 独立 H.264 帧文件保存分支（raw frame 同源 tee → all-I encoder → appsink writer）
+    GstElement *m_rawFrameTee = nullptr;
+    GstElement *m_h264FrameQueue = nullptr;
+    GstElement *m_h264FrameConvert = nullptr;
+    GstElement *m_h264FrameEncoder = nullptr;
+    GstElement *m_h264FrameParse = nullptr;
+    GstElement *m_h264FrameCaps = nullptr;
+    GstElement *m_h264FrameAppsink = nullptr;
+    GstPad *m_rawFrameTeePadDisplay = nullptr;
+    GstPad *m_rawFrameTeePadSave = nullptr;
+    QString m_h264FrameEncoderName;
+    QString m_h264FrameDirectory;
+    QString m_h264SessionPrefix;
+    mutable QMutex m_h264FrameMutex;
+    QList<qint64> m_pendingH264FrameIndexes;
+    QSet<qint64> m_h264AvailableFrames;
+    QHash<int, QPair<qint64, qint64>> m_h264ValidRanges;
+    int m_nextH264ValidRangeId = 1;
+    std::atomic<qint64> m_nextH264FrameIndex{0};
+    std::atomic<qint64> m_oldestH264Frame{-1};
+    std::atomic<qint64> m_newestH264Frame{-1};
+    static GstFlowReturn onH264FrameSample(GstAppSink *sink, gpointer userData);
+    bool writeH264Frame(qint64 frameIndex, const QByteArray &data);
+    void resetH264FrameState();
+    void cleanupH264FramesLocked();
+    bool isH264FrameProtectedLocked(qint64 frameIndex) const;
+    void recomputeOldestH264FrameLocked();
+    qint64 takePendingH264FrameIndex();
+    void queuePendingH264FrameIndex(qint64 frameIndex);
+
     // Qt 显示
     QVideoSink *m_videoSink = nullptr;
     
@@ -485,6 +532,10 @@ private:
     
     
     QMutex m_mutex;
+
+    static constexpr int H264_FRAME_KEEP_COUNT = 6000;
+    static constexpr int H264_CLEANUP_INTERVAL = 1200;
+    static constexpr int H264_SAFETY_MARGIN = 300;
 
     // NALU 帧存储
     NaluFrameStore *m_naluStore = nullptr;

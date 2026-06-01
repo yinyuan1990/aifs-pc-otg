@@ -16,14 +16,13 @@
 
 class GpuPipeline;
 class GstPlayer;
-class NaluFrameStore;
 class GstCaptureDecoder;
 
 class SlowMotionDecodeThread : public QThread
 {
     Q_OBJECT
 public:
-    explicit SlowMotionDecodeThread(NaluFrameStore *store, QObject *parent = nullptr);
+    explicit SlowMotionDecodeThread(GstPlayer *player, QObject *parent = nullptr);
     ~SlowMotionDecodeThread();
 
     void requestDecode(qint64 globalFrameIndex, int frameOffset, bool scale = false);
@@ -36,9 +35,8 @@ protected:
     void run() override;
 
 private:
-    NaluFrameStore *m_store;
+    GstPlayer *m_player;
     GstCaptureDecoder *m_decoder = nullptr;
-    qint64 m_lastDecodedGlobal = -1;  // 上次成功解码的全局帧号（顺序快路径用）
     std::atomic<bool> m_running{true};
     QMutex m_queueMutex;
     QWaitCondition m_queueCondition;

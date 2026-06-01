@@ -14,6 +14,7 @@
 #include <QNetworkRequest>
 #include <QTimer>
 #include <QUrl>
+#include <climits>
 #include <cmath>
 
 #ifdef Q_OS_WIN
@@ -46,6 +47,33 @@ static bool setIntIfExists(GstElement* elem, const char* prop, int value) {
         return true;
     }
     return false;
+}
+
+static bool setUIntIfExists(GstElement* elem, const char* prop, guint value) {
+    if (g_object_class_find_property(G_OBJECT_GET_CLASS(elem), prop)) {
+        g_object_set(elem, prop, value, nullptr);
+        return true;
+    }
+    return false;
+}
+
+static bool setStringIfExists(GstElement* elem, const char* prop, const char *value) {
+    GParamSpec *spec = g_object_class_find_property(G_OBJECT_GET_CLASS(elem), prop);
+    if (!spec) return false;
+    if (G_IS_PARAM_SPEC_ENUM(spec)) {
+        GEnumClass *klass = G_ENUM_CLASS(g_type_class_ref(G_PARAM_SPEC_VALUE_TYPE(spec)));
+        GEnumValue *enumValue = g_enum_get_value_by_nick(klass, value);
+        if (!enumValue) enumValue = g_enum_get_value_by_name(klass, value);
+        if (enumValue) {
+            g_object_set(elem, prop, enumValue->value, nullptr);
+            g_type_class_unref(klass);
+            return true;
+        }
+        g_type_class_unref(klass);
+        return false;
+    }
+    g_object_set(elem, prop, value, nullptr);
+    return true;
 }
 
 static bool hasIdrInBuffer(GstBuffer* buf) {
@@ -692,11 +720,18 @@ bool GstPlayer::createPipeline()
     m_convert = gst_element_factory_make("videoconvert", "convert");
     m_appsink = gst_element_factory_make("appsink", "sink");
 
+    if (!createH264FrameBranch()) {
+        destroyPipeline();
+        return false;
+    }
+
     // 检查所有元素
     bool srcOk = m_useWebRTC ? (m_webrtcbin && m_rtph264depay) : (m_appsrc != nullptr);
     if (!srcOk || !m_h264parse || !m_naluTee || !m_naluQueue || !m_naluAppsink
         || !m_queueDepay || !m_decoder || !m_queueDecode ||
         !m_displayQueue || !m_convert || !m_appsink ||
+        !m_rawFrameTee || !m_h264FrameQueue || !m_h264FrameConvert || !m_h264FrameEncoder
+        || !m_h264FrameParse || !m_h264FrameCaps || !m_h264FrameAppsink ||
         !m_videoBalance || !m_gamma) {
         qCritical() << "❌ 创建 GStreamer 元素失败";
         emit error("创建 GStreamer 元素失败");
@@ -797,14 +832,16 @@ bool GstPlayer::createPipeline()
             gst_bin_add_many(GST_BIN(m_pipeline),
                 m_webrtcbin, m_rtph264depay, m_h264parse, m_naluTee, m_naluQueue, m_naluAppsink,
                 m_queueDepay, m_decoder, m_queueDecode,
-                m_download, m_videoScale, m_videoBalance, m_gamma,
+                m_download, m_videoScale, m_videoBalance, m_gamma, m_rawFrameTee,
                 m_displayQueue, m_convert, m_appsink,
+                m_h264FrameQueue, m_h264FrameConvert, m_h264FrameEncoder, m_h264FrameParse,
+                m_h264FrameCaps, m_h264FrameAppsink,
                 nullptr);
 
             if (!gst_element_link(m_rtph264depay, m_h264parse) || !linkNaluTeeBranch()
                 || !gst_element_link_many(m_queueDepay, m_decoder, m_queueDecode,
-                                       m_download, m_videoScale, m_videoBalance, m_gamma,
-                                       m_displayQueue, m_convert, m_appsink, nullptr)) {
+                                       m_download, m_videoScale, m_videoBalance, m_gamma, nullptr)
+                || !linkRawFrameTeeBranch(m_gamma, m_displayQueue)) {
                 qCritical() << "❌ 链接主路径失败 (WebRTC 硬解模式)";
                 emit error("链接主路径失败");
                 destroyPipeline();
@@ -816,14 +853,16 @@ bool GstPlayer::createPipeline()
             gst_bin_add_many(GST_BIN(m_pipeline),
                 m_webrtcbin, m_rtph264depay, m_h264parse, m_naluTee, m_naluQueue, m_naluAppsink,
                 m_queueDepay, m_decoder, m_queueDecode,
-                m_videoScale, m_videoBalance, m_gamma,
+                m_videoScale, m_videoBalance, m_gamma, m_rawFrameTee,
                 m_displayQueue, m_convert, m_appsink,
+                m_h264FrameQueue, m_h264FrameConvert, m_h264FrameEncoder, m_h264FrameParse,
+                m_h264FrameCaps, m_h264FrameAppsink,
                 nullptr);
 
             if (!gst_element_link(m_rtph264depay, m_h264parse) || !linkNaluTeeBranch()
                 || !gst_element_link_many(m_queueDepay, m_decoder, m_queueDecode,
-                                       m_videoScale, m_videoBalance, m_gamma,
-                                       m_displayQueue, m_convert, m_appsink, nullptr)) {
+                                       m_videoScale, m_videoBalance, m_gamma, nullptr)
+                || !linkRawFrameTeeBranch(m_gamma, m_displayQueue)) {
                 qCritical() << "❌ 链接主路径失败 (WebRTC 软解模式)";
                 emit error("链接主路径失败");
                 destroyPipeline();
@@ -869,14 +908,16 @@ bool GstPlayer::createPipeline()
             gst_bin_add_many(GST_BIN(m_pipeline),
                 m_appsrc, m_h264parse, m_naluTee, m_naluQueue, m_naluAppsink,
                 m_queueDepay, m_decoder, m_queueDecode,
-                m_download, m_videoScale, m_videoBalance, m_gamma,
+                m_download, m_videoScale, m_videoBalance, m_gamma, m_rawFrameTee,
                 m_displayQueue, m_convert, m_appsink,
+                m_h264FrameQueue, m_h264FrameConvert, m_h264FrameEncoder, m_h264FrameParse,
+                m_h264FrameCaps, m_h264FrameAppsink,
                 nullptr);
 
             if (!gst_element_link(m_appsrc, m_h264parse) || !linkNaluTeeBranch()
                 || !gst_element_link_many(m_queueDepay, m_decoder, m_queueDecode,
-                                       m_download, m_videoScale, m_videoBalance, m_gamma,
-                                       m_displayQueue, m_convert, m_appsink, nullptr)) {
+                                       m_download, m_videoScale, m_videoBalance, m_gamma, nullptr)
+                || !linkRawFrameTeeBranch(m_gamma, m_displayQueue)) {
                 qCritical() << "❌ 链接主路径失败 (AppSrc 硬解模式)";
                 emit error("链接主路径失败");
                 destroyPipeline();
@@ -887,14 +928,16 @@ bool GstPlayer::createPipeline()
             gst_bin_add_many(GST_BIN(m_pipeline),
                 m_appsrc, m_h264parse, m_naluTee, m_naluQueue, m_naluAppsink,
                 m_queueDepay, m_decoder, m_queueDecode,
-                m_videoScale, m_videoBalance, m_gamma,
+                m_videoScale, m_videoBalance, m_gamma, m_rawFrameTee,
                 m_displayQueue, m_convert, m_appsink,
+                m_h264FrameQueue, m_h264FrameConvert, m_h264FrameEncoder, m_h264FrameParse,
+                m_h264FrameCaps, m_h264FrameAppsink,
                 nullptr);
 
             if (!gst_element_link(m_appsrc, m_h264parse) || !linkNaluTeeBranch()
                 || !gst_element_link_many(m_queueDepay, m_decoder, m_queueDecode,
-                                       m_videoScale, m_videoBalance, m_gamma,
-                                       m_displayQueue, m_convert, m_appsink, nullptr)) {
+                                       m_videoScale, m_videoBalance, m_gamma, nullptr)
+                || !linkRawFrameTeeBranch(m_gamma, m_displayQueue)) {
                 qCritical() << "❌ 链接主路径失败 (AppSrc 软解模式)";
                 emit error("链接主路径失败");
                 destroyPipeline();
@@ -907,8 +950,6 @@ bool GstPlayer::createPipeline()
 
     qDebug() << "✅ GStreamer Pipeline 创建成功，解码器:" << m_decoderName;
     emit decoderChanged();
-
-    createEncodePipeline();
 
     return true;
 }
@@ -968,7 +1009,17 @@ void GstPlayer::destroyPipeline()
         gst_object_unref(m_naluTeePadStore);
         m_naluTeePadStore = nullptr;
     }
-    
+    if (m_rawFrameTee && m_rawFrameTeePadDisplay) {
+        gst_element_release_request_pad(m_rawFrameTee, m_rawFrameTeePadDisplay);
+        gst_object_unref(m_rawFrameTeePadDisplay);
+        m_rawFrameTeePadDisplay = nullptr;
+    }
+    if (m_rawFrameTee && m_rawFrameTeePadSave) {
+        gst_element_release_request_pad(m_rawFrameTee, m_rawFrameTeePadSave);
+        gst_object_unref(m_rawFrameTeePadSave);
+        m_rawFrameTeePadSave = nullptr;
+    }
+
     if (m_pipeline) {
         gst_element_set_state(m_pipeline, GST_STATE_NULL);
         gst_object_unref(m_pipeline);
@@ -992,6 +1043,14 @@ void GstPlayer::destroyPipeline()
     m_gamma = nullptr;
     m_displayQueue = nullptr;
     m_clockSync = nullptr;
+    m_rawFrameTee = nullptr;
+    m_h264FrameQueue = nullptr;
+    m_h264FrameConvert = nullptr;
+    m_h264FrameEncoder = nullptr;
+    m_h264FrameParse = nullptr;
+    m_h264FrameCaps = nullptr;
+    m_h264FrameAppsink = nullptr;
+    m_h264FrameEncoderName.clear();
     m_convert = nullptr;
     m_appsink = nullptr;
     
@@ -1012,7 +1071,9 @@ void GstPlayer::destroyPipeline()
     m_videoWidth = 0;
     m_videoHeight = 0;
     m_frameIndex = 0;
+    m_naluFrameIndex.store(0, std::memory_order_release);
     m_firstFrame = false;
+    resetH264FrameState();
 
     destroyEncodePipeline();
 }
@@ -1289,6 +1350,319 @@ static QByteArray extractSpsPpsFromAnnexB(const guint8 *raw, int rawSize)
     return result;
 }
 
+bool GstPlayer::createH264FrameBranch()
+{
+    m_rawFrameTee = gst_element_factory_make("tee", "raw_frame_tee");
+    m_h264FrameQueue = gst_element_factory_make("queue", "h264_frame_queue");
+    m_h264FrameConvert = gst_element_factory_make("videoconvert", "h264_frame_convert");
+    m_h264FrameEncoder = gst_element_factory_make("mfh264enc", "h264_frame_encoder");
+    if (m_h264FrameEncoder) {
+        m_h264FrameEncoderName = "mfh264enc";
+        setIntIfExists(m_h264FrameEncoder, "gop-size", 1);
+        setIntIfExists(m_h264FrameEncoder, "bitrate", 30000);
+        setIntIfExists(m_h264FrameEncoder, "max-bitrate", 120000);
+        setIntIfExists(m_h264FrameEncoder, "qp-i", 18);
+        setBoolIfExists(m_h264FrameEncoder, "low-latency", TRUE);
+        setIntIfExists(m_h264FrameEncoder, "quality-vs-speed", 0);
+    } else {
+        m_h264FrameEncoder = gst_element_factory_make("x264enc", "h264_frame_encoder");
+        if (m_h264FrameEncoder) {
+            m_h264FrameEncoderName = "x264enc";
+            setIntIfExists(m_h264FrameEncoder, "key-int-max", 1);
+            setUIntIfExists(m_h264FrameEncoder, "bitrate", 30000);
+            setStringIfExists(m_h264FrameEncoder, "tune", "zerolatency");
+            setStringIfExists(m_h264FrameEncoder, "speed-preset", "veryfast");
+        }
+    }
+    m_h264FrameParse = gst_element_factory_make("h264parse", "h264_frame_parse");
+    m_h264FrameCaps = gst_element_factory_make("capsfilter", "h264_frame_caps");
+    m_h264FrameAppsink = gst_element_factory_make("appsink", "h264_frame_sink");
+
+    if (!m_rawFrameTee || !m_h264FrameQueue || !m_h264FrameConvert || !m_h264FrameEncoder
+        || !m_h264FrameParse || !m_h264FrameCaps || !m_h264FrameAppsink) {
+        qCritical() << "❌ 创建 H.264 独立帧保存支路失败";
+        emit error("创建 H.264 独立帧保存支路失败");
+        return false;
+    }
+
+    g_object_set(m_h264FrameQueue,
+        "max-size-buffers", 30,
+        "max-size-bytes", 0,
+        "max-size-time", 0,
+        "leaky", 0,
+        "silent", TRUE,
+        nullptr);
+    setIntIfExists(m_h264FrameParse, "config-interval", -1);
+
+    GstCaps *caps = gst_caps_from_string("video/x-h264,stream-format=(string)byte-stream,alignment=(string)au");
+    g_object_set(m_h264FrameCaps, "caps", caps, nullptr);
+    gst_app_sink_set_caps(GST_APP_SINK(m_h264FrameAppsink), caps);
+    gst_caps_unref(caps);
+
+    g_object_set(m_h264FrameAppsink,
+        "emit-signals", TRUE,
+        "sync", FALSE,
+        "async", FALSE,
+        "max-buffers", 30,
+        "drop", FALSE,
+        nullptr);
+    g_signal_connect(m_h264FrameAppsink, "new-sample", G_CALLBACK(onH264FrameSample), this);
+
+    m_h264FrameDirectory = QCoreApplication::applicationDirPath() + "/captures/frames";
+    QDir().mkpath(m_h264FrameDirectory);
+    m_h264SessionPrefix = QString("s_%1").arg(QDateTime::currentMSecsSinceEpoch());
+    resetH264FrameState();
+    qDebug() << "✅ H.264 独立帧保存支路:" << m_h264FrameEncoderName << "目录:" << m_h264FrameDirectory << "前缀:" << m_h264SessionPrefix;
+    return true;
+}
+
+bool GstPlayer::linkRawFrameTeeBranch(GstElement *upstreamTail, GstElement *displayHead)
+{
+    if (!upstreamTail || !displayHead || !m_rawFrameTee || !m_h264FrameQueue || !m_h264FrameAppsink) {
+        captureDebugLog("GST", "linkRawFrameTeeBranch FAIL missing elements");
+        return false;
+    }
+    if (!gst_element_link(upstreamTail, m_rawFrameTee)) {
+        captureDebugLog("GST", "linkRawFrameTeeBranch FAIL upstream->rawTee");
+        return false;
+    }
+
+    if (!gst_element_link_many(m_h264FrameQueue, m_h264FrameConvert, m_h264FrameEncoder,
+                               m_h264FrameParse, m_h264FrameCaps, m_h264FrameAppsink, nullptr)) {
+        captureDebugLog("GST", "linkRawFrameTeeBranch FAIL save branch link");
+        return false;
+    }
+    if (!gst_element_link_many(displayHead, m_convert, m_appsink, nullptr)) {
+        captureDebugLog("GST", "linkRawFrameTeeBranch FAIL display branch link");
+        return false;
+    }
+
+    m_rawFrameTeePadDisplay = gst_element_request_pad_simple(m_rawFrameTee, "src_%u");
+    GstPad *displaySink = gst_element_get_static_pad(displayHead, "sink");
+    if (!m_rawFrameTeePadDisplay || !displaySink
+        || gst_pad_link(m_rawFrameTeePadDisplay, displaySink) != GST_PAD_LINK_OK) {
+        if (displaySink) gst_object_unref(displaySink);
+        captureDebugLog("GST", "linkRawFrameTeeBranch FAIL rawTee->display");
+        return false;
+    }
+    gst_object_unref(displaySink);
+
+    m_rawFrameTeePadSave = gst_element_request_pad_simple(m_rawFrameTee, "src_%u");
+    GstPad *saveSink = gst_element_get_static_pad(m_h264FrameQueue, "sink");
+    if (!m_rawFrameTeePadSave || !saveSink
+        || gst_pad_link(m_rawFrameTeePadSave, saveSink) != GST_PAD_LINK_OK) {
+        if (saveSink) gst_object_unref(saveSink);
+        captureDebugLog("GST", "linkRawFrameTeeBranch FAIL rawTee->save");
+        return false;
+    }
+    gst_pad_add_probe(saveSink, GST_PAD_PROBE_TYPE_BUFFER,
+        [](GstPad*, GstPadProbeInfo *info, gpointer userData) -> GstPadProbeReturn {
+            GstPlayer *self = static_cast<GstPlayer*>(userData);
+            if (GST_PAD_PROBE_INFO_BUFFER(info)) {
+                const qint64 frameIndex = self->m_nextH264FrameIndex.fetch_add(1, std::memory_order_relaxed);
+                self->queuePendingH264FrameIndex(frameIndex);
+            }
+            return GST_PAD_PROBE_OK;
+        }, this, nullptr);
+    gst_object_unref(saveSink);
+    captureDebugLog("GST", QString("linkRawFrameTeeBranch OK encoder=%1").arg(m_h264FrameEncoderName));
+    return true;
+}
+
+bool GstPlayer::hasH264Frame(qint64 frameIndex) const
+{
+    QMutexLocker lock(&m_h264FrameMutex);
+    return m_h264AvailableFrames.contains(frameIndex);
+}
+
+QString GstPlayer::h264FramePath(qint64 frameIndex) const
+{
+    return m_h264FrameDirectory + QString("/%1_%2.h264").arg(m_h264SessionPrefix).arg(frameIndex, 9, 10, QChar('0'));
+}
+
+QByteArray GstPlayer::readH264Frame(qint64 frameIndex) const
+{
+    const QString path = h264FramePath(frameIndex);
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) return QByteArray();
+    return file.readAll();
+}
+
+int GstPlayer::registerH264ValidRange(qint64 start, qint64 end)
+{
+    QMutexLocker lock(&m_h264FrameMutex);
+    const int id = m_nextH264ValidRangeId++;
+    m_h264ValidRanges.insert(id, qMakePair(start, end));
+    return id;
+}
+
+void GstPlayer::updateH264ValidRange(int id, qint64 start, qint64 end)
+{
+    QMutexLocker lock(&m_h264FrameMutex);
+    if (m_h264ValidRanges.contains(id)) {
+        m_h264ValidRanges[id] = qMakePair(start, end);
+        cleanupH264FramesLocked();
+    }
+}
+
+void GstPlayer::unregisterH264ValidRange(int id)
+{
+    QMutexLocker lock(&m_h264FrameMutex);
+    m_h264ValidRanges.remove(id);
+    cleanupH264FramesLocked();
+}
+
+void GstPlayer::resetH264FrameState()
+{
+    QMutexLocker lock(&m_h264FrameMutex);
+    m_pendingH264FrameIndexes.clear();
+    m_h264AvailableFrames.clear();
+    m_h264ValidRanges.clear();
+    m_nextH264ValidRangeId = 1;
+    m_nextH264FrameIndex.store(0, std::memory_order_release);
+    m_oldestH264Frame.store(-1, std::memory_order_release);
+    m_newestH264Frame.store(-1, std::memory_order_release);
+}
+
+void GstPlayer::queuePendingH264FrameIndex(qint64 frameIndex)
+{
+    QMutexLocker lock(&m_h264FrameMutex);
+    m_pendingH264FrameIndexes.append(frameIndex);
+}
+
+qint64 GstPlayer::takePendingH264FrameIndex()
+{
+    QMutexLocker lock(&m_h264FrameMutex);
+    if (m_pendingH264FrameIndexes.isEmpty()) return -1;
+    return m_pendingH264FrameIndexes.takeFirst();
+}
+
+void GstPlayer::cleanupH264FramesLocked()
+{
+    const qint64 newest = m_newestH264Frame.load(std::memory_order_acquire);
+    if (newest < 0) return;
+
+    const qint64 cleanupBelow = newest - H264_FRAME_KEEP_COUNT;
+    const qint64 safeBelow = newest - H264_SAFETY_MARGIN;
+    const qint64 cutoff = qMin(cleanupBelow, safeBelow);
+    if (cutoff < 0) return;
+
+    QList<qint64> toRemove;
+    for (qint64 frameIndex : m_h264AvailableFrames) {
+        if (frameIndex <= cutoff && !isH264FrameProtectedLocked(frameIndex)) {
+            toRemove.append(frameIndex);
+        }
+    }
+
+    for (qint64 frameIndex : toRemove) {
+        QFile::remove(h264FramePath(frameIndex));
+        QFile::remove(h264FramePath(frameIndex) + ".tmp");
+        m_h264AvailableFrames.remove(frameIndex);
+    }
+
+    if (!toRemove.isEmpty()) {
+        recomputeOldestH264FrameLocked();
+        captureDebugLog("GST", QString("cleanupH264Frames removed=%1 oldest=%2 newest=%3 protectedRanges=%4")
+            .arg(toRemove.size())
+            .arg(m_oldestH264Frame.load(std::memory_order_acquire))
+            .arg(newest)
+            .arg(m_h264ValidRanges.size()));
+    }
+}
+
+bool GstPlayer::isH264FrameProtectedLocked(qint64 frameIndex) const
+{
+    for (auto it = m_h264ValidRanges.constBegin(); it != m_h264ValidRanges.constEnd(); ++it) {
+        if (frameIndex >= it.value().first && frameIndex <= it.value().second) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void GstPlayer::recomputeOldestH264FrameLocked()
+{
+    if (m_h264AvailableFrames.isEmpty()) {
+        m_oldestH264Frame.store(-1, std::memory_order_release);
+        return;
+    }
+    qint64 oldest = LLONG_MAX;
+    for (qint64 frameIndex : m_h264AvailableFrames) {
+        oldest = qMin(oldest, frameIndex);
+    }
+    m_oldestH264Frame.store(oldest, std::memory_order_release);
+}
+
+bool GstPlayer::writeH264Frame(qint64 frameIndex, const QByteArray &data)
+{
+    if (frameIndex < 0 || data.isEmpty()) return false;
+    QDir().mkpath(m_h264FrameDirectory);
+    const QString path = h264FramePath(frameIndex);
+    const QString tmpPath = path + ".tmp";
+    QFile::remove(tmpPath);
+    QFile file(tmpPath);
+    if (!file.open(QIODevice::WriteOnly)) return false;
+    if (file.write(data) != data.size()) {
+        file.close();
+        QFile::remove(tmpPath);
+        return false;
+    }
+    file.close();
+    QFile::remove(path);
+    if (!QFile::rename(tmpPath, path)) {
+        QFile::remove(tmpPath);
+        return false;
+    }
+
+    {
+        QMutexLocker lock(&m_h264FrameMutex);
+        m_h264AvailableFrames.insert(frameIndex);
+        if (m_oldestH264Frame.load(std::memory_order_acquire) < 0 || frameIndex < m_oldestH264Frame.load(std::memory_order_acquire)) {
+            m_oldestH264Frame.store(frameIndex, std::memory_order_release);
+        }
+        if (frameIndex > m_newestH264Frame.load(std::memory_order_acquire)) {
+            m_newestH264Frame.store(frameIndex, std::memory_order_release);
+        }
+        if ((frameIndex % H264_CLEANUP_INTERVAL) == 0) {
+            cleanupH264FramesLocked();
+        }
+    }
+    return true;
+}
+
+GstFlowReturn GstPlayer::onH264FrameSample(GstAppSink *sink, gpointer userData)
+{
+    GstPlayer *self = static_cast<GstPlayer*>(userData);
+    GstSample *sample = gst_app_sink_pull_sample(sink);
+    if (!sample) return GST_FLOW_OK;
+
+    const qint64 frameIndex = self->takePendingH264FrameIndex();
+    GstBuffer *buffer = gst_sample_get_buffer(sample);
+    QByteArray data;
+    if (buffer) {
+        GstMapInfo map;
+        if (gst_buffer_map(buffer, &map, GST_MAP_READ)) {
+            data = QByteArray(reinterpret_cast<const char*>(map.data), static_cast<int>(map.size));
+            gst_buffer_unmap(buffer, &map);
+        }
+    }
+    gst_sample_unref(sample);
+
+    if (frameIndex < 0 || data.isEmpty() || !self->writeH264Frame(frameIndex, data)) {
+        if (frameIndex >= 0) emit self->h264FrameMissing(frameIndex);
+        return GST_FLOW_OK;
+    }
+
+    static std::atomic<int> s_h264FileLogCounter{0};
+    int n = s_h264FileLogCounter.fetch_add(1) + 1;
+    if (n <= 3 || (n % 300) == 0) {
+        captureDebugLog("GST", QString("h264FrameStored idx=%1 size=%2 path=%3")
+            .arg(frameIndex).arg(data.size()).arg(self->h264FramePath(frameIndex)));
+    }
+    emit self->h264FrameStored(frameIndex);
+    return GST_FLOW_OK;
+}
+
 bool GstPlayer::linkNaluTeeBranch()
 {
     if (!m_h264parse || !m_naluTee || !m_naluQueue || !m_naluAppsink || !m_queueDepay) {
@@ -1491,23 +1865,7 @@ GstFlowReturn GstPlayer::onNaluStoreSample(GstAppSink *sink, gpointer userData)
 
     GstBuffer *buffer = gst_sample_get_buffer(sample);
     if (buffer) {
-        if (self->m_useIntraEncode && self->m_encodeAppsrc) {
-            // 推到独立编码管道重编码为IDR
-            GstMapInfo map;
-            if (gst_buffer_map(buffer, &map, GST_MAP_READ)) {
-                GstBuffer *encBuf = gst_buffer_new_allocate(nullptr, map.size, nullptr);
-                gst_buffer_fill(encBuf, 0, map.data, map.size);
-                GST_BUFFER_PTS(encBuf) = self->m_encodePts;
-                GST_BUFFER_DTS(encBuf) = self->m_encodePts;
-                GST_BUFFER_DURATION(encBuf) = GST_SECOND / 30;
-                self->m_encodePts += GST_SECOND / 30;
-                gst_buffer_unmap(buffer, &map);
-                gst_app_src_push_buffer(GST_APP_SRC(self->m_encodeAppsrc), encBuf);
-            }
-        } else {
-            // 无编码管道时直存原始 NALU
-            self->storeNaluFromBuffer(buffer);
-        }
+        self->storeNaluFromBuffer(buffer);
     }
 
     gst_sample_unref(sample);
@@ -1595,7 +1953,7 @@ GstFlowReturn GstPlayer::onNewSample(GstAppSink *sink, gpointer userData)
         self->m_lastFrameArrivalMs = nowMs;
     }
     
-    // 显示帧计数（JPEG 帧索引在 bus 消息回调中更新）
+    // 显示帧计数
     self->m_frameIndex++;
     
     // ⭐ 帧率统计：EMA 指数移动平均（极度平滑，避免跳动）

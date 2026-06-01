@@ -680,18 +680,18 @@ void CaptureManager::setGpuPipeline(GpuPipeline *pipeline)
 void CaptureManager::setGstPlayer(GstPlayer *player)
 {
     if (m_gstPlayer != player) {
-        if (m_gstPlayer && m_gstPlayer->naluFrameStore()) {
-            disconnect(m_gstPlayer->naluFrameStore(), &NaluFrameStore::frameStored,
+        if (m_gstPlayer) {
+            disconnect(m_gstPlayer, &GstPlayer::h264FrameStored,
                        this, &CaptureManager::onFrameEncoded);
         }
 
         m_gstPlayer = player;
 
-        if (m_gstPlayer->naluFrameStore()) {
-            connect(m_gstPlayer->naluFrameStore(), &NaluFrameStore::frameStored,
+        if (m_gstPlayer) {
+            connect(m_gstPlayer, &GstPlayer::h264FrameStored,
                     this, &CaptureManager::onFrameEncoded, Qt::QueuedConnection);
         }
-        qDebug() << "CaptureManager: GPU sync decoder ready";
+        qDebug() << "CaptureManager: H.264 frame file source ready";
 
         emit gstPlayerChanged();
     }
@@ -721,9 +721,6 @@ void CaptureManager::checkPendingCaptures(qint64 frameIndex)
 {
     QMutexLocker lock(&m_mutex);
 
-    NaluFrameStore *store = (m_gstPlayer && m_gstPlayer->naluFrameStore())
-                            ? m_gstPlayer->naluFrameStore() : nullptr;
-
     for (int i = m_pendingCaptures.size() - 1; i >= 0; i--) {
         PendingCapture &pending = m_pendingCaptures[i];
 
@@ -732,26 +729,6 @@ void CaptureManager::checkPendingCaptures(qint64 frameIndex)
             continue;
         }
 
-        CaptureItem &item = m_items[pending.itemIndex];
-
-        // 保存到达的帧 → 后台线程落盘（主线程只做一次轻量 getFrame 拷贝）
-        if (store && frameIndex >= item.startIndex && frameIndex <= pending.targetEndIndex) {
-            int offset = static_cast<int>(frameIndex - item.startIndex);
-            if (offset >= 0 && offset < item.totalFrames() && store->hasFrame(frameIndex)) {
-                QByteArray data = store->getFrame(frameIndex);
-                if (!data.isEmpty() && m_diskWriter) {
-                    QString path = item.naluDir + QString("/%1.nalu").arg(offset, 6, 10, QChar('0'));
-                    m_diskWriter->submit(path, data);
-                    if (store->isKeyFrame(frameIndex)
-                        && (item.keyFrameOffsets.isEmpty() || item.keyFrameOffsets.last() < offset)) {
-                        item.keyFrameOffsets.append(offset);
-                    }
-                    item.savedFrameCount++;
-                }
-            }
-        }
-
-        // 检查是否完成
         if (frameIndex >= pending.targetEndIndex) {
             m_pendingCaptures.removeAt(i);
         }
@@ -766,10 +743,10 @@ void CaptureManager::capture()
     qDebug() << "📷 Capture: slowMotionActive=" << m_slowMotionActive
              << ", slowMotionPlayer=" << (m_slowMotionPlayer ? "有效" : "NULL");
 
-    if (m_gstPlayer && m_gstPlayer->naluFrameStore()) {
-        qDebug() << "📷 Capture: naluStore count=" << m_gstPlayer->naluFrameStore()->count()
-                 << ", newest=" << m_gstPlayer->naluFrameStore()->newestIndex()
-                 << ", oldest=" << m_gstPlayer->naluFrameStore()->oldestIndex();
+    if (m_gstPlayer) {
+        qDebug() << "📷 Capture: h264Frame newest=" << m_gstPlayer->newestH264Frame()
+                 << ", oldest=" << m_gstPlayer->oldestH264Frame()
+                 << ", dir=" << m_gstPlayer->h264FrameDirectory();
     }
     
     // 根据慢放模式选择事件帧来源
@@ -781,16 +758,19 @@ void CaptureManager::capture()
                  << "endIndex=" << m_slowMotionPlayer->endIndex()
                  << "recordedFrames=" << m_slowMotionPlayer->recordedFrames();
     } else {
-        // 实时流模式：从 NaluFrameStore 获取最新帧索引
-        if (m_gstPlayer && m_gstPlayer->naluFrameStore()) {
-            qint64 newestIdx = m_gstPlayer->naluFrameStore()->newestIndex();
+        // 实时流模式：从独立 H.264 帧文件索引获取最新帧
+        if (m_gstPlayer) {
+            qint64 newestIdx = m_gstPlayer->newestH264Frame();
             int queueDepth = m_gstPlayer->bufferSize();
-            qint64 oldestIdx = m_gstPlayer->naluFrameStore()->oldestIndex();
+            qint64 oldestIdx = m_gstPlayer->oldestH264Frame();
+            if (newestIdx < 0 || oldestIdx < 0) {
+                eventIndex = -1;
+            } else {
+                eventIndex = newestIdx - queueDepth;
+                eventIndex = qMax(oldestIdx, eventIndex);
+            }
 
-            eventIndex = newestIdx - queueDepth;
-            eventIndex = qMax(oldestIdx, eventIndex);
-
-            qDebug() << "📷 Capture (NALU): newest=" << newestIdx
+            qDebug() << "📷 Capture (H264File): newest=" << newestIdx
                      << "队列=" << queueDepth
                      << "eventIndex=" << eventIndex;
         } else if (m_gpuPipeline) {
@@ -831,18 +811,9 @@ void CaptureManager::capture()
         qDebug() << "📷 Capture (SlowMotion): 慢放可用范围" << oldestAvailable << "-" << newestAvailable;
         startIndex = qMax(startIndex, oldestAvailable);
         endIndex = qMin(endIndex, newestAvailable);
-    } else if (m_gstPlayer && m_gstPlayer->naluFrameStore()) {
-        NaluFrameStore *store = m_gstPlayer->naluFrameStore();
-        oldestAvailable = store->oldestIndex();
+    } else if (m_gstPlayer) {
+        oldestAvailable = m_gstPlayer->oldestH264Frame();
         startIndex = qMax(startIndex, oldestAvailable);
-
-        // 用关键帧索引 O(log n) 直接定位最近的 IDR，替代向后逐帧扫描+拷贝
-        qint64 idrIndex = store->findNearestKeyFrame(eventIndex);
-        if (idrIndex >= 0 && idrIndex <= eventIndex && idrIndex < startIndex) {
-            captureDebugLog("CAP", QString("extend capture start to sync global=%1 was=%2")
-                .arg(idrIndex).arg(startIndex));
-            startIndex = idrIndex;
-        }
     } else if (m_gpuPipeline) {
         oldestAvailable = m_gpuPipeline->oldestFrame();
         startIndex = qMax(startIndex, oldestAvailable);
@@ -859,29 +830,13 @@ void CaptureManager::capture()
     item.currentOffset = item.eventOffset();
     item.timestamp = QDateTime::currentMSecsSinceEpoch();
 
-    // 创建磁盘目录存 NALU 文件
-    QString prefix = (m_slowMotionActive && m_slowMotionPlayer) ? "slow" : "nalu";
-    item.naluDir = m_capturesDir + QString("/%1_%2").arg(prefix).arg(item.id, 6, 10, QChar('0'));
-    QDir().mkpath(item.naluDir);
-
-    // 保存 SPS/PPS 供离线回放解码器初始化
+    item.naluDir.clear();
+    item.savedFrameCount = item.totalFrames();
     if (m_gstPlayer) {
-        const QByteArray spsPps = m_gstPlayer->spsPpsAnnexB();
-        if (!spsPps.isEmpty()) {
-            QFile spsFile(item.naluDir + "/sps_pps.bin");
-            if (spsFile.open(QIODevice::WriteOnly)) {
-                spsFile.write(spsPps);
-                captureDebugLog("CAP", QString("saved sps_pps.bin size=%1 item=%2")
-                    .arg(spsPps.size()).arg(item.id));
-            } else {
-                captureDebugLog("CAP", QString("WARN sps_pps.bin write FAIL item=%1").arg(item.id));
-            }
-        } else {
-            captureDebugLog("CAP", QString("WARN no SPS/PPS at capture time item=%1").arg(item.id));
-        }
+        item.h264ValidRangeId = m_gstPlayer->registerH264ValidRange(startIndex, endIndex);
     }
 
-    // 直接抓取当前直播画面（已解码的 BGRA，零延迟兜底）
+    // 直接抓取当前直播画面（仅用于抓拍缩略/首屏兜底，不作为目标帧解码 fallback）
     if (m_gstPlayer) {
         item.liveSnapshot = m_gstPlayer->grabCurrentFrame();
     }
@@ -891,55 +846,18 @@ void CaptureManager::capture()
         item.liveSnapshot = item.liveSnapshot.transformed(transform, Qt::FastTransformation);
     }
 
-    // 从环形缓冲取出已有帧（主线程只做轻量 getFrame 拷贝），稍后交后台线程落盘
-    QVector<QPair<QString, QByteArray>> writeTasks;
-    if (m_gstPlayer && m_gstPlayer->naluFrameStore()) {
-        NaluFrameStore *store = m_gstPlayer->naluFrameStore();
-        qint64 saveTo = qMin(endIndex, store->newestIndex());
-        writeTasks.reserve(static_cast<int>(qMax(0LL, saveTo - startIndex + 1)));
-        for (qint64 idx = startIndex; idx <= saveTo; idx++) {
-            if (store->hasFrame(idx)) {
-                int offset = static_cast<int>(idx - startIndex);
-                QByteArray data = store->getFrame(idx);
-                if (!data.isEmpty()) {
-                    QString path = item.naluDir + QString("/%1.nalu").arg(offset, 6, 10, QChar('0'));
-                    writeTasks.append({path, data});
-                    if (store->isKeyFrame(idx)) item.keyFrameOffsets.append(offset);
-                    item.savedFrameCount++;
-                }
-            }
-        }
-    }
-
     m_items.append(item);
     int newIndex = m_items.size() - 1;
 
-    // 后续帧待到达后再保存
-    if (item.savedFrameCount < item.totalFrames()) {
-        PendingCapture pending;
-        pending.itemIndex = newIndex;
-        pending.targetEndIndex = endIndex;
-        m_pendingCaptures.append(pending);
-    }
-
     qDebug() << "Capture: item" << item.id
-             << "dir:" << item.naluDir
              << "range:" << startIndex << "-" << endIndex
-             << "saved:" << item.savedFrameCount << "/" << item.totalFrames()
-             << "keyframes:" << item.keyFrameOffsets.size();
+             << "source:" << (m_gstPlayer ? m_gstPlayer->h264FrameDirectory() : QString())
+             << "frames:" << item.totalFrames();
 
     emit countChanged();
     emit itemAdded(newIndex);
     emit captureComplete(newIndex);
-
-    // 已有帧交后台线程落盘；整批写完后由 onBatchWritten 触发可见帧解码
-    // （此时文件已就绪，避免与异步解码产生“文件未写入”竞态）
-    if (m_diskWriter && !writeTasks.isEmpty()) {
-        m_diskWriter->submitBatch(writeTasks, item.id);
-    } else {
-        // 抓拍瞬间环形缓冲暂无可存帧：先靠兜底画面，后续帧到达后再解码
-        scheduleFrameDecode(newIndex, item.currentOffset);
-    }
+    scheduleFrameDecode(newIndex, item.currentOffset);
 }
 
 void CaptureManager::onBatchWritten(int tag)
@@ -986,18 +904,24 @@ QImage CaptureManager::decodeFromDisk(int itemIndex, int frameOffset)
 
     const int gen = m_clearGeneration.load(std::memory_order_acquire);
 
-    QString naluDir;
-    QVector<int> keyOffsets;
+    qint64 globalIndex = -1;
     {
         QMutexLocker lock(&m_mutex);
         if (itemIndex < 0 || itemIndex >= m_items.size()) return QImage();
         const CaptureItem &item = m_items[itemIndex];
         if (frameOffset < 0 || frameOffset >= item.totalFrames()) return QImage();
-        naluDir = item.naluDir;
-        keyOffsets = item.keyFrameOffsets;
+        globalIndex = item.startIndex + frameOffset;
     }
 
     if (m_clearGeneration.load(std::memory_order_acquire) != gen) return QImage();
+    if (!m_gstPlayer) return QImage();
+
+    QByteArray data = m_gstPlayer->readH264Frame(globalIndex);
+    if (data.isEmpty()) {
+        captureDebugLog("CAP", QString("decodeFromDisk H264 file MISSING item=%1 frame=%2 global=%3")
+            .arg(itemIndex).arg(frameOffset).arg(globalIndex));
+        return QImage();
+    }
 
     QMutexLocker decodeLock(&m_decodeMutex);
 
@@ -1009,40 +933,14 @@ QImage CaptureManager::decodeFromDisk(int itemIndex, int frameOffset)
         captureDebugLog("CAP", QString("decodeFromDisk create decoder item=%1").arg(itemIndex));
     }
 
-    // 决定喂入起点：
-    //  - 顺序前进(目标 == 上次+1)：解码器已就位，直接喂这一帧（快路径）
-    //  - 否则：从 <= 目标 的最近关键帧开始重放整条链，保证 P 帧有正确参考，
-    //    避免“单帧/乱序解码 → 解不出 → 退回上一张”造成的重复帧/丢帧
-    int startOffset;
-    if (state.lastOffset >= 0 && frameOffset == state.lastOffset + 1) {
-        startOffset = frameOffset;
-    } else {
-        startOffset = 0;
-        for (int i = keyOffsets.size() - 1; i >= 0; --i) {
-            if (keyOffsets[i] <= frameOffset) { startOffset = keyOffsets[i]; break; }
-        }
-        state.decoder->flush();
+    state.decoder->flush();
+    QImage result = state.decoder->decodeNalu(data);
+    if (result.isNull()) {
+        captureDebugLog("CAP", QString("decodeFromDisk H264 FAIL item=%1 frame=%2 global=%3 %4")
+            .arg(itemIndex).arg(frameOffset).arg(globalIndex).arg(captureDebugNaluPreview(data)));
+        state.lastOffset = -1;
+        return QImage();
     }
-
-    QImage result;
-    for (int off = startOffset; off <= frameOffset; ++off) {
-        if (m_clearGeneration.load(std::memory_order_acquire) != gen) return QImage();
-        QByteArray data = readNaluFile(naluDir, off);
-        if (data.isEmpty()) {
-            captureDebugLog("CAP", QString("decodeFromDisk file MISSING item=%1 frame=%2")
-                .arg(itemIndex).arg(off));
-            state.lastOffset = -1;  // 链断，下次从关键帧重放
-            return QImage();
-        }
-        result = state.decoder->decodeNalu(data);
-        if (result.isNull()) {
-            captureDebugLog("CAP", QString("decodeFromDisk FAIL item=%1 frame=%2 %3")
-                .arg(itemIndex).arg(off).arg(captureDebugNaluPreview(data)));
-            state.lastOffset = -1;
-            return QImage();
-        }
-    }
-
     state.lastOffset = frameOffset;
 
     if (m_videoRotation != 0) {
@@ -1080,9 +978,13 @@ void CaptureManager::clearAll()
     m_pendingCaptures.clear();
 
     QStringList dirsToDelete;
+    QList<int> rangesToRelease;
     for (int i = 0; i < m_items.size(); i++) {
         if (!m_items[i].naluDir.isEmpty()) {
             dirsToDelete.append(m_items[i].naluDir);
+        }
+        if (m_items[i].h264ValidRangeId >= 0) {
+            rangesToRelease.append(m_items[i].h264ValidRangeId);
         }
     }
 
@@ -1100,6 +1002,11 @@ void CaptureManager::clearAll()
 
     emit countChanged();
     setCurrentItemIndex(-1);
+
+    GstPlayer *player = m_gstPlayer;
+    for (int rangeId : rangesToRelease) {
+        if (player) player->unregisterH264ValidRange(rangeId);
+    }
 
     if (!dirsToDelete.isEmpty()) {
         (void)QtConcurrent::run([dirsToDelete]() {
@@ -1134,6 +1041,7 @@ void CaptureManager::removeItem(int index)
     }
 
     QString dirToDelete = m_items[index].naluDir;
+    int rangeToRelease = m_items[index].h264ValidRangeId;
 
     m_items.removeAt(index);
     m_cachedItemIndex = -1;
@@ -1150,6 +1058,10 @@ void CaptureManager::removeItem(int index)
     lock.unlock();
     emit itemRemoved(index);
     emit countChanged();
+
+    if (rangeToRelease >= 0 && m_gstPlayer) {
+        m_gstPlayer->unregisterH264ValidRange(rangeToRelease);
+    }
 
     if (!dirToDelete.isEmpty()) {
         (void)QtConcurrent::run([dirToDelete]() {
@@ -1349,11 +1261,9 @@ QImage CaptureManager::getFrameImage(int itemIndex, int frameOffset)
     }
 
     QImage cached;
-    QImage fallback;
-    bool haveFallback = false;
     {
         QMutexLocker decodeLock(&m_decodeMutex);
-        CaptureItem &item = m_items[itemIndex];
+        if (itemIndex < 0 || itemIndex >= m_items.size()) return QImage();
 
         if (tryGetFrameCache(itemIndex, frameOffset, &cached)) {
             auto cacheIt = m_frameCache.find(qint64(itemIndex) * 100000 + frameOffset);
@@ -1363,23 +1273,9 @@ QImage CaptureManager::getFrameImage(int itemIndex, int frameOffset)
             captureDebugLog("CAP", "getFrameImage HIT cache");
             return cached;
         }
-
-        if (m_cachedItemIndex == itemIndex && !m_cachedImage.isNull()) {
-            fallback = m_cachedImage;
-            haveFallback = true;
-        } else if (!item.liveSnapshot.isNull()) {
-            fallback = item.liveSnapshot;
-            haveFallback = true;
-        }
     }
 
     scheduleFrameDecode(itemIndex, frameOffset);
-
-    if (haveFallback) {
-        captureDebugLog("CAP", QString("getFrameImage ASYNC pending return fallback item=%1 frame=%2")
-            .arg(itemIndex).arg(frameOffset));
-        return fallback;
-    }
 
     captureDebugLog("CAP", QString("getFrameImage ASYNC pending return empty item=%1 frame=%2")
         .arg(itemIndex).arg(frameOffset));
@@ -1470,8 +1366,8 @@ void CaptureManager::setSlowMotionPlayer(SlowMotionPlayer* player)
 
 qint64 CaptureManager::currentFrameIndex() const
 {
-    if (m_gstPlayer && m_gstPlayer->naluFrameStore()) {
-        return m_gstPlayer->naluFrameStore()->newestIndex();
+    if (m_gstPlayer) {
+        return m_gstPlayer->newestH264Frame();
     }
     if (m_gpuPipeline) {
         return m_gpuPipeline->newestFrame();

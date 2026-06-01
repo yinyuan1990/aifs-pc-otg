@@ -83,8 +83,8 @@ void SlowMotionPlayer::setGstPlayer(GstPlayer* player)
 {
     if (m_gstPlayer != player) {
         // 断开旧连接
-        if (m_gstPlayer && m_gstPlayer->naluFrameStore()) {
-            disconnect(m_gstPlayer->naluFrameStore(), &NaluFrameStore::frameStored,
+        if (m_gstPlayer) {
+            disconnect(m_gstPlayer, &GstPlayer::h264FrameStored,
                        this, &SlowMotionPlayer::onFrameEncoded);
         }
 
@@ -97,21 +97,18 @@ void SlowMotionPlayer::setGstPlayer(GstPlayer* player)
 
         m_gstPlayer = player;
 
-        if (m_gstPlayer && m_gstPlayer->naluFrameStore()) {
-            // 连接 NaluFrameStore 信号
-            connect(m_gstPlayer->naluFrameStore(), &NaluFrameStore::frameStored,
+        if (m_gstPlayer) {
+            connect(m_gstPlayer, &GstPlayer::h264FrameStored,
                     this, &SlowMotionPlayer::onFrameEncoded, Qt::QueuedConnection);
 
-            // 创建 GStreamer 解码器（avdec_h264 软解）
             delete m_gstDecoder;
             m_gstDecoder = new GstCaptureDecoder();
 
-            // 创建解码线程
-            m_decodeThread = new SlowMotionDecodeThread(m_gstPlayer->naluFrameStore(), this);
+            m_decodeThread = new SlowMotionDecodeThread(m_gstPlayer, this);
             connect(m_decodeThread, &SlowMotionDecodeThread::frameDecoded,
                     this, &SlowMotionPlayer::onFrameDecoded, Qt::QueuedConnection);
             m_decodeThread->start();
-            qDebug() << "SlowMotionPlayer: GstCaptureDecoder + decode thread created";
+            qDebug() << "SlowMotionPlayer: H.264 file decoder thread created";
         }
 
         emit gstPlayerChanged();
@@ -129,7 +126,7 @@ void SlowMotionPlayer::setVideoSink(QVideoSink* sink)
 
 void SlowMotionPlayer::ensureJpegEncoderConnected()
 {
-    // No longer needed — using NaluFrameStore instead of JPEG encoder
+    // No longer needed — using independent H.264 frame files instead of JPEG encoder
 }
 
 void SlowMotionPlayer::setState(State state)
@@ -226,8 +223,8 @@ void SlowMotionPlayer::setMaxFrameRate(int fps)
 void SlowMotionPlayer::startRecording()
 {
     qint64 newest = -1;
-    if (m_gstPlayer && m_gstPlayer->naluFrameStore()) {
-        newest = m_gstPlayer->naluFrameStore()->newestIndex();
+    if (m_gstPlayer) {
+        newest = m_gstPlayer->newestH264Frame();
     }
 
     if (newest < 0) {
@@ -248,9 +245,9 @@ void SlowMotionPlayer::startRecording()
 
     qDebug() << "SlowMotionPlayer: startIndex:" << m_startIndex << "multiplier:" << m_playbackMultiplier << "followLive:" << m_followLive;
 
-    // 注册有效范围（保护 NALU 帧不被环形缓冲覆盖）
-    if (m_gstPlayer && m_gstPlayer->naluFrameStore()) {
-        m_validRangeId = m_gstPlayer->naluFrameStore()->registerValidRange(m_startIndex, m_startIndex + m_maxFrames);
+    // 注册有效范围（保护 H.264 独立帧文件不被清理）
+    if (m_gstPlayer) {
+        m_validRangeId = m_gstPlayer->registerH264ValidRange(m_startIndex, m_startIndex + m_maxFrames);
     }
     
     setState(RECORDING);
@@ -284,9 +281,8 @@ void SlowMotionPlayer::stopRecording()
     // ⭐ 进入回放模式，使用原图（不缩放）
     m_followLive = false;
     
-    if (m_validRangeId >= 0 && m_gstPlayer && m_gstPlayer->naluFrameStore()) {
-        m_gstPlayer->naluFrameStore()->unregisterValidRange(m_validRangeId);
-        m_validRangeId = m_gstPlayer->naluFrameStore()->registerValidRange(m_startIndex, m_endIndex);
+    if (m_validRangeId >= 0 && m_gstPlayer) {
+        m_gstPlayer->updateH264ValidRange(m_validRangeId, m_startIndex, m_endIndex);
     }
     
     setState(PLAYBACK);
@@ -302,8 +298,8 @@ void SlowMotionPlayer::clear()
 {
     pause();
     
-    if (m_validRangeId >= 0 && m_gstPlayer && m_gstPlayer->naluFrameStore()) {
-        m_gstPlayer->naluFrameStore()->unregisterValidRange(m_validRangeId);
+    if (m_validRangeId >= 0 && m_gstPlayer) {
+        m_gstPlayer->unregisterH264ValidRange(m_validRangeId);
         m_validRangeId = -1;
     }
 
@@ -463,23 +459,19 @@ QImage SlowMotionPlayer::getFrameImage(int frameOffset) const
 
     QImage img;
 
-    if (m_gstDecoder && m_gstPlayer && m_gstPlayer->naluFrameStore()) {
-        NaluFrameStore *store = m_gstPlayer->naluFrameStore();
-        if (store->hasFrame(globalIndex)) {
-            QByteArray data = store->getFrame(globalIndex);
-            captureDebugLog("SLW", QString("decode single nalu global=%1 %2 key=%3")
-                .arg(globalIndex)
-                .arg(captureDebugNaluPreview(data))
-                .arg(store->isKeyFrame(globalIndex) ? "Y" : "N"));
+    if (m_gstDecoder && m_gstPlayer) {
+        QByteArray data = m_gstPlayer->readH264Frame(globalIndex);
+        if (!data.isEmpty()) {
+            m_gstDecoder->flush();
             img = const_cast<GstCaptureDecoder*>(m_gstDecoder)->decodeNalu(data);
             if (img.isNull()) {
-                captureDebugLog("SLW", "getFrameImage decodeNalu NULL (P-frame without seek?)");
+                captureDebugLog("SLW", QString("getFrameImage H264 decode NULL global=%1").arg(globalIndex));
             }
         } else {
-            captureDebugLog("SLW", QString("getFrameImage store missing global=%1").arg(globalIndex));
+            captureDebugLog("SLW", QString("getFrameImage H264 file missing global=%1").arg(globalIndex));
         }
     } else {
-        captureDebugLog("SLW", "getFrameImage no decoder/store");
+        captureDebugLog("SLW", "getFrameImage no decoder/player");
     }
 
     if (img.isNull()) return QImage();
@@ -618,9 +610,9 @@ void SlowMotionPlayer::onFrameDecoded(int frameOffset, const QVideoFrame &frame)
 
 // ============ SlowMotionDecodeThread 实现 ============
 
-SlowMotionDecodeThread::SlowMotionDecodeThread(NaluFrameStore *store, QObject *parent)
+SlowMotionDecodeThread::SlowMotionDecodeThread(GstPlayer *player, QObject *parent)
     : QThread(parent)
-    , m_store(store)
+    , m_player(player)
 {
     m_decoder = new GstCaptureDecoder();
 }
@@ -662,29 +654,17 @@ void SlowMotionDecodeThread::run()
             request = m_decodeQueue.dequeue();
         }
 
-        if (request.globalIndex >= 0 && m_decoder && m_store) {
+        if (request.globalIndex >= 0 && m_decoder && m_player) {
             CaptureDebugScope scope("SLW", QString("decodeThread global=%1 local=%2")
                 .arg(request.globalIndex).arg(request.frameOffset), 80);
 
             QImage img;
-            if (m_store->hasFrame(request.globalIndex)) {
-                if (m_lastDecodedGlobal >= 0 && request.globalIndex == m_lastDecodedGlobal + 1) {
-                    // 顺序前进：解码器已就位，直接喂这一帧（快路径）
-                    img = m_decoder->decodeNalu(m_store->getFrame(request.globalIndex));
-                } else {
-                    // 跳帧/乱序：从最近关键帧重放整条链，保证 P 帧有正确参考，
-                    // 避免单帧解码因缺参考而失败/花屏（这会让慢放看着像“没动/倍数无效”）
-                    m_decoder->flush();
-                    const QVector<QPair<QByteArray, qint64>> seq =
-                        m_store->getDecodeSequence(request.globalIndex);
-                    for (const auto &pair : seq) {
-                        img = m_decoder->decodeNalu(pair.first);
-                    }
-                }
-                m_lastDecodedGlobal = img.isNull() ? -1 : request.globalIndex;
+            QByteArray data = m_player->readH264Frame(request.globalIndex);
+            if (!data.isEmpty()) {
+                m_decoder->flush();
+                img = m_decoder->decodeNalu(data);
             } else {
-                m_lastDecodedGlobal = -1;
-                captureDebugLog("SLW", QString("decodeThread missing global=%1").arg(request.globalIndex));
+                captureDebugLog("SLW", QString("decodeThread H264 file missing global=%1").arg(request.globalIndex));
             }
 
             if (img.isNull()) {
