@@ -172,6 +172,26 @@ static int getCore() {
     return 4; // 默认值
 }
 
+// ========== 截图独立帧 H.264 编码画质：按机型分档 ==========
+//   只影响 .h264 帧文件的大小/清晰度，不动缓存/预取等其它逻辑。
+//   qpI 越小越清晰、文件越大；max-bitrate 是码率上限（沿用原单位，相对原值缩放）。
+//   恒定 QP → 文件大小随分辨率自然伸缩（640x480 ~ 1920x1440 各档统一画质）。
+struct H264FrameQuality { int qpI; int bitrateKbps; int maxBitrateKbps; const char *tier; };
+static H264FrameQuality chooseH264FrameQuality() {
+    long memGB = getSystemMemoryGB();
+    int cores = getCore();
+    bool lowCPU = cores <= 6;
+    if (memGB <= 8 || lowCPU) {
+        return { 22, 20000,  80000, "低端(≤8G/≤6核): 省盘+解码快" };
+    } else if (memGB < 16) {
+        return { 18, 30000, 120000, "中端(8-16G): 标准画质" };
+    } else if (memGB < 32) {
+        return { 17, 40000, 200000, "高端(16-32G): 更清晰" };
+    } else {
+        return { 16, 50000, 300000, "超高端(≥32G): 最清晰" };
+    }
+}
+
 GstPlayer::GstPlayer(QObject *parent)
     : QObject(parent)
     , m_networkManager(new QNetworkAccessManager(this))
@@ -1355,13 +1375,16 @@ bool GstPlayer::createH264FrameBranch()
     m_rawFrameTee = gst_element_factory_make("tee", "raw_frame_tee");
     m_h264FrameQueue = gst_element_factory_make("queue", "h264_frame_queue");
     m_h264FrameConvert = gst_element_factory_make("videoconvert", "h264_frame_convert");
+    const H264FrameQuality q = chooseH264FrameQuality();
+    qDebug() << "🎚️ 截图帧编码画质档位:" << q.tier
+             << " qp-i=" << q.qpI << " max-bitrate=" << q.maxBitrateKbps;
     m_h264FrameEncoder = gst_element_factory_make("mfh264enc", "h264_frame_encoder");
     if (m_h264FrameEncoder) {
         m_h264FrameEncoderName = "mfh264enc";
         setIntIfExists(m_h264FrameEncoder, "gop-size", 1);
-        setIntIfExists(m_h264FrameEncoder, "bitrate", 30000);
-        setIntIfExists(m_h264FrameEncoder, "max-bitrate", 120000);
-        setIntIfExists(m_h264FrameEncoder, "qp-i", 18);
+        setIntIfExists(m_h264FrameEncoder, "bitrate", q.bitrateKbps);
+        setIntIfExists(m_h264FrameEncoder, "max-bitrate", q.maxBitrateKbps);
+        setIntIfExists(m_h264FrameEncoder, "qp-i", q.qpI);
         setBoolIfExists(m_h264FrameEncoder, "low-latency", TRUE);
         setIntIfExists(m_h264FrameEncoder, "quality-vs-speed", 0);
     } else {
@@ -1369,7 +1392,9 @@ bool GstPlayer::createH264FrameBranch()
         if (m_h264FrameEncoder) {
             m_h264FrameEncoderName = "x264enc";
             setIntIfExists(m_h264FrameEncoder, "key-int-max", 1);
-            setUIntIfExists(m_h264FrameEncoder, "bitrate", 30000);
+            // 软编：恒定量化(QP)，与硬编同档对齐，文件大小随分辨率自然伸缩
+            setStringIfExists(m_h264FrameEncoder, "pass", "quant");
+            setUIntIfExists(m_h264FrameEncoder, "quantizer", q.qpI);
             setStringIfExists(m_h264FrameEncoder, "tune", "zerolatency");
             setStringIfExists(m_h264FrameEncoder, "speed-preset", "veryfast");
         }

@@ -132,6 +132,7 @@ Rectangle {
     property bool fullscreenViewerVisible: false
     property int fullscreenItemIndex: -1
     property int fullscreenFrameIndex: 0
+    property int fullscreenDisplayFrame: 0  // ⭐ 实际显示的帧（缓存好才前进, 防白屏闪烁）
     property real fullscreenZoom: 1.0
     property real fullscreenOffsetX: 0  // ⭐ 缩放偏移X
     property real fullscreenOffsetY: 0  // ⭐ 缩放偏移Y
@@ -144,6 +145,7 @@ Rectangle {
     property var columnPreviewItems: []  // 该列所有有数据的 dataIndex 列表
     property int columnPreviewRefreshToken: 0
     property var columnPreviewFrames: []   // 每张图的当前帧index
+    property var columnPreviewDisplayFrames: []  // ⭐ 每张图实际显示的帧（缓存好才前进, 防白屏闪烁）
     property var columnPreviewZooms: []    // 每张图的缩放倍率
     property var columnPreviewOffsetX: []  // 每张图的X偏移
     property var columnPreviewOffsetY: []  // 每张图的Y偏移
@@ -151,6 +153,7 @@ Rectangle {
     property int columnPreviewHoveredIndex: -1 // 鼠标悬停的图片索引
     property int columnPreviewZoomItemIdx: -1  // A键放大的图片索引（-1=无）
     property int columnPreviewZoomFrame: 0     // A键放大图片的帧index
+    property int columnPreviewZoomDisplayFrame: 0  // ⭐ A键放大实际显示的帧（缓存好才前进, 防白屏闪烁）
     property real columnPreviewZoomScale: 1.0  // A键放大图片的缩放
     property real columnPreviewZoomOffX: 0     // A键放大图片的X偏移
     property real columnPreviewZoomOffY: 0     // A键放大图片的Y偏移
@@ -626,15 +629,29 @@ Rectangle {
             }
         }
         function onFrameImageReady(itemIndex, frameOffset) {
+            // ⭐ 全屏：目标帧解码完成 → 推进显示帧（未缓存时保持旧画面, 此刻才换, 无白屏）
             if (mainPage.fullscreenViewerVisible
                     && itemIndex === mainPage.fullscreenItemIndex
                     && frameOffset === mainPage.fullscreenFrameIndex) {
+                mainPage.fullscreenDisplayFrame = frameOffset
                 mainPage.fullscreenRefreshToken = Date.now()
             }
+            // ⭐ A键放大：目标帧解码完成 → 推进显示帧
+            if (mainPage.columnPreviewZoomItemIdx >= 0
+                    && mainPage.columnPreviewZoomItemIdx < mainPage.columnPreviewItems.length
+                    && mainPage.columnPreviewItems[mainPage.columnPreviewZoomItemIdx] === itemIndex
+                    && frameOffset === mainPage.columnPreviewZoomFrame) {
+                mainPage.columnPreviewZoomDisplayFrame = frameOffset
+                mainPage.columnPreviewRefreshToken = Date.now()
+            }
+            // ⭐ 列预览：对应 item 的目标帧解码完成 → 推进该 item 的显示帧
             if (mainPage.columnPreviewVisible && mainPage.columnPreviewItems.length > 0) {
                 for (var i = 0; i < mainPage.columnPreviewItems.length; i++) {
                     if (mainPage.columnPreviewItems[i] === itemIndex
                             && mainPage.columnPreviewFrames[i] === frameOffset) {
+                        var disp = mainPage.columnPreviewDisplayFrames.slice()
+                        disp[i] = frameOffset
+                        mainPage.columnPreviewDisplayFrames = disp
                         mainPage.columnPreviewRefreshToken = Date.now()
                         break
                     }
@@ -4024,9 +4041,7 @@ Rectangle {
                 var totalFrames = captureManager.getTotalFrames(fullscreenItemIndex)
                 console.log("⬅️ 全屏左键: totalFrames=" + totalFrames + " current=" + fullscreenFrameIndex + " step=" + mainPage.frameStep)
                 if (totalFrames > 0 && fullscreenFrameIndex > 0) {
-                    fullscreenFrameIndex = Math.max(0, fullscreenFrameIndex - mainPage.frameStep)
-                    fullscreenRefreshToken = Date.now()
-                    captureManager.gotoFrame(fullscreenItemIndex, fullscreenFrameIndex)
+                    fullscreenGoToFrame(fullscreenFrameIndex - mainPage.frameStep)
                 }
             } else if (slowMotionPlayer.hasContent) {
                 slowMotionPlayer.prevFrame()
@@ -4050,9 +4065,7 @@ Rectangle {
                 var totalFrames = captureManager.getTotalFrames(fullscreenItemIndex)
                 console.log("➡️ 全屏右键: totalFrames=" + totalFrames + " current=" + fullscreenFrameIndex + " step=" + mainPage.frameStep)
                 if (totalFrames > 0 && fullscreenFrameIndex < totalFrames - 1) {
-                    fullscreenFrameIndex = Math.min(totalFrames - 1, fullscreenFrameIndex + mainPage.frameStep)
-                    fullscreenRefreshToken = Date.now()
-                    captureManager.gotoFrame(fullscreenItemIndex, fullscreenFrameIndex)
+                    fullscreenGoToFrame(fullscreenFrameIndex + mainPage.frameStep)
                 }
             } else if (slowMotionPlayer.hasContent) {
                 slowMotionPlayer.nextFrame()
@@ -5588,9 +5601,10 @@ Rectangle {
                         }
                     }
 
-                    // 200 档（50fps）：deviceLevel<4 灰显不可点；可选时保持当前画质档位下发，不切 ultra
+                    // 200 档（=50fps）：可点条件 = 当前画质档位的帧率上限 ≥ 200（见《等级与帧率关系说明》）
+                    //   绑定 qualityType + 等级/PC 等级 → 切档位或登录后自动重算灰显，不再写死 deviceLevel
                     Rectangle {
-                        property bool accessible: HttpClient.deviceLevel() >= 4
+                        property bool accessible: mainPage.getMaxFpsForQuality(iosCameraSettingsPopup.qualityType) >= 200
                         width: 50; height: 32; radius: 16
                         property bool active: iosCameraSettingsPopup.antiFlickerEnabled && iosCameraSettingsPopup.antiFlickerFps === 200
                         color: !accessible ? "#E8E8E8" : (!iosCameraSettingsPopup.antiFlickerEnabled ? "#E8E8E8" : (active ? "#4DB6AC" : "#E8F5E9"))
@@ -7075,6 +7089,13 @@ Rectangle {
         var maxFps = getMaxFpsForQuality(qualityType)
         var maxFlicker = getMaxFlickerValue()
         
+        // ⭐ 抗频闪 200 档(=50fps) 需要新档位帧率上限 ≥ 200；切到不支持的档位时自动降到 100 档(=25fps)
+        if (iosCameraSettingsPopup.antiFlickerEnabled && iosCameraSettingsPopup.antiFlickerFps === 200 && maxFps < 200) {
+            console.log("⚠️ 新档位帧率上限=" + maxFps + " 不支持抗频闪200，自动降到100档")
+            iosCameraSettingsPopup.antiFlickerFps = 100
+            sendAntiFlickerConfig()   // 同步 fpsValue/滑块为100并下发
+        }
+        
         if (iosCameraSettingsPopup.fpsValue > maxFps) {
             console.log("⚠️ 帧率超限，限制到新档位最大值: " + iosCameraSettingsPopup.fpsValue + " → " + maxFps)
             iosCameraSettingsPopup.fpsValue = maxFps
@@ -8529,6 +8550,7 @@ Rectangle {
         console.log("📸 列预览: 列" + colNumber + " 共" + items.length + "张 dataIndices=" + JSON.stringify(items))
         columnPreviewItems = items
         columnPreviewFrames = frames
+        columnPreviewDisplayFrames = frames.slice()
         columnPreviewZooms = zooms
         columnPreviewOffsetX = offX
         columnPreviewOffsetY = offY
@@ -8550,6 +8572,7 @@ Rectangle {
         columnPreviewCol = -1
         columnPreviewItems = []
         columnPreviewFrames = []
+        columnPreviewDisplayFrames = []
         columnPreviewZooms = []
         columnPreviewOffsetX = []
         columnPreviewOffsetY = []
@@ -8561,6 +8584,7 @@ Rectangle {
         if (previewIdx < 0 || previewIdx >= columnPreviewItems.length) return
         columnPreviewZoomItemIdx = previewIdx
         columnPreviewZoomFrame = columnPreviewFrames[previewIdx] || 0
+        columnPreviewZoomDisplayFrame = columnPreviewZoomFrame
         columnPreviewZoomScale = 1.0
         columnPreviewZoomOffX = 0
         columnPreviewZoomOffY = 0
@@ -8570,10 +8594,13 @@ Rectangle {
     
     function closeColumnPreviewZoom() {
         if (columnPreviewZoomItemIdx >= 0 && columnPreviewZoomItemIdx < columnPreviewFrames.length) {
-            // 同步帧回列预览
+            // 同步帧回列预览（逻辑帧 + 显示帧）
             var frames = columnPreviewFrames.slice()
             frames[columnPreviewZoomItemIdx] = columnPreviewZoomFrame
             columnPreviewFrames = frames
+            var disp = columnPreviewDisplayFrames.slice()
+            disp[columnPreviewZoomItemIdx] = columnPreviewZoomFrame
+            columnPreviewDisplayFrames = disp
             columnPreviewRefreshToken = Date.now()
         }
         columnPreviewZoomItemIdx = -1
@@ -8584,22 +8611,12 @@ Rectangle {
     
     function columnPreviewZoomPrevFrame() {
         if (columnPreviewZoomItemIdx < 0) return
-        var newF = Math.max(0, columnPreviewZoomFrame - mainPage.frameStep)
-        if (newF !== columnPreviewZoomFrame) {
-            columnPreviewZoomFrame = newF
-            columnPreviewRefreshToken = Date.now()
-        }
+        columnPreviewZoomGoToFrame(columnPreviewZoomFrame - mainPage.frameStep)
     }
 
     function columnPreviewZoomNextFrame() {
         if (columnPreviewZoomItemIdx < 0) return
-        var dataIdx = columnPreviewItems[columnPreviewZoomItemIdx]
-        var total = captureManager.getTotalFrames(dataIdx)
-        var newF = Math.min(total - 1, columnPreviewZoomFrame + mainPage.frameStep)
-        if (newF !== columnPreviewZoomFrame && newF >= 0) {
-            columnPreviewZoomFrame = newF
-            columnPreviewRefreshToken = Date.now()
-        }
+        columnPreviewZoomGoToFrame(columnPreviewZoomFrame + mainPage.frameStep)
     }
 
     // ⭐ 单 item 步进上/下一帧 frameStep 次 (C++ side stepwise)
@@ -8625,8 +8642,7 @@ Rectangle {
             }
         }
         if (changed) {
-            columnPreviewFrames = frames
-            columnPreviewRefreshToken = Date.now()
+            columnPreviewCommitFrames(frames)
         }
     }
 
@@ -8645,8 +8661,7 @@ Rectangle {
             }
         }
         if (changed) {
-            columnPreviewFrames = frames
-            columnPreviewRefreshToken = Date.now()
+            columnPreviewCommitFrames(frames)
         }
     }
 
@@ -8691,12 +8706,63 @@ Rectangle {
         toggleColumnPreview(newColIndex + 1)  // +1 because toggleColumnPreview expects 1-based colNumber
     }
     
+    // ⭐ 全屏：切到目标帧 — 已缓存立即换图(无白屏), 未缓存保持当前画面等解码完成再换
+    function fullscreenGoToFrame(target) {
+        var totalFrames = captureManager.getTotalFrames(fullscreenItemIndex)
+        if (totalFrames <= 0) return
+        target = Math.max(0, Math.min(totalFrames - 1, target))
+        if (target === fullscreenFrameIndex) return
+        fullscreenFrameIndex = target
+        captureManager.gotoFrame(fullscreenItemIndex, target)  // 触发解码+预取
+        if (captureManager.isFrameCached(fullscreenItemIndex, target)) {
+            fullscreenDisplayFrame = target
+            fullscreenRefreshToken = Date.now()
+        }
+    }
+
+    // ⭐ A键放大：切到目标帧 — 同上防闪烁
+    function columnPreviewZoomGoToFrame(target) {
+        if (columnPreviewZoomItemIdx < 0 || columnPreviewZoomItemIdx >= columnPreviewItems.length) return
+        var dataIdx = columnPreviewItems[columnPreviewZoomItemIdx]
+        var total = captureManager.getTotalFrames(dataIdx)
+        if (total <= 0) return
+        target = Math.max(0, Math.min(total - 1, target))
+        if (target === columnPreviewZoomFrame) return
+        columnPreviewZoomFrame = target
+        captureManager.gotoFrame(dataIdx, target)
+        if (captureManager.isFrameCached(dataIdx, target)) {
+            columnPreviewZoomDisplayFrame = target
+            columnPreviewRefreshToken = Date.now()
+        }
+    }
+
+    // ⭐ 列预览：提交新的逐帧数组 — 每个 item 已缓存的立即推进显示帧, 未缓存的等解码
+    function columnPreviewCommitFrames(newFrames) {
+        columnPreviewFrames = newFrames
+        var disp = columnPreviewDisplayFrames.slice()
+        var advanced = false
+        for (var i = 0; i < columnPreviewItems.length; i++) {
+            var dataIdx = columnPreviewItems[i]
+            var f = newFrames[i] || 0
+            captureManager.gotoFrame(dataIdx, f)  // 触发解码+预取
+            if (captureManager.isFrameCached(dataIdx, f)) {
+                disp[i] = f
+                advanced = true
+            }
+        }
+        if (advanced) {
+            columnPreviewDisplayFrames = disp
+            columnPreviewRefreshToken = Date.now()
+        }
+    }
+
     // ============ 全屏查看函数 ============
     function openFullscreenViewer(itemIndex) {
         if (itemIndex < 0 || itemIndex >= captureManager.count) return
         
         fullscreenItemIndex = itemIndex
         fullscreenFrameIndex = captureManager.getCurrentOffset(itemIndex)
+        fullscreenDisplayFrame = fullscreenFrameIndex
         fullscreenZoom = 1.0
         fullscreenOffsetX = 0  // ⭐ 重置偏移
         fullscreenOffsetY = 0
@@ -8771,11 +8837,10 @@ Rectangle {
                     if (totalFrames > 0) {
                         var step = mainPage.frameStep
                         if (wheel.angleDelta.y > 0) {
-                            fullscreenFrameIndex = Math.max(0, fullscreenFrameIndex - step)
+                            fullscreenGoToFrame(fullscreenFrameIndex - step)
                         } else {
-                            fullscreenFrameIndex = Math.min(totalFrames - 1, fullscreenFrameIndex + step)
+                            fullscreenGoToFrame(fullscreenFrameIndex + step)
                         }
-                        fullscreenRefreshToken = Date.now()  // ⭐ 强制刷新图片
                     }
                 }
             }
@@ -8799,7 +8864,7 @@ Rectangle {
                 height: parent.height * fullscreenZoom
                 // ⭐ 使用刷新令牌强制重新加载图片，解决图片不同步问题
                 source: fullscreenViewerVisible && fullscreenItemIndex >= 0 
-                        ? "image://capture/frame/" + fullscreenItemIndex + "/" + fullscreenFrameIndex + "?t=" + fullscreenRefreshToken
+                        ? "image://capture/frame/" + fullscreenItemIndex + "/" + fullscreenDisplayFrame + "?t=" + fullscreenRefreshToken
                         : ""
                 fillMode: Image.Stretch  // 拉伸铺满，完全填充容器
                 cache: false
@@ -8819,11 +8884,9 @@ Rectangle {
                         if (totalFrames > 0) {
                             var step = mainPage.frameStep
                             if (mouse.button === Qt.LeftButton) {
-                                fullscreenFrameIndex = Math.max(0, fullscreenFrameIndex - step)
-                                fullscreenRefreshToken = Date.now()
+                                fullscreenGoToFrame(fullscreenFrameIndex - step)
                             } else if (mouse.button === Qt.RightButton) {
-                                fullscreenFrameIndex = Math.min(totalFrames - 1, fullscreenFrameIndex + step)
-                                fullscreenRefreshToken = Date.now()
+                                fullscreenGoToFrame(fullscreenFrameIndex + step)
                             }
                         }
                     }
@@ -8866,11 +8929,10 @@ Rectangle {
                             if (totalFrames > 0) {
                                 var step = mainPage.frameStep
                                 if (wheel.angleDelta.y > 0) {
-                                    fullscreenFrameIndex = Math.max(0, fullscreenFrameIndex - step)
+                                    fullscreenGoToFrame(fullscreenFrameIndex - step)
                                 } else {
-                                    fullscreenFrameIndex = Math.min(totalFrames - 1, fullscreenFrameIndex + step)
+                                    fullscreenGoToFrame(fullscreenFrameIndex + step)
                                 }
-                                fullscreenRefreshToken = Date.now()  // ⭐ 强制刷新图片
                             }
                         }
                     }
@@ -9038,6 +9100,7 @@ Rectangle {
                     property int myIndex: index
                     property int dataIdx: columnPreviewItems[index]
                     property int frameIdx: columnPreviewFrames.length > index ? columnPreviewFrames[index] : 0
+                    property int displayFrameIdx: columnPreviewDisplayFrames.length > index ? columnPreviewDisplayFrames[index] : 0
                     property int totalFrames: captureManager.getTotalFrames(dataIdx)
                     property real itemZoom: columnPreviewZooms.length > index ? columnPreviewZooms[index] : 1.0
                     property real itemOffX: columnPreviewOffsetX.length > index ? columnPreviewOffsetX[index] : 0
@@ -9058,7 +9121,7 @@ Rectangle {
                         width: parent.width * colPreviewItem.itemZoom
                         height: parent.height * colPreviewItem.itemZoom
                         source: colPreviewItem.dataIdx >= 0
-                            ? "image://capture/frame/" + colPreviewItem.dataIdx + "/" + colPreviewItem.frameIdx + "?t=" + columnPreviewRefreshToken
+                            ? "image://capture/frame/" + colPreviewItem.dataIdx + "/" + colPreviewItem.displayFrameIdx + "?t=" + columnPreviewRefreshToken
                             : ""
                         fillMode: columnPreviewStretch ? Image.Stretch : Image.PreserveAspectFit
                         cache: false
@@ -9099,8 +9162,7 @@ Rectangle {
                                     } else if (mouse.button === Qt.RightButton) {
                                         frames[idx] = Math.min(total - 1, (frames[idx] || 0) + step)
                                     }
-                                    columnPreviewFrames = frames
-                                    columnPreviewRefreshToken = Date.now()
+                                    columnPreviewCommitFrames(frames)
                                 }
                             }
 
@@ -9159,8 +9221,7 @@ Rectangle {
                                         } else {
                                             frames[idx] = Math.min(total - 1, (frames[idx] || 0) + step2)
                                         }
-                                        columnPreviewFrames = frames
-                                        columnPreviewRefreshToken = Date.now()
+                                        columnPreviewCommitFrames(frames)
                                     }
                                 }
                             }
@@ -9281,11 +9342,10 @@ Rectangle {
                     // 普通滚轮：切帧
                     if (columnPreviewZoomOverlay.zoomTotalFrames > 0) {
                         if (wheel.angleDelta.y > 0) {
-                            columnPreviewZoomFrame = Math.max(0, columnPreviewZoomFrame - 1)
+                            columnPreviewZoomGoToFrame(columnPreviewZoomFrame - 1)
                         } else {
-                            columnPreviewZoomFrame = Math.min(columnPreviewZoomOverlay.zoomTotalFrames - 1, columnPreviewZoomFrame + 1)
+                            columnPreviewZoomGoToFrame(columnPreviewZoomFrame + 1)
                         }
-                        columnPreviewRefreshToken = Date.now()
                     }
                 }
             }
@@ -9306,7 +9366,7 @@ Rectangle {
                 width: parent.width * columnPreviewZoomScale
                 height: parent.height * columnPreviewZoomScale
                 source: columnPreviewZoomOverlay.zoomDataIdx >= 0
-                    ? "image://capture/frame/" + columnPreviewZoomOverlay.zoomDataIdx + "/" + columnPreviewZoomFrame + "?t=" + columnPreviewRefreshToken
+                    ? "image://capture/frame/" + columnPreviewZoomOverlay.zoomDataIdx + "/" + columnPreviewZoomDisplayFrame + "?t=" + columnPreviewRefreshToken
                     : ""
                 fillMode: columnPreviewStretch ? Image.Stretch : Image.PreserveAspectFit
                 cache: false
@@ -9321,11 +9381,9 @@ Rectangle {
                         // ⭐ 左键=上一帧，右键=下一帧
                         if (columnPreviewZoomOverlay.zoomTotalFrames > 0) {
                             if (mouse.button === Qt.LeftButton) {
-                                columnPreviewZoomFrame = Math.max(0, columnPreviewZoomFrame - 1)
-                                columnPreviewRefreshToken = Date.now()
+                                columnPreviewZoomGoToFrame(columnPreviewZoomFrame - 1)
                             } else if (mouse.button === Qt.RightButton) {
-                                columnPreviewZoomFrame = Math.min(columnPreviewZoomOverlay.zoomTotalFrames - 1, columnPreviewZoomFrame + 1)
-                                columnPreviewRefreshToken = Date.now()
+                                columnPreviewZoomGoToFrame(columnPreviewZoomFrame + 1)
                             }
                         }
                     }
@@ -9348,11 +9406,10 @@ Rectangle {
                         } else {
                             if (columnPreviewZoomOverlay.zoomTotalFrames > 0) {
                                 if (wheel.angleDelta.y > 0) {
-                                    columnPreviewZoomFrame = Math.max(0, columnPreviewZoomFrame - 1)
+                                    columnPreviewZoomGoToFrame(columnPreviewZoomFrame - 1)
                                 } else {
-                                    columnPreviewZoomFrame = Math.min(columnPreviewZoomOverlay.zoomTotalFrames - 1, columnPreviewZoomFrame + 1)
+                                    columnPreviewZoomGoToFrame(columnPreviewZoomFrame + 1)
                                 }
-                                columnPreviewRefreshToken = Date.now()
                             }
                         }
                     }
