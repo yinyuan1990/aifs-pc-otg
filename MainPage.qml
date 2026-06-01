@@ -11595,9 +11595,7 @@ Rectangle {
             if (typeof ifSharpnessSlider  !== 'undefined') ifSharpnessSlider.value  = iosFilterPopup.fSharpness
             if (typeof ifHighlightLiftSlider !== 'undefined') ifHighlightLiftSlider.value = iosFilterPopup.fHighlightLift
             if (typeof ifGainSlider       !== 'undefined') ifGainSlider.value       = iosFilterPopup.fGain
-            if (typeof cameraFakeExposureSlider !== 'undefined') cameraFakeExposureSlider.value = iosFilterPopup.fBrightness
-            if (typeof cameraBrightnessSlider   !== 'undefined') cameraBrightnessSlider.value   = iosFilterPopup.fContrast
-            if (typeof cameraSaturationSlider   !== 'undefined') cameraSaturationSlider.value   = iosFilterPopup.fSaturation
+            // 综亮/综对/综曝 三个 0-100 主旋钮各自独立，不在此回写相机设定弹框滑块
         }
 
         // ⭐ 综合亮度-对比度(0-100) → 驱动所有 brightContrastSwitch=true 的参数
@@ -11681,15 +11679,11 @@ Rectangle {
                 v = clampVal(v, brightnessFrom, brightnessTo)
                 fBrightness = v;  prevBrightness = v
                 if (typeof ifMasterSlider !== 'undefined') ifMasterSlider.value = v
-                // ⭐ Bug3 修复：同步更新相机设定的"曝光度"滑块（实际驱动 brightness）
-                if (typeof cameraFakeExposureSlider !== 'undefined') cameraFakeExposureSlider.value = v
                 pushParam("brightness", v)
             } else if (ptype === "contrast") {
                 v = clampVal(v, contrastFrom, contrastTo)
                 fContrast = v;   prevContrast = v
                 if (typeof ifContrastSlider !== 'undefined') ifContrastSlider.value = v
-                // ⭐ Bug3 修复：同步更新相机设定的"对比度"滑块
-                if (typeof cameraBrightnessSlider !== 'undefined') cameraBrightnessSlider.value = v
                 pushParam("contrast", v)
             } else if (ptype === "saturation") {
                 v = clampVal(v, saturationFrom, saturationTo)
