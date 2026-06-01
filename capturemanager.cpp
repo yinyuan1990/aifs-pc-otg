@@ -807,10 +807,15 @@ void CaptureManager::capture()
 
     if (m_slowMotionActive && m_slowMotionPlayer) {
         oldestAvailable = m_slowMotionPlayer->startIndex();
-        qint64 newestAvailable = m_slowMotionPlayer->endIndex();
-        qDebug() << "📷 Capture (SlowMotion): 慢放可用范围" << oldestAvailable << "-" << newestAvailable;
         startIndex = qMax(startIndex, oldestAvailable);
-        endIndex = qMin(endIndex, newestAvailable);
+        // 跟实时流同步时不在慢放尾部压 endIndex，否则 endIndex==eventIndex，后抓拍帧无法滚动
+        if (!m_slowMotionPlayer->followLive()) {
+            qint64 newestAvailable = m_slowMotionPlayer->endIndex();
+            qDebug() << "📷 Capture (SlowMotion): 回放范围" << oldestAvailable << "-" << newestAvailable;
+            endIndex = qMin(endIndex, newestAvailable);
+        } else {
+            qDebug() << "📷 Capture (SlowMotion): followLive，endIndex=" << endIndex << "(不压到慢放 endIndex)";
+        }
     } else if (m_gstPlayer) {
         oldestAvailable = m_gstPlayer->oldestH264Frame();
         startIndex = qMax(startIndex, oldestAvailable);

@@ -113,6 +113,7 @@ public:
     double playbackMultiplier() const { return m_playbackMultiplier; }
     int maxFrameRate() const { return m_maxFrameRate; }
     bool isPlaying() const { return m_isPlaying; }
+    bool followLive() const { return m_followLive; }
     
     GpuPipeline* gpuPipeline() const { return m_gpuPipeline; }
     GstPlayer* gstPlayer() const { return m_gstPlayer; }
