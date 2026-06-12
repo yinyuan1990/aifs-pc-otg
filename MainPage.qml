@@ -265,6 +265,8 @@ Rectangle {
                 var payload = {
                     "type": "VIEWER_HEARTBEAT",
                     "deviceId": deviceId,
+                    "fromDevice": HttpClient.pcDeviceId(),   // ⭐ PC 唯一标识，供 iOS 统计观看者数
+                    "networkType": "wifi",                   // ⭐ PC 为桌面控制端，视为非蜂窝宽带
                     "fps": gstPlayer.receiveFps,
                     "timestamp": Date.now()
                 }
@@ -7784,21 +7786,22 @@ Rectangle {
             
             // 解析连接类型: 0 或未传 = SRS 模式, 1 = P2P 直连模式
             var connectstype = state.connectstype !== undefined ? state.connectstype : 0
-            if (connectstype !== mainPage.connectMode) {
+            var modeChanged = (connectstype !== mainPage.connectMode)
+            if (modeChanged) {
                 console.log("🔄 连接模式变更: " + mainPage.connectMode + " → " + connectstype)
                 mainPage.connectMode = connectstype
             }
             
             // ⭐ 推流状态处理
             if (publishStatus === 1 && streamKey && streamKey.length > 0) {
+                lastStreamKey = streamKey
+                currentStream = streamKey
                 // 开始推流
                 if (publishState === 0) {
                     console.log("📥 设备开始推流，推流ID: " + streamKey)
                     HttpClient.copyToClipboard(streamKey)
                     publishState = 1
                     mainPage.deviceStatus = ""
-                    lastStreamKey = streamKey
-                    currentStream = streamKey
                     statusText.text = "正在连接视频流..."
                     
                     // 根据 connectstype 选择拉流模式
@@ -7807,6 +7810,15 @@ Rectangle {
                         playP2P()
                     } else {
                         console.log("🎬 使用 SRS 模式拉流")
+                        playWebRTC()
+                    }
+                } else if (modeChanged) {
+                    // ⭐ 播放中 iOS 切换了连接方式（P2P↔SRS）→ 重连到新模式
+                    console.log("🔁 播放中连接方式切换 → " + (mainPage.connectMode === 1 ? "P2P" : "SRS") + "，重连")
+                    stopAll()
+                    if (mainPage.connectMode === 1) {
+                        playP2P()
+                    } else {
                         playWebRTC()
                     }
                 }
