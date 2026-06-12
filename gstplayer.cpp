@@ -334,13 +334,11 @@ bool GstPlayer::createPipeline()
         int cpuCores = getCore();
         bool isLowEndCPU = cpuCores <= 6;
         
-        // ⭐⭐⭐ v9.3双缓冲方案：根据连接模式选择 jitterbuffer 延迟
-        // P2P 直连：RTT 低(10-50ms)，用 150ms 即可吸收抖动，延迟更低
-        // SRS 中转：经过服务器，网络路径长，保持 600ms 保守缓冲
-        int jitterLatencyMs = m_useP2P ? 150 : 600;
-        int retryTimeoutMs = m_useP2P ? 15 : 25;
-        int dropoutMs = m_useP2P ? 500 : 1200;
-        int misorderMs = m_useP2P ? 300 : 800;
+        // ⭐ P2P 与 SRS 统一使用同一套 jitterbuffer 参数（都按 SRS 来，不再区分连接模式）
+        int jitterLatencyMs = 600;
+        int retryTimeoutMs = 25;
+        int dropoutMs = 1200;
+        int misorderMs = 800;
         QString machineType;
         
         if (memoryGB <= 8 || isLowEndCPU) {

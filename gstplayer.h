@@ -380,18 +380,12 @@ private:
     // 🔥🔥🔥 v9.3双缓冲：基于fps比例计算队列参数（copygstream版本）
     // SRS模式：30fps → optimal=7帧(220ms), min=5帧(150ms), max=14帧(470ms)
     // P2P模式：30fps → optimal=3帧(100ms), min=2帧(67ms), max=6帧(200ms)
-    static inline void getQueueSizeByFps(double fps, int &outMin, int &outOptimal, int &outMax, double /*corruptRatio*/ = 0.0, bool isP2P = false) {
-        if (isP2P) {
-            // P2P 直连：加深缓冲（之前100ms太浅，网络抖动一次就见底）
-            outOptimal = qMax(4, static_cast<int>(fps * 0.17 + 0.5));  // 17%，约170ms
-            outMin = qMax(3, static_cast<int>(fps * 0.10 + 0.5));      // 10%，约100ms
-            outMax = qMax(6, static_cast<int>(fps * 0.30 + 0.5));      // 30%，约300ms
-        } else {
-            // SRS 中转：网络路径长，需要更深缓冲
-            outOptimal = qMax(QUEUE_ABS_MIN, static_cast<int>(fps * BUFFER_RATIO_OPTIMAL + 0.5));
-            outMin = qMax(QUEUE_ABS_MIN, static_cast<int>(fps * BUFFER_RATIO_MIN + 0.5));
-            outMax = qMax(QUEUE_ABS_MIN, static_cast<int>(fps * BUFFER_RATIO_MAX + 0.5));
-        }
+    static inline void getQueueSizeByFps(double fps, int &outMin, int &outOptimal, int &outMax, double /*corruptRatio*/ = 0.0, bool /*isP2P*/ = false) {
+        // ⭐ P2P 与 SRS 统一使用同一套队列配置（都按 SRS 来，不再区分）
+        // SRS模式：30fps → optimal=7帧(220ms), min=5帧(150ms), max=14帧(470ms)
+        outOptimal = qMax(QUEUE_ABS_MIN, static_cast<int>(fps * BUFFER_RATIO_OPTIMAL + 0.5));
+        outMin = qMax(QUEUE_ABS_MIN, static_cast<int>(fps * BUFFER_RATIO_MIN + 0.5));
+        outMax = qMax(QUEUE_ABS_MIN, static_cast<int>(fps * BUFFER_RATIO_MAX + 0.5));
     }
     
     // (旧常量已移至速率范围 R_MIN=0.7, R_MAX=1.2)
@@ -434,12 +428,11 @@ private:
     static constexpr int FPS_CHANGE_STABLE_SEC = 3;      // FPS变化持续3秒才触发
     
     // GStreamer 固定配置
-    // P2P 直连：150ms（RTT低，抖动小）
-    // SRS 中转：600ms（网络路径长，需要更大缓冲）
-    static constexpr int GST_JITTER_LATENCY_P2P = 150;
+    // ⭐ P2P 与 SRS 统一使用 SRS 的 600ms（队列/延迟都按 SRS 来，不再区分）
+    static constexpr int GST_JITTER_LATENCY_P2P = 600;
     static constexpr int GST_JITTER_LATENCY_SRS = 600;
     static constexpr int GST_JITTER_LATENCY = 600;  // 兼容旧引用（SRS默认值）
-    int getJitterLatency() const { return m_useP2P ? GST_JITTER_LATENCY_P2P : GST_JITTER_LATENCY_SRS; }
+    int getJitterLatency() const { return GST_JITTER_LATENCY_SRS; }
     
     // ========== 自适应状态变量 ==========
     double m_configFps = 30.0;                   // 配置fps（PC手动设置/iOS设备fps）
