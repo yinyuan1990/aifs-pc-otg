@@ -1465,11 +1465,15 @@ Rectangle {
                 Menu {
                     id: avatarMenu
                     y: parent.height + 5
-                    width: 80
+                    width: 100
                     
                     MenuItem {
                         text: "切换账号"
                         onTriggered: showSwitchAccountDialog()
+                    }
+                    MenuItem {
+                        text: "修改登录密码"
+                        onTriggered: showChangeLoginPasswordDialog()
                     }
                     MenuItem {
                         text: "退出登录"
@@ -10327,6 +10331,17 @@ Rectangle {
             console.log("❌ ChangePassword failed:", code, message)
             showToast("修改密码失败: " + message)
         }
+
+        function onChangeLoginPasswordSuccess(message) {
+            console.log("✅ ChangeLoginPassword success:", message)
+            changeLoginPasswordDialog.close()
+            showToast(message && message.length > 0 ? message : "登录密码修改成功")
+        }
+
+        function onChangeLoginPasswordFailed(code, message) {
+            console.log("❌ ChangeLoginPassword failed:", code, message)
+            showToast("修改登录密码失败: " + message)
+        }
     }
     
     // ============ 设置备注对话框 ============
@@ -10765,6 +10780,247 @@ Rectangle {
         newLoginPasswordInput.text = ""
         newPasswordInput.text = ""
         changePasswordDialog.open()
+    }
+
+    // ============ 修改当前登录账号密码对话框 ============
+    Dialog {
+        id: changeLoginPasswordDialog
+        anchors.centerIn: parent
+        width: 360
+        height: 360
+        modal: true
+        title: ""
+
+        background: Rectangle {
+            color: "#FFFFFF"
+            radius: 12
+            border.color: "#A5D6A7"
+            border.width: 1
+        }
+
+        header: Item {
+            width: parent.width
+            height: 50
+            Text {
+                anchors.centerIn: parent
+                text: "修改登录密码"
+                font.family: "PingFang HK"
+                font.pixelSize: 16
+                font.bold: true
+                color: "#263238"
+            }
+            Rectangle {
+                width: parent.width
+                height: 1
+                anchors.bottom: parent.bottom
+                color: "#E8F5E9"
+            }
+        }
+
+        contentItem: Column {
+            spacing: 12
+            padding: 20
+
+            Text {
+                text: "账号: " + (HttpClient.loggedInUsername() || "")
+                font.family: "PingFang HK"
+                font.pixelSize: 13
+                color: "#666666"
+            }
+
+            // 当前登录密码
+            Column {
+                spacing: 6
+                width: parent.width - 40
+                Text {
+                    text: "当前登录密码"
+                    font.family: "PingFang HK"
+                    font.pixelSize: 13
+                    color: "#333333"
+                }
+                Rectangle {
+                    width: parent.width
+                    height: 40
+                    radius: 6
+                    border.color: oldLoginPwdInput.activeFocus ? "#3993D2" : "#E0E0E0"
+                    border.width: oldLoginPwdInput.activeFocus ? 2 : 1
+                    TextInput {
+                        id: oldLoginPwdInput
+                        anchors.fill: parent
+                        anchors.margins: 10
+                        font.family: "PingFang HK"
+                        font.pixelSize: 14
+                        color: "#263238"
+                        echoMode: TextInput.Password
+                        clip: true
+                        verticalAlignment: TextInput.AlignVCenter
+                        Text {
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: "请输入当前登录密码"
+                            color: "#AAAAAA"
+                            font.family: "PingFang HK"
+                            font.pixelSize: 14
+                            visible: parent.text.length === 0 && !parent.activeFocus
+                        }
+                    }
+                }
+            }
+
+            // 新登录密码
+            Column {
+                spacing: 6
+                width: parent.width - 40
+                Text {
+                    text: "新登录密码 (1-20位)"
+                    font.family: "PingFang HK"
+                    font.pixelSize: 13
+                    color: "#333333"
+                }
+                Rectangle {
+                    width: parent.width
+                    height: 40
+                    radius: 6
+                    border.color: newLoginPwdInput2.activeFocus ? "#3993D2" : "#E0E0E0"
+                    border.width: newLoginPwdInput2.activeFocus ? 2 : 1
+                    TextInput {
+                        id: newLoginPwdInput2
+                        anchors.fill: parent
+                        anchors.margins: 10
+                        font.family: "PingFang HK"
+                        font.pixelSize: 14
+                        color: "#263238"
+                        echoMode: TextInput.Password
+                        clip: true
+                        verticalAlignment: TextInput.AlignVCenter
+                        Text {
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: "请输入新登录密码"
+                            color: "#AAAAAA"
+                            font.family: "PingFang HK"
+                            font.pixelSize: 14
+                            visible: parent.text.length === 0 && !parent.activeFocus
+                        }
+                    }
+                }
+            }
+
+            // 确认新登录密码
+            Column {
+                spacing: 6
+                width: parent.width - 40
+                Text {
+                    text: "确认新登录密码"
+                    font.family: "PingFang HK"
+                    font.pixelSize: 13
+                    color: "#333333"
+                }
+                Rectangle {
+                    width: parent.width
+                    height: 40
+                    radius: 6
+                    border.color: confirmLoginPwdInput.activeFocus ? "#3993D2" : "#E0E0E0"
+                    border.width: confirmLoginPwdInput.activeFocus ? 2 : 1
+                    TextInput {
+                        id: confirmLoginPwdInput
+                        anchors.fill: parent
+                        anchors.margins: 10
+                        font.family: "PingFang HK"
+                        font.pixelSize: 14
+                        color: "#263238"
+                        echoMode: TextInput.Password
+                        clip: true
+                        verticalAlignment: TextInput.AlignVCenter
+                        Text {
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: "请再次输入新登录密码"
+                            color: "#AAAAAA"
+                            font.family: "PingFang HK"
+                            font.pixelSize: 14
+                            visible: parent.text.length === 0 && !parent.activeFocus
+                        }
+                    }
+                }
+            }
+
+            // 按钮行
+            Row {
+                spacing: 12
+                anchors.horizontalCenter: parent.horizontalCenter
+
+                Rectangle {
+                    width: 100
+                    height: 36
+                    radius: 6
+                    color: cancelLoginPwdBtnArea.containsMouse ? "#F0F0F0" : "#FAFAFA"
+                    border.color: "#A5D6A7"
+                    border.width: 1
+                    Text {
+                        anchors.centerIn: parent
+                        text: "取消"
+                        font.family: "PingFang HK"
+                        font.pixelSize: 14
+                        color: "#546E7A"
+                    }
+                    MouseArea {
+                        id: cancelLoginPwdBtnArea
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: changeLoginPasswordDialog.close()
+                    }
+                }
+
+                Rectangle {
+                    width: 100
+                    height: 36
+                    radius: 6
+                    color: confirmLoginPwdBtnArea.containsMouse ? "#2E7BB8" : "#3993D2"
+                    Text {
+                        anchors.centerIn: parent
+                        text: "确认修改"
+                        font.family: "PingFang HK"
+                        font.pixelSize: 14
+                        color: "#FFFFFF"
+                    }
+                    MouseArea {
+                        id: confirmLoginPwdBtnArea
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            var oldPwd = oldLoginPwdInput.text.trim()
+                            var newPwd = newLoginPwdInput2.text.trim()
+                            var confirmPwd = confirmLoginPwdInput.text.trim()
+
+                            if (oldPwd.length === 0) {
+                                showToast("请输入当前登录密码")
+                                return
+                            }
+                            if (newPwd.length < 1 || newPwd.length > 20) {
+                                showToast("新登录密码长度需为1-20位")
+                                return
+                            }
+                            if (newPwd !== confirmPwd) {
+                                showToast("两次输入的新密码不一致")
+                                return
+                            }
+                            HttpClient.changeLoginPassword(oldPwd, newPwd)
+                            showToast("正在修改登录密码...")
+                        }
+                    }
+                }
+            }
+        }
+
+        footer: Item { height: 1 }
+    }
+
+    // 显示修改登录密码对话框
+    function showChangeLoginPasswordDialog() {
+        oldLoginPwdInput.text = ""
+        newLoginPwdInput2.text = ""
+        confirmLoginPwdInput.text = ""
+        changeLoginPasswordDialog.open()
     }
     
     // ============ 抓拍清空确认对话框 ============

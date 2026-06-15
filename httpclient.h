@@ -130,6 +130,12 @@ public:
     Q_INVOKABLE void changeDevicePassword(const QString &controlUsername, const QString &deviceUsername, 
                                           const QString &currentSecondaryPassword, 
                                           const QString &newLoginPassword, const QString &newSecondaryPassword);
+
+    // 修改当前登录(控制端)账号自己的登录密码
+    Q_INVOKABLE void changeLoginPassword(const QString &oldPassword, const QString &newPassword);
+
+    // PC端自助删除控制账号（同时解除其所有 iOS/Android 设备绑定）
+    Q_INVOKABLE void deletePcAccount(const QString &username, const QString &password);
     
     // ============ iOS相机设定接口 ============
     // 获取相机设定（登录成功后调用）
@@ -252,6 +258,14 @@ signals:
     // 修改设备管理密码结果信号
     void changePasswordSuccess(const QString &deviceUsername, const QString &message, int notifyCount, int unbindCount);
     void changePasswordFailed(int code, const QString &message);
+
+    // 修改当前登录账号密码结果信号
+    void changeLoginPasswordSuccess(const QString &message);
+    void changeLoginPasswordFailed(int code, const QString &message);
+
+    // PC端自助删除控制账号结果信号
+    void deletePcAccountSuccess(const QString &username, const QString &message);
+    void deletePcAccountFailed(const QString &username, int code, const QString &message);
     
     // iOS相机设定结果信号
     void cameraSettingSuccess(const QString &ptype, const QString &message);

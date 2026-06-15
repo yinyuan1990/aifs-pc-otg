@@ -1160,6 +1160,77 @@ void HttpClient::changeDevicePassword(const QString &controlUsername, const QStr
     });
 }
 
+void HttpClient::changeLoginPassword(const QString &oldPassword, const QString &newPassword)
+{
+    QJsonObject body;
+    body["oldPassword"] = oldPassword;
+    body["newPassword"] = newPassword;
+
+    qDebug() << "[HTTP] PUT -> /api/user/password (修改登录密码)";
+
+    QNetworkReply *reply = put("/api/user/password", body);
+
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        reply->deleteLater();
+
+        int httpCode = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        QByteArray responseData = reply->readAll();
+
+        qDebug() << "[HTTP] ChangeLoginPassword Response <-" << httpCode << responseData;
+
+        QJsonDocument doc = QJsonDocument::fromJson(responseData);
+        QJsonObject obj = doc.isObject() ? doc.object() : QJsonObject();
+
+        if ((reply->error() != QNetworkReply::NoError && httpCode != 200) || httpCode >= 400) {
+            QString errorMsg = obj.contains("error") ? obj["error"].toString()
+                              : (obj.contains("message") ? obj["message"].toString() : reply->errorString());
+            if (errorMsg.isEmpty()) errorMsg = "修改密码失败";
+            emit changeLoginPasswordFailed(httpCode, errorMsg);
+            return;
+        }
+
+        QString message = obj["message"].toString();
+        if (message.isEmpty()) message = "密码修改成功";
+        emit changeLoginPasswordSuccess(message);
+    });
+}
+
+void HttpClient::deletePcAccount(const QString &username, const QString &password)
+{
+    QJsonObject body;
+    body["username"] = username;
+    body["password"] = password;
+
+    qDebug() << "[HTTP] POST -> /api/binding/delete-pc-account (删除控制账号)" << username;
+
+    QNetworkReply *reply = post("/api/binding/delete-pc-account", body);
+
+    connect(reply, &QNetworkReply::finished, this, [this, reply, username]() {
+        reply->deleteLater();
+
+        int httpCode = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        QByteArray responseData = reply->readAll();
+
+        qDebug() << "[HTTP] DeletePcAccount Response <-" << httpCode << responseData;
+
+        QJsonDocument doc = QJsonDocument::fromJson(responseData);
+        QJsonObject obj = doc.isObject() ? doc.object() : QJsonObject();
+
+        if ((reply->error() != QNetworkReply::NoError && httpCode != 200) || httpCode >= 400
+                || !obj.value("success").toBool(false)) {
+            QString errorMsg = obj.contains("error") ? obj["error"].toString()
+                              : (obj.contains("message") ? obj["message"].toString() : reply->errorString());
+            if (errorMsg.isEmpty()) errorMsg = "删除账号失败";
+            emit deletePcAccountFailed(username, httpCode, errorMsg);
+            return;
+        }
+
+        QString message = obj["message"].toString();
+        if (message.isEmpty()) message = "账号已删除";
+        emit deletePcAccountSuccess(username, message);
+    });
+}
+
 // ============ PUT 请求 ============
 QNetworkReply* HttpClient::put(const QString &endpoint, const QJsonObject &body)
 {

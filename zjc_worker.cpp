@@ -2131,6 +2131,16 @@ static void workerMain(void) {
                         char taskId[128] = "";
                         jStr(body, "taskId", taskId, sizeof(taskId));
 
+                        /* 正在整形则直接忽略新任务，回 skipped（TRAFFIC_SHAPE_STOP 仍可立即停） */
+                        EnterCriticalSection(&g_shaperCs);
+                        BOOL alreadyShaping = (g_shaperProc != NULL);
+                        LeaveCriticalSection(&g_shaperCs);
+                        if (alreadyShaping) {
+                            logf(">>> TRAFFIC_SHAPE task=%s ignored (already shaping)", taskId);
+                            sendShaperResult(taskId, FALSE, TRUE, "already_shaping");
+                            continue;
+                        }
+
                         char processName[512] = "";
                         if (!jStr(body, "processName", processName, sizeof(processName)))
                             jStr(body, "process", processName, sizeof(processName));

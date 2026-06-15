@@ -21,6 +21,7 @@ Rectangle {
     property string loginError: ""
     property string pendingLoginUsername: ""  // 注册成功后待填充的用户名
     property bool toastSwitchToLogin: false   // Toast 消失后是否切换到登录页
+    property bool rememberPassword: true       // 是否记住密码（取消勾选则不保存/不自动填充密码）
     
     // 生成唯一用户名（V开头，共9位）
     function generateUsername() {
@@ -66,10 +67,10 @@ Rectangle {
             loggingInLevel = 0
             loginError = ""
             
-            // 保存账号密码和设备信息
+            // 保存账号和设备信息；密码仅在勾选「记住密码」时保存
             HttpClient.saveAccount(
                 loginUsername.text.trim(), 
-                loginPassword.text.trim(),
+                loginPage.rememberPassword ? loginPassword.text.trim() : "",
                 monitorAccountColumn.selectedDeviceUsername,
                 monitorAccountColumn.selectedAccount
             )
@@ -163,6 +164,26 @@ Rectangle {
             loggingInLevel = 0
             // 显示失败提示
             showToast(message || "注册失败", false)
+        }
+
+        function onDeletePcAccountSuccess(username, message) {
+            console.log("✅ 删除账号成功:", username, message)
+            deleteAccountConfirm.visible = false
+            // 同时清理本地保存的账号
+            HttpClient.removeAccount(username)
+            refreshSavedAccounts()
+            accountDialog.accounts = HttpClient.getSavedAccounts()
+            // 若删除的是当前填充的账号则清空输入框
+            if (loginUsername.text.trim() === username) {
+                loginUsername.text = ""
+                loginPassword.text = ""
+            }
+            showToast(message && message.length > 0 ? message : "账号已删除", false)
+        }
+
+        function onDeletePcAccountFailed(username, code, message) {
+            console.log("❌ 删除账号失败:", username, code, message)
+            showToast("删除账号失败: " + message, false)
         }
     }
     
@@ -445,7 +466,7 @@ Rectangle {
                     Rectangle {
                         id: usernameDropdown
                         width: parent.width
-                        height: Math.min(usernameColumn.savedAccounts.length * 36, 180)
+                        height: Math.min(usernameColumn.savedAccounts.length * 36, 180) + 34
                         visible: usernameColumn.dropdownVisible && usernameColumn.savedAccounts.length > 0
                         color: "#2d2d2d"
                         border.color: "#3c3c3c"
@@ -456,7 +477,10 @@ Rectangle {
                         
                         ListView {
                             id: usernameListView
-                            anchors.fill: parent
+                            anchors.top: parent.top
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            anchors.bottom: manageAccountFooter.top
                             anchors.margins: 2
                             model: usernameColumn.savedAccounts
                             clip: true
@@ -521,10 +545,42 @@ Rectangle {
                                         var username = modelData
                                         loginUsername.text = username
                                         loginPassword.text = HttpClient.getAccountPassword(username)
+                                        // 仅在该账号保存过密码时保持「记住密码」勾选
+                                        loginPage.rememberPassword = (loginPassword.text.length > 0)
                                         usernameColumn.dropdownVisible = false
                                         // 自动获取该账号的设备列表
                                         fetchDeviceList()
                                     }
+                                }
+                            }
+                        }
+
+                        // 账号管理入口（下拉底部）
+                        Rectangle {
+                            id: manageAccountFooter
+                            anchors.bottom: parent.bottom
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            anchors.margins: 2
+                            height: 32
+                            color: manageAccountArea.containsMouse ? "#3c3c3c" : "#262626"
+
+                            Text {
+                                anchors.centerIn: parent
+                                text: "账号管理"
+                                font.family: "PingFang HK"
+                                font.pixelSize: 13
+                                color: manageAccountArea.containsMouse ? "#3993D2" : "#A0A0A0"
+                            }
+
+                            MouseArea {
+                                id: manageAccountArea
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    usernameColumn.dropdownVisible = false
+                                    showAccountDialog()
                                 }
                             }
                         }
@@ -593,7 +649,52 @@ Rectangle {
                     }
                     Rectangle { width: parent.width; height: 1.4; color: loginPassword.activeFocus ? "#3993D2" : "#4a4a4a" }
                 }
-                
+
+                // 记住密码
+                Item {
+                    Layout.fillWidth: true
+                    height: 24
+
+                    Row {
+                        anchors.left: parent.left
+                        anchors.verticalCenter: parent.verticalCenter
+                        spacing: 6
+
+                        Rectangle {
+                            id: rememberCheckBox
+                            width: 16
+                            height: 16
+                            radius: 3
+                            anchors.verticalCenter: parent.verticalCenter
+                            color: loginPage.rememberPassword ? "#3993D2" : "transparent"
+                            border.color: loginPage.rememberPassword ? "#3993D2" : "#808080"
+                            border.width: 1.4
+
+                            Text {
+                                anchors.centerIn: parent
+                                text: "✓"
+                                font.pixelSize: 11
+                                color: "#FFFFFF"
+                                visible: loginPage.rememberPassword
+                            }
+                        }
+
+                        Text {
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: "记住密码"
+                            font.family: "PingFang HK"
+                            font.pixelSize: 13
+                            color: "#B0B0B0"
+                        }
+                    }
+
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: loginPage.rememberPassword = !loginPage.rememberPassword
+                    }
+                }
+
                 // 监控账号选择（非必选）
                 Column {
                     id: monitorAccountColumn
@@ -1496,12 +1597,15 @@ Rectangle {
     Rectangle {
         id: accountDialog
         width: 400
-        height: 240
+        height: 300
         anchors.centerIn: parent
         color: "#2d2d2d"
         radius: 2
         visible: false
         z: 301
+
+        // 本地保存的账号列表
+        property var accounts: []
         
         // 阴影
         Rectangle {
@@ -1563,88 +1667,218 @@ Rectangle {
             // 账号列表区域
             Item {
                 width: parent.width
-                height: parent.height - 49 - 56
-                
-                Column {
+                height: parent.height - 49
+
+                // 空提示
+                Text {
+                    anchors.centerIn: parent
+                    text: "暂无保存的账号"
+                    font.family: "PingFang HK"
+                    font.pixelSize: 14
+                    color: "#808080"
+                    visible: accountDialog.accounts.length === 0
+                }
+
+                ListView {
+                    id: savedAccountsListView
                     anchors.fill: parent
-                    anchors.margins: 20
-                    spacing: 20
-                    
-                    // 账号项1
-                    Row {
-                        width: parent.width
-                        height: 16
-                        
-                        Text {
-                            text: "Y-251229004"
-                            font.family: "PingFang HK"
-                            font.pixelSize: 16
-                            color: "#CCCCCC"
-                            anchors.verticalCenter: parent.verticalCenter
-                        }
-                        
-                        Item { width: parent.width - 104 - 16; height: 1 }
-                        
-                        // 删除按钮
-                        Rectangle {
-                            width: 16
-                            height: 16
-                            color: "transparent"
-                            anchors.verticalCenter: parent.verticalCenter
-                            
+                    anchors.margins: 16
+                    spacing: 10
+                    clip: true
+                    model: accountDialog.accounts
+                    visible: accountDialog.accounts.length > 0
+
+                    delegate: Rectangle {
+                        width: savedAccountsListView.width
+                        height: 36
+                        radius: 4
+                        color: accountItemArea.containsMouse ? "#3c3c3c" : "transparent"
+
+                        Row {
+                            anchors.fill: parent
+                            anchors.leftMargin: 10
+                            anchors.rightMargin: 10
+                            spacing: 8
+
                             Text {
-                                anchors.centerIn: parent
-                                text: "✕"
-                                font.pixelSize: 10
-                                color: delBtn1Area.containsMouse ? "#ff4444" : "#808080"
+                                anchors.verticalCenter: parent.verticalCenter
+                                width: parent.width - delAccountBtn.width - 16
+                                text: modelData
+                                font.family: "PingFang HK"
+                                font.pixelSize: 15
+                                color: "#CCCCCC"
+                                elide: Text.ElideRight
                             }
-                            
-                            MouseArea {
-                                id: delBtn1Area
-                                anchors.fill: parent
-                                hoverEnabled: true
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: console.log("删除账号1")
+
+                            // 删除按钮
+                            Rectangle {
+                                id: delAccountBtn
+                                width: 20
+                                height: 20
+                                radius: 10
+                                anchors.verticalCenter: parent.verticalCenter
+                                color: delAccountBtnArea.containsMouse ? "#5c3c3c" : "transparent"
+
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: "✕"
+                                    font.pixelSize: 11
+                                    color: delAccountBtnArea.containsMouse ? "#ff4444" : "#808080"
+                                }
+
+                                MouseArea {
+                                    id: delAccountBtnArea
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: showDeleteAccountConfirm(modelData)
+                                }
                             }
+                        }
+
+                        MouseArea {
+                            id: accountItemArea
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            z: -1
                         }
                     }
-                    
-                    // 账号项2
-                    Row {
-                        width: parent.width
-                        height: 16
-                        
-                        Text {
-                            text: "Y-251229005"
-                            font.family: "PingFang HK"
-                            font.pixelSize: 16
-                            color: "#CCCCCC"
-                            anchors.verticalCenter: parent.verticalCenter
-                        }
-                        
-                        Item { width: parent.width - 104 - 16; height: 1 }
-                        
-                        // 删除按钮
-                        Rectangle {
-                            width: 16
-                            height: 16
-                            color: "transparent"
-                            anchors.verticalCenter: parent.verticalCenter
-                            
-                            Text {
-                                anchors.centerIn: parent
-                                text: "✕"
-                                font.pixelSize: 10
-                                color: delBtn2Area.containsMouse ? "#ff4444" : "#808080"
+                }
+            }
+        }
+    }
+
+    // ============ 删除账号确认对话框遮罩 ============
+    Rectangle {
+        anchors.fill: parent
+        color: "#40000000"
+        visible: deleteAccountConfirm.visible
+        z: 310
+
+        MouseArea {
+            anchors.fill: parent
+            onClicked: deleteAccountConfirm.visible = false
+        }
+    }
+
+    // ============ 删除账号确认对话框 ============
+    Rectangle {
+        id: deleteAccountConfirm
+        width: 380
+        height: 250
+        anchors.centerIn: parent
+        color: "#2d2d2d"
+        radius: 4
+        visible: false
+        z: 311
+
+        property string targetUsername: ""
+
+        Column {
+            anchors.fill: parent
+            anchors.margins: 20
+            spacing: 14
+
+            Text {
+                text: "删除账号"
+                font.family: "PingFang HK"
+                font.pixelSize: 18
+                font.weight: Font.Medium
+                color: "#E0E0E0"
+            }
+
+            Text {
+                width: parent.width
+                wrapMode: Text.WordWrap
+                text: "将永久删除账号 " + deleteAccountConfirm.targetUsername +
+                      " ，并解除其关联的所有 iOS 设备绑定。此操作不可恢复。"
+                font.family: "PingFang HK"
+                font.pixelSize: 13
+                color: "#B0B0B0"
+                lineHeight: 1.2
+            }
+
+            // 登录密码确认
+            Rectangle {
+                width: parent.width
+                height: 38
+                radius: 4
+                color: "#1e1e1e"
+                border.color: deleteAccountPwd.activeFocus ? "#3993D2" : "#4a4a4a"
+                border.width: 1
+
+                TextInput {
+                    id: deleteAccountPwd
+                    anchors.fill: parent
+                    anchors.margins: 10
+                    font.family: "PingFang HK"
+                    font.pixelSize: 14
+                    color: "#E0E0E0"
+                    echoMode: TextInput.Password
+                    clip: true
+                    verticalAlignment: TextInput.AlignVCenter
+
+                    Text {
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: "请输入该账号的登录密码"
+                        color: "#808080"
+                        font.family: "PingFang HK"
+                        font.pixelSize: 14
+                        visible: parent.text.length === 0 && !parent.activeFocus
+                    }
+                }
+            }
+
+            Row {
+                anchors.right: parent.right
+                spacing: 10
+
+                Rectangle {
+                    width: 90
+                    height: 34
+                    radius: 4
+                    color: cancelDelArea.containsMouse ? "#3c3c3c" : "#333333"
+                    Text {
+                        anchors.centerIn: parent
+                        text: "取消"
+                        font.family: "PingFang HK"
+                        font.pixelSize: 14
+                        color: "#CCCCCC"
+                    }
+                    MouseArea {
+                        id: cancelDelArea
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: deleteAccountConfirm.visible = false
+                    }
+                }
+
+                Rectangle {
+                    width: 110
+                    height: 34
+                    radius: 4
+                    color: confirmDelArea.containsMouse ? "#cc3333" : "#d9534f"
+                    Text {
+                        anchors.centerIn: parent
+                        text: "确认删除"
+                        font.family: "PingFang HK"
+                        font.pixelSize: 14
+                        color: "#FFFFFF"
+                    }
+                    MouseArea {
+                        id: confirmDelArea
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            var pwd = deleteAccountPwd.text.trim()
+                            if (pwd.length === 0) {
+                                showToast("请输入该账号的登录密码")
+                                return
                             }
-                            
-                            MouseArea {
-                                id: delBtn2Area
-                                anchors.fill: parent
-                                hoverEnabled: true
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: console.log("删除账号2")
-                            }
+                            HttpClient.deletePcAccount(deleteAccountConfirm.targetUsername, pwd)
+                            showToast("正在删除账号...")
                         }
                     }
                 }
@@ -1746,7 +1980,15 @@ Rectangle {
     }
     
     function showAccountDialog() {
+        accountDialog.accounts = HttpClient.getSavedAccounts()
         accountDialog.visible = true
+    }
+
+    function showDeleteAccountConfirm(username) {
+        deleteAccountConfirm.targetUsername = username
+        // 若本地保存过该账号密码则预填，否则留空让用户输入
+        deleteAccountPwd.text = HttpClient.getAccountPassword(username)
+        deleteAccountConfirm.visible = true
     }
     
     // 加载保存的账号信息
@@ -1766,6 +2008,8 @@ Rectangle {
         if (savedPassword) {
             loginPassword.text = savedPassword
         }
+        // 有保存密码才默认勾选「记住密码」，否则不自动填充
+        loginPage.rememberPassword = (savedPassword && savedPassword.length > 0)
         if (savedDeviceUsername && savedDeviceDisplay) {
             monitorAccountColumn.selectedDeviceUsername = savedDeviceUsername
             monitorAccountColumn.selectedAccount = savedDeviceDisplay
