@@ -8048,6 +8048,11 @@ Rectangle {
                 iosFilterPopup.prevHighlightLift = config.highlightLift
                 if (typeof ifHighlightLiftSlider !== 'undefined') ifHighlightLiftSlider.value = config.highlightLift
             }
+            if ((ptype === "chroma" || shouldUpdateAll) && config.chroma !== undefined) {
+                iosFilterPopup.fChroma = config.chroma
+                iosFilterPopup.prevChroma = config.chroma
+                if (typeof ifChromaSlider !== 'undefined') ifChromaSlider.value = config.chroma
+            }
             // ⭐ iOS 采集颜色调节 — 多 PC 同步滑块
             if (ptype === "captureColor") {
                 if (config.temperature !== undefined) iosCaptureAdjustPopup.fWbTemperature = config.temperature
@@ -11297,10 +11302,14 @@ Rectangle {
         // ⭐ 玉麒麟扩展参数
         property double sharpnessFrom: 0;   property double sharpnessTo: 1.0;  property double sharpnessStep: 0.05; property double sharpnessDefault: 0.20
         property double highlightLiftFrom: 0; property double highlightLiftTo: 1.0; property double highlightLiftStep: 0.02; property double highlightLiftDefault: 0.0
+        // ⭐ 色度（黄色拉白，保留红色）— 独立滑块, 不参与综合联动
+        property double chromaFrom: 0.0; property double chromaTo: 1.0; property double chromaStep: 0.05; property double chromaDefault: 0.0
         property double fSharpness: 0.20
         property double fHighlightLift: 0.0
+        property double fChroma: 0.0
         property double prevSharpness: 0.20
         property double prevHighlightLift: 0.0
+        property double prevChroma: 0.0
 
         // ⭐ 增益（从硬件参数区移入滤镜统一联动）
         property double gainFrom: 0; property double gainTo: 100; property double gainStep: 1; property double gainDefault: 20
@@ -11322,6 +11331,7 @@ Rectangle {
             exposure:      { groupEnabled: true, groupId: 0, groupDirection: 1,  brightSwitch: false, brightDirection: 1, brightContrastSwitch: false, brightContrastDirection: 1, brightExposureSwitch: false, brightExposureDirection: 1 },
             sharpness:     { groupEnabled: true, groupId: 0, groupDirection: 1,  brightSwitch: false, brightDirection: 1, brightContrastSwitch: false, brightContrastDirection: 1, brightExposureSwitch: false, brightExposureDirection: 1 },
             highlightLift: { groupEnabled: true, groupId: 0, groupDirection: 1,  brightSwitch: false, brightDirection: 1, brightContrastSwitch: false, brightContrastDirection: 1, brightExposureSwitch: false, brightExposureDirection: 1 },
+            chroma:        { groupEnabled: true, groupId: 0, groupDirection: 1,  brightSwitch: false, brightDirection: 1, brightContrastSwitch: false, brightContrastDirection: 1, brightExposureSwitch: false, brightExposureDirection: 1 },
             gain:          { groupEnabled: true, groupId: 0, groupDirection: 1,  brightSwitch: false, brightDirection: 1, brightContrastSwitch: false, brightContrastDirection: 1, brightExposureSwitch: false, brightExposureDirection: 1 }
         })
         property var linkageConfigDefault: null
@@ -11387,11 +11397,12 @@ Rectangle {
             applyOne("exposure",      "exposureFrom",      "exposureTo",      "exposureStep",      "exposureDefault",      "fExposure",      "prevExposure")
             applyOne("sharpness",     "sharpnessFrom",     "sharpnessTo",     "sharpnessStep",     "sharpnessDefault",     "fSharpness",     "prevSharpness")
             applyOne("highlightLift", "highlightLiftFrom", "highlightLiftTo", "highlightLiftStep", "highlightLiftDefault", "fHighlightLift", "prevHighlightLift")
+            applyOne("chroma",        "chromaFrom",        "chromaTo",        "chromaStep",        "chromaDefault",        "fChroma",        "prevChroma")
             applyOne("gain",          "gainFrom",          "gainTo",          "gainStep",          "gainDefault",          "fGain",          "prevGain")
 
             // ⭐ 联动分组配置
             var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig))
-            var params = ["brightness", "gamma", "contrast", "saturation", "exposure", "sharpness", "highlightLift", "gain"]
+            var params = ["brightness", "gamma", "contrast", "saturation", "exposure", "sharpness", "highlightLift", "chroma", "gain"]
             for (var i = 0; i < params.length; i++) {
                 var key = params[i]
                 if (c[key]) {
@@ -11507,6 +11518,7 @@ Rectangle {
             if (pid === "exposure") return exposureTo - exposureFrom
             if (pid === "sharpness") return sharpnessTo - sharpnessFrom
             if (pid === "highlightLift") return highlightLiftTo - highlightLiftFrom
+            if (pid === "chroma") return chromaTo - chromaFrom
             if (pid === "gain") return gainTo - gainFrom
             return 1
         }
@@ -11519,6 +11531,7 @@ Rectangle {
             if (pid === "exposure") return prevExposure
             if (pid === "sharpness") return prevSharpness
             if (pid === "highlightLift") return prevHighlightLift
+            if (pid === "chroma") return prevChroma
             if (pid === "gain") return prevGain
             return 0
         }
@@ -11560,6 +11573,11 @@ Rectangle {
                 prevHighlightLift = nv; fHighlightLift = nv
                 if (typeof ifHighlightLiftSlider !== 'undefined') ifHighlightLiftSlider.value = nv
                 pushParam("highlightLift", nv)
+            } else if (pid === "chroma") {
+                var nv = clampVal(val, chromaFrom, chromaTo)
+                prevChroma = nv; fChroma = nv
+                if (typeof ifChromaSlider !== 'undefined') ifChromaSlider.value = nv
+                pushParam("chroma", nv)
             } else if (pid === "gain") {
                 var nv = clampVal(val, gainFrom, gainTo)
                 nv = Math.round(nv)
@@ -11579,7 +11597,7 @@ Rectangle {
             if (sourceRange === 0) return
             var deltaPercent = rawDelta / sourceRange
 
-            var params = ["brightness", "gamma", "contrast", "saturation", "exposure", "sharpness", "highlightLift", "gain"]
+            var params = ["brightness", "gamma", "contrast", "saturation", "exposure", "sharpness", "highlightLift", "chroma", "gain"]
             for (var i = 0; i < params.length; i++) {
                 var tid = params[i]
                 if (tid === sourceId) continue
@@ -11613,6 +11631,7 @@ Rectangle {
                 pushParam("blackPoint",    iosFilterPopup.fBlackPoint)
                 pushParam("sharpness",     iosFilterPopup.fSharpness)
                 pushParam("highlightLift", iosFilterPopup.fHighlightLift)
+                pushParam("chroma",        iosFilterPopup.fChroma)
             }
             sendConfigUpdate("videoHDR", { "videoHDR": iosFilterPopup.videoHDREnabled })
             sendConfigUpdate("autoHDR", { "autoHDR": iosFilterPopup.autoHDREnabled })
@@ -11697,6 +11716,7 @@ Rectangle {
                 ["exposure",      "fExposure",      "exposureDefault",      "exposureFrom",      "exposureTo"],
                 ["sharpness",     "fSharpness",     "sharpnessDefault",     "sharpnessFrom",     "sharpnessTo"],
                 ["highlightLift", "fHighlightLift", "highlightLiftDefault", "highlightLiftFrom", "highlightLiftTo"],
+                ["chroma",        "fChroma",        "chromaDefault",        "chromaFrom",        "chromaTo"],
                 ["gain",          "fGain",          "gainDefault",          "gainFrom",          "gainTo"]
             ]
             var sum = 0, n = 0
@@ -11736,6 +11756,7 @@ Rectangle {
             if (typeof ifExposureSlider   !== 'undefined') ifExposureSlider.value   = fExposure
             if (typeof ifSharpnessSlider  !== 'undefined') ifSharpnessSlider.value  = fSharpness
             if (typeof ifHighlightLiftSlider !== 'undefined') ifHighlightLiftSlider.value = fHighlightLift
+            if (typeof ifChromaSlider     !== 'undefined') ifChromaSlider.value     = fChroma
             if (typeof ifGainSlider       !== 'undefined') ifGainSlider.value       = fGain
             if (typeof cameraSaturationSlider !== 'undefined') cameraSaturationSlider.value = fSaturation
         }
@@ -11768,6 +11789,7 @@ Rectangle {
             setOne("exposure",      "fExposure",      "prevExposure",      "exposureDefault",      "exposureFrom",      "exposureTo")
             setOne("sharpness",     "fSharpness",     "prevSharpness",     "sharpnessDefault",     "sharpnessFrom",     "sharpnessTo")
             setOne("highlightLift", "fHighlightLift", "prevHighlightLift", "highlightLiftDefault", "highlightLiftFrom", "highlightLiftTo")
+            setOne("chroma",        "fChroma",        "prevChroma",        "chromaDefault",        "chromaFrom",        "chromaTo")
             setOne("gain",          "fGain",          "prevGain",          "gainDefault",          "gainFrom",          "gainTo")
             syncIndividualParamUiFromFilter()
         }
@@ -11798,6 +11820,7 @@ Rectangle {
             setOne("exposure",      "fExposure",      "prevExposure",      "exposureDefault",      "exposureFrom",      "exposureTo")
             setOne("sharpness",     "fSharpness",     "prevSharpness",     "sharpnessDefault",     "sharpnessFrom",     "sharpnessTo")
             setOne("highlightLift", "fHighlightLift", "prevHighlightLift", "highlightLiftDefault", "highlightLiftFrom", "highlightLiftTo")
+            setOne("chroma",        "fChroma",        "prevChroma",        "chromaDefault",        "chromaFrom",        "chromaTo")
             setOne("gain",          "fGain",          "prevGain",          "gainDefault",          "gainFrom",          "gainTo")
             syncIndividualParamUiFromFilter()
         }
@@ -11828,6 +11851,7 @@ Rectangle {
             setOne("exposure",      "fExposure",      "prevExposure",      "exposureDefault",      "exposureFrom",      "exposureTo")
             setOne("sharpness",     "fSharpness",     "prevSharpness",     "sharpnessDefault",     "sharpnessFrom",     "sharpnessTo")
             setOne("highlightLift", "fHighlightLift", "prevHighlightLift", "highlightLiftDefault", "highlightLiftFrom", "highlightLiftTo")
+            setOne("chroma",        "fChroma",        "prevChroma",        "chromaDefault",        "chromaFrom",        "chromaTo")
             setOne("gain",          "fGain",          "prevGain",          "gainDefault",          "gainFrom",          "gainTo")
             syncIndividualParamUiFromFilter()
         }
@@ -11938,6 +11962,7 @@ Rectangle {
                                 iosFilterPopup.fExposure   = iosFilterPopup.exposureDefault
                                 iosFilterPopup.fSharpness  = iosFilterPopup.sharpnessDefault
                                 iosFilterPopup.fHighlightLift = iosFilterPopup.highlightLiftDefault
+                                iosFilterPopup.fChroma     = iosFilterPopup.chromaDefault
                                 iosFilterPopup.fGain       = iosFilterPopup.gainDefault
                                 iosFilterPopup.fRedBoost   = iosFilterPopup.redBoostDefault
                                 iosFilterPopup.fEnabled    = false
@@ -11948,6 +11973,7 @@ Rectangle {
                                 iosFilterPopup.prevExposure   = iosFilterPopup.exposureDefault
                                 iosFilterPopup.prevSharpness  = iosFilterPopup.sharpnessDefault
                                 iosFilterPopup.prevHighlightLift = iosFilterPopup.highlightLiftDefault
+                                iosFilterPopup.prevChroma      = iosFilterPopup.chromaDefault
                                 iosFilterPopup.prevGain        = iosFilterPopup.gainDefault
                                 // ⭐ 还原联动配置到后台默认
                                 if (iosFilterPopup.linkageConfigDefault)
@@ -11959,6 +11985,7 @@ Rectangle {
                                 if (typeof ifExposureSlider   !== 'undefined') ifExposureSlider.value   = iosFilterPopup.exposureDefault
                                 if (typeof ifSharpnessSlider  !== 'undefined') ifSharpnessSlider.value  = iosFilterPopup.sharpnessDefault
                                 if (typeof ifHighlightLiftSlider !== 'undefined') ifHighlightLiftSlider.value = iosFilterPopup.highlightLiftDefault
+                                if (typeof ifChromaSlider     !== 'undefined') ifChromaSlider.value     = iosFilterPopup.chromaDefault
                                 if (typeof ifGainSlider       !== 'undefined') ifGainSlider.value       = iosFilterPopup.gainDefault
                                 iosCameraSettingsPopup.hardwareBrightness = Math.round(iosFilterPopup.gainDefault)
                                 iosFilterPopup.syncOverallSlidersFromCurrentFilter()
@@ -12409,6 +12436,67 @@ Rectangle {
                     Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.sharpness.brightContrastDirection === -1 ? "←" : "→"; font.pixelSize: 16; font.bold: true; color: iosFilterPopup.linkageConfig.sharpness.brightContrastSwitch ? "#2196F3" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; enabled: iosFilterPopup.linkageConfig.sharpness.brightContrastSwitch; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.sharpness.brightContrastDirection *= -1; iosFilterPopup.linkageConfig = lc } } }
                     Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.sharpness.brightExposureSwitch ? "◇" : "·"; font.pixelSize: 14; color: iosFilterPopup.linkageConfig.sharpness.brightExposureSwitch ? "#9C27B0" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.sharpness.brightExposureSwitch = !lc.sharpness.brightExposureSwitch; iosFilterPopup.linkageConfig = lc } } }
                     Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.sharpness.brightExposureDirection === -1 ? "←" : "→"; font.pixelSize: 16; font.bold: true; color: iosFilterPopup.linkageConfig.sharpness.brightExposureSwitch ? "#9C27B0" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; enabled: iosFilterPopup.linkageConfig.sharpness.brightExposureSwitch; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.sharpness.brightExposureDirection *= -1; iosFilterPopup.linkageConfig = lc } } }
+                }
+
+                // ===== 色度(C)（滤镜）— 黄色拉白, 保留红色, 与亮度一致参与联动 =====
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 8
+                    Text { Layout.preferredWidth: 28; text: iosFilterPopup.linkageConfig.chroma.groupEnabled ? "●" : "○"; font.pixelSize: 22; color: iosFilterPopup.linkageConfig.chroma.groupEnabled ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.chroma.groupEnabled = !lc.chroma.groupEnabled; iosFilterPopup.linkageConfig = lc } } }
+                    Text { Layout.preferredWidth: 30; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.chroma.groupId > 0 ? "组" + iosFilterPopup.linkageConfig.chroma.groupId : "—"; font.family: "PingFang HK"; font.pixelSize: 11; color: iosFilterPopup.linkageConfig.chroma.groupId > 0 ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { iosFilterPopup.editingGroupParam = "chroma"; iosFilterPopup.groupIdInput = iosFilterPopup.linkageConfig.chroma.groupId; groupIdDialog.open() } } }
+                    Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.chroma.groupDirection === -1 ? "←" : "→"; font.pixelSize: 16; font.bold: true; color: iosFilterPopup.linkageConfig.chroma.groupId > 0 ? "#4DB6AC" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; enabled: iosFilterPopup.linkageConfig.chroma.groupId > 0; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.chroma.groupDirection *= -1; iosFilterPopup.linkageConfig = lc } } }
+                    Text { text: "色度(C)"; font.family: "PingFang HK"; font.pixelSize: 16; font.bold: true; color: "#E53935"; Layout.preferredWidth: 130 }
+                    Slider {
+                        id: ifChromaSlider
+                        Layout.fillWidth: true
+                        from: iosFilterPopup.chromaFrom; to: iosFilterPopup.chromaTo; stepSize: iosFilterPopup.chromaStep
+                        value: iosFilterPopup.fChroma
+                        onMoved: {
+                            var delta = value - iosFilterPopup.prevChroma
+                            iosFilterPopup.prevChroma = value
+                            iosFilterPopup.fChroma = value
+                            iosFilterPopup.pushParam("chroma", value)
+                            iosFilterPopup.applyLinkedDelta("chroma", delta)
+                        }
+                        onPressedChanged: if (!pressed) iosFilterPopup.pushParam("chroma", value)
+                        background: Rectangle {
+                            x: ifChromaSlider.leftPadding
+                            y: ifChromaSlider.topPadding + ifChromaSlider.availableHeight / 2 - height / 2
+                            implicitWidth: 200; implicitHeight: 4
+                            width: ifChromaSlider.availableWidth; height: 4
+                            radius: 999; color: "#C8E6C9"
+                            Rectangle {
+                                width: ifChromaSlider.visualPosition * parent.width
+                                height: parent.height; radius: 999; color: "#4DB6AC"
+                            }
+                        }
+                        handle: Rectangle {
+                            x: ifChromaSlider.leftPadding + ifChromaSlider.visualPosition * (ifChromaSlider.availableWidth - width)
+                            y: ifChromaSlider.topPadding + ifChromaSlider.availableHeight / 2 - height / 2
+                            implicitWidth: 14; implicitHeight: 14
+                            width: 14; height: 14; radius: 7; color: "#4DB6AC"
+                        }
+                        WheelHandler {
+                            onWheel: function(event) {
+                                if (event.angleDelta.y === 0) return
+                                var dir = event.angleDelta.y > 0 ? 1 : -1
+                                var nv = iosFilterPopup.clampVal(ifChromaSlider.value + dir * ifChromaSlider.stepSize, ifChromaSlider.from, ifChromaSlider.to)
+                                var delta = nv - iosFilterPopup.prevChroma
+                                ifChromaSlider.value = nv
+                                iosFilterPopup.prevChroma = nv
+                                iosFilterPopup.fChroma = nv
+                                iosFilterPopup.pushParam("chroma", nv)
+                                iosFilterPopup.applyLinkedDelta("chroma", delta)
+                            }
+                        }
+                    }
+                    Text { text: iosFilterPopup.fChroma.toFixed(2); font.family: "PingFang HK"; font.pixelSize: 16; color: "#263238"; Layout.preferredWidth: 50 }
+                    Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.chroma.brightSwitch ? "☀" : "·"; font.pixelSize: 14; color: iosFilterPopup.linkageConfig.chroma.brightSwitch ? "#FF9800" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.chroma.brightSwitch = !lc.chroma.brightSwitch; iosFilterPopup.linkageConfig = lc } } }
+                    Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.chroma.brightDirection === -1 ? "←" : "→"; font.pixelSize: 16; font.bold: true; color: iosFilterPopup.linkageConfig.chroma.brightSwitch ? "#FF9800" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; enabled: iosFilterPopup.linkageConfig.chroma.brightSwitch; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.chroma.brightDirection *= -1; iosFilterPopup.linkageConfig = lc } } }
+                    Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.chroma.brightContrastSwitch ? "◆" : "·"; font.pixelSize: 14; color: iosFilterPopup.linkageConfig.chroma.brightContrastSwitch ? "#2196F3" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.chroma.brightContrastSwitch = !lc.chroma.brightContrastSwitch; iosFilterPopup.linkageConfig = lc } } }
+                    Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.chroma.brightContrastDirection === -1 ? "←" : "→"; font.pixelSize: 16; font.bold: true; color: iosFilterPopup.linkageConfig.chroma.brightContrastSwitch ? "#2196F3" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; enabled: iosFilterPopup.linkageConfig.chroma.brightContrastSwitch; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.chroma.brightContrastDirection *= -1; iosFilterPopup.linkageConfig = lc } } }
+                    Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.chroma.brightExposureSwitch ? "◇" : "·"; font.pixelSize: 14; color: iosFilterPopup.linkageConfig.chroma.brightExposureSwitch ? "#9C27B0" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.chroma.brightExposureSwitch = !lc.chroma.brightExposureSwitch; iosFilterPopup.linkageConfig = lc } } }
+                    Text { Layout.preferredWidth: 20; visible: iosFilterPopup.pcFreeConfig; text: iosFilterPopup.linkageConfig.chroma.brightExposureDirection === -1 ? "←" : "→"; font.pixelSize: 16; font.bold: true; color: iosFilterPopup.linkageConfig.chroma.brightExposureSwitch ? "#9C27B0" : "#BDBDBD"; horizontalAlignment: Text.AlignHCenter; MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; enabled: iosFilterPopup.linkageConfig.chroma.brightExposureSwitch; onClicked: { var lc = JSON.parse(JSON.stringify(iosFilterPopup.linkageConfig)); lc.chroma.brightExposureDirection *= -1; iosFilterPopup.linkageConfig = lc } } }
                 }
 
                 // ===== 白平衡(WD) — iOS 无 STOMP =====
