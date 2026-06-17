@@ -526,8 +526,8 @@ private:
     
     QMutex m_mutex;
 
-    static constexpr int H264_FRAME_KEEP_COUNT = 6000;
-    static constexpr int H264_CLEANUP_INTERVAL = 1200;
+    static constexpr int H264_FRAME_KEEP_COUNT = 3000;
+    static constexpr int H264_CLEANUP_INTERVAL = 600;
     static constexpr int H264_SAFETY_MARGIN = 300;
 
     // NALU 帧存储
