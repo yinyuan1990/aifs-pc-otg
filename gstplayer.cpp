@@ -1412,7 +1412,7 @@ bool GstPlayer::createH264FrameBranch()
         "max-size-buffers", 30,
         "max-size-bytes", 0,
         "max-size-time", 0,
-        "leaky", 2,   // downstream leaky：落盘慢(如无盘网吧网络盘)只丢截图素材帧，绝不回压 tee 冻结实时显示
+        "leaky", 0,
         "silent", TRUE,
         nullptr);
     setIntIfExists(m_h264FrameParse, "config-interval", -1);
@@ -1427,12 +1427,25 @@ bool GstPlayer::createH264FrameBranch()
         "sync", FALSE,
         "async", FALSE,
         "max-buffers", 30,
-        "drop", TRUE,   // 与 m_h264FrameQueue(leaky=2)一致：拉不动则丢旧截图帧，不阻塞上游
+        "drop", FALSE,
         nullptr);
     g_signal_connect(m_h264FrameAppsink, "new-sample", G_CALLBACK(onH264FrameSample), this);
 
     m_h264FrameDirectory = QCoreApplication::applicationDirPath() + "/captures/frames";
     QDir().mkpath(m_h264FrameDirectory);
+    // ⭐ 清理上一会话残留的 .h264 帧：文件名带 session 前缀(s_<时间戳>_)，重连/重建管线后
+    //    旧前缀文件无人引用，原清理只遍历内存集合够不到它们 → 会无限累积(无盘网吧网络目录越来越大越来越卡)。
+    //    本会话此刻尚未写入任何帧，删除全部 *.h264 即只删旧会话孤儿，不影响本次截图/慢放。
+    {
+        QDir frameDir(m_h264FrameDirectory);
+        const QStringList staleFrames = frameDir.entryList(QStringList() << "*.h264", QDir::Files);
+        for (const QString &f : staleFrames) {
+            frameDir.remove(f);
+        }
+        if (!staleFrames.isEmpty()) {
+            qDebug() << "🗑️ H.264 帧支路: 清理上一会话残留" << staleFrames.size() << "个 .h264 文件";
+        }
+    }
     m_h264SessionPrefix = QString("s_%1").arg(QDateTime::currentMSecsSinceEpoch());
     resetH264FrameState();
     qDebug() << "✅ H.264 独立帧保存支路:" << m_h264FrameEncoderName << "目录:" << m_h264FrameDirectory << "前缀:" << m_h264SessionPrefix;

@@ -82,7 +82,7 @@ void clearFramesDirectory()
         return;
     }
     
-    QStringList files = dir.entryList(QStringList() << "*.jpg" << "*.jpeg", QDir::Files);
+    QStringList files = dir.entryList(QStringList() << "*.jpg" << "*.jpeg" << "*.h264", QDir::Files);
     int count = files.count();
     
     for (const QString &file : files) {
