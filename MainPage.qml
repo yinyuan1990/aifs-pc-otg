@@ -43,7 +43,6 @@ Rectangle {
     property int connectMode: 0                        // 0=SRS模式, 1=P2P直连模式（来自CONFIG_STATE.state.connectstype）
     property string pairedIosDeviceId: ""              // 配对的 iOS 设备 ID
     property double _lastKeyframeWsMs: 0                // P0-1: WebSocket 关键帧兜底限流时间戳
-    property double _lastKeyframeWsMs: 0                // P0-1: WebSocket 关键帧兜底限流时间戳
     property var iceServers: []                        // 从登录接口获取的 ICE 服务器列表
     
     // 行列调节防抖
