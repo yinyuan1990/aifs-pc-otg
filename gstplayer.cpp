@@ -3425,52 +3425,77 @@ void GstPlayer::sendPLIRequest()
     }
     m_lastKeyframeRequestMs = nowMs;
     
-    // 🔥🔥🔥 v10.2 修复：正确的 PLI 发送方式
-    // upstream 事件必须从元素的 srcpad 发送（不是 sinkpad！）
-    // 事件会沿着 pipeline 向上游传递到 webrtcbin
+    // 🔥🔥🔥 P0-1 修复：upstream force-key-unit 必须送到「最靠近 webrtcbin 的元素的 sinkpad」，
+    //     事件沿 sinkpad → peer(webrtcbin 的 recv srcpad) 向【上游】传递，webrtcbin 收到后才会生成 RTCP PLI/FIR。
+    //     旧实现从 srcpad 发，等于把 upstream 事件丢给【下游】(parse/decoder 方向)，永远到不了 webrtcbin
+    //     → iOS 端收不到 PLI、丢包后迟迟不出 I 帧 → 长时间花屏/碎屏修不回来（本次根因）。
     
     bool sent = false;
     
-    // 方法1：通过 rtph264depay 的 srcpad 发送（最接近 webrtcbin）
+    // 方法1（首选）：直接遍历 webrtcbin 的所有 src pad（动态 recv pad），逐个发 upstream force-key-unit。
+    //     这是 webrtcbin 触发 PLI 最直接、最可靠的官方方式。
+    {
+        GstIterator *it = gst_element_iterate_src_pads(m_webrtcbin);
+        GValue item = G_VALUE_INIT;
+        bool done = false;
+        while (!done) {
+            switch (gst_iterator_next(it, &item)) {
+            case GST_ITERATOR_OK: {
+                GstPad *pad = GST_PAD(g_value_get_object(&item));
+                if (pad) {
+                    GstEvent *event = gst_video_event_new_upstream_force_key_unit(GST_CLOCK_TIME_NONE, TRUE, 0);
+                    if (gst_pad_send_event(pad, event)) {
+                        sent = true;
+                        qDebug() << "🔑 PLI 请求已发送（webrtcbin srcpad:" << GST_PAD_NAME(pad) << "）";
+                    }
+                }
+                g_value_reset(&item);
+                break;
+            }
+            case GST_ITERATOR_RESYNC:
+                gst_iterator_resync(it);
+                break;
+            case GST_ITERATOR_ERROR:
+            case GST_ITERATOR_DONE:
+            default:
+                done = true;
+                break;
+            }
+        }
+        g_value_unset(&item);
+        gst_iterator_free(it);
+        if (sent) {
+            return;
+        }
+    }
+    
+    // 方法2（兜底）：通过 rtph264depay 的 sinkpad 发送（其 peer 即 webrtcbin 的 recv srcpad），
+    //     upstream 事件经 sinkpad → peer 向上游进入 webrtcbin。
     if (m_rtph264depay) {
-        GstPad *srcpad = gst_element_get_static_pad(m_rtph264depay, "src");
-        if (srcpad) {
+        GstPad *sinkpad = gst_element_get_static_pad(m_rtph264depay, "sink");
+        if (sinkpad) {
             GstEvent *event = gst_video_event_new_upstream_force_key_unit(GST_CLOCK_TIME_NONE, TRUE, 0);
-            sent = gst_pad_send_event(srcpad, event);
-            gst_object_unref(srcpad);
+            sent = gst_pad_send_event(sinkpad, event);
+            gst_object_unref(sinkpad);
             if (sent) {
-                qDebug() << "🔑 PLI 请求已发送（通过 rtph264depay srcpad）";
+                qDebug() << "🔑 PLI 请求已发送（rtph264depay sinkpad → webrtcbin）";
                 return;
             }
         }
     }
     
-    // 方法2：通过 h264parse 的 srcpad 发送
+    // 方法3（兜底）：通过 h264parse 的 sinkpad 向上游传递。
     if (m_h264parse) {
-        GstPad *srcpad = gst_element_get_static_pad(m_h264parse, "src");
-        if (srcpad) {
+        GstPad *sinkpad = gst_element_get_static_pad(m_h264parse, "sink");
+        if (sinkpad) {
             GstEvent *event = gst_video_event_new_upstream_force_key_unit(GST_CLOCK_TIME_NONE, TRUE, 0);
-            sent = gst_pad_send_event(srcpad, event);
-            gst_object_unref(srcpad);
+            sent = gst_pad_send_event(sinkpad, event);
+            gst_object_unref(sinkpad);
             if (sent) {
-                qDebug() << "🔑 PLI 请求已发送（通过 h264parse srcpad）";
+                qDebug() << "🔑 PLI 请求已发送（h264parse sinkpad → 上游）";
                 return;
             }
         }
-    }
-    
-    // 方法3：通过解码器的 srcpad 发送
-    if (m_decoder) {
-        GstPad *srcpad = gst_element_get_static_pad(m_decoder, "src");
-        if (srcpad) {
-            GstEvent *event = gst_video_event_new_upstream_force_key_unit(GST_CLOCK_TIME_NONE, TRUE, 0);
-            sent = gst_pad_send_event(srcpad, event);
-            gst_object_unref(srcpad);
-            if (sent) {
-                qDebug() << "🔑 PLI 请求已发送（通过 decoder srcpad）";
-                return;
-        }
-    }
     }
     
     qDebug() << "⚠️ PLI 请求发送失败，所有方法都不可用";

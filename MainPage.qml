@@ -42,6 +42,8 @@ Rectangle {
     // P2P 直连模式属性
     property int connectMode: 0                        // 0=SRS模式, 1=P2P直连模式（来自CONFIG_STATE.state.connectstype）
     property string pairedIosDeviceId: ""              // 配对的 iOS 设备 ID
+    property double _lastKeyframeWsMs: 0                // P0-1: WebSocket 关键帧兜底限流时间戳
+    property double _lastKeyframeWsMs: 0                // P0-1: WebSocket 关键帧兜底限流时间戳
     property var iceServers: []                        // 从登录接口获取的 ICE 服务器列表
     
     // 行列调节防抖
@@ -292,7 +294,7 @@ Rectangle {
                 console.log("❌ GPU Pipeline init failed:", status)
             }
         }
-        onKeyframeNeeded: { gstPlayer.requestKeyFrame() }  // ⭐ 改用 GstPlayer
+        onKeyframeNeeded: { requestKeyframeWithFallback() }  // ⭐ P0-1: PLI + WebSocket 兜底
         onFrameReady: function(frameIndex) {
             if (frameIndex % 30 === 0) {
                 liveInfoFps.text = "FPS: 60 | Frame: " + frameIndex
@@ -346,7 +348,7 @@ Rectangle {
             return gstPlayer.isWebRTCConnected()
         }
         function requestKeyFrame() {
-            gstPlayer.requestKeyFrame()
+            requestKeyframeWithFallback()   // ⭐ P0-1: PLI + WebSocket 兜底
         }
     }
     
@@ -7173,6 +7175,18 @@ Rectangle {
     }
     
     // 发送配置更新（通知其他PC）- 格式与 Java 保持一致
+    // P0-1 打通关键帧：主走 RTCP PLI（depay/webrtcbin sinkpad），并加 WebSocket 兜底，
+    // 防 SRS 不回传 RTCP 时 iOS 端永不产生 I 帧（丢包后长时间花屏）。WS 兜底做限流，避免刷屏。
+    function requestKeyframeWithFallback() {
+        gstPlayer.requestKeyFrame()   // 主：RTCP PLI
+        var now = Date.now()
+        if (now - _lastKeyframeWsMs >= 1500) {   // 1.5s 限流
+            _lastKeyframeWsMs = now
+            sendConfigUpdate("request_keyframe", { "cmd": "request_keyframe", "ts": now })
+            console.log("🔑 [关键帧] 已发送 WebSocket REQUEST_KEYFRAME 兜底")
+        }
+    }
+    
     function sendConfigUpdate(ptype, config) {
         var deviceId = HttpClient.currentDeviceId()
         var operator = HttpClient.loggedInUsername() || ""  // ⭐ 添加操作者
