@@ -1412,7 +1412,7 @@ bool GstPlayer::createH264FrameBranch()
         "max-size-buffers", 30,
         "max-size-bytes", 0,
         "max-size-time", 0,
-        "leaky", 0,
+        "leaky", 2,   // downstream leaky：落盘慢(如无盘网吧网络盘)只丢截图素材帧，绝不回压 tee 冻结实时显示
         "silent", TRUE,
         nullptr);
     setIntIfExists(m_h264FrameParse, "config-interval", -1);
@@ -1427,7 +1427,7 @@ bool GstPlayer::createH264FrameBranch()
         "sync", FALSE,
         "async", FALSE,
         "max-buffers", 30,
-        "drop", FALSE,
+        "drop", TRUE,   // 与 m_h264FrameQueue(leaky=2)一致：拉不动则丢旧截图帧，不阻塞上游
         nullptr);
     g_signal_connect(m_h264FrameAppsink, "new-sample", G_CALLBACK(onH264FrameSample), this);
 
