@@ -323,6 +323,37 @@ void GstPlayer::setVideoSink(QVideoSink *sink)
     }
 }
 
+// 缓存最近一次检测到的 GPU 原始信息（小写），供强制软解判断使用
+static QString g_lastGpuRawInfo;
+
+// 判断是否为"老旧 Intel 核显"(Sandy/Ivy 等 legacy DXVA)。
+// 这类机器 d3d11 硬解会在协商序列头时报 "Could not determine decoder config" → not-negotiated → 黑屏，
+// 必须直接走 avdec_h264 软解。较新核显(uhd/iris/HD 5xx+/44xx+)硬解正常，不在此列。
+static bool isLegacyIntelGpu(const QString& lower) {
+    int idx = lower.indexOf("hd graphics");
+    if (idx < 0) return false;
+    if (lower.contains("uhd") || lower.contains("iris")) return false;  // 较新核显
+    int p = idx + 11;  // strlen("hd graphics")
+    while (p < lower.size() && lower[p] == QChar(' ')) p++;
+    QString num;
+    while (p < lower.size() && lower[p].isDigit()) { num.append(lower[p]); p++; }
+    if (num.isEmpty()) return true;                                // 裸 "hd graphics"（通用驱动名，多为 Sandy/Ivy）
+    int n = num.toInt();
+    if (num.size() == 4 && n >= 2000 && n <= 4000) return true;    // 2000/2500/3000/4000 = Sandy/Ivy
+    return false;                                                  // 3位(5xx/6xx) 或 44xx+ (Haswell+) 硬解正常
+}
+
+// 是否需要对本机强制软解：环境变量手动开 / 或 (无独显 且 老旧 Intel 核显)
+static bool shouldForceSoftwareDecode(const QString& gpuRawLower) {
+    QByteArray env = qgetenv("PHOENIX_FORCE_SOFTWARE_DECODE");
+    if (env == "1" || env.toLower() == "true") return true;
+    bool hasDiscrete = gpuRawLower.contains("nvidia") || gpuRawLower.contains("geforce")
+                    || gpuRawLower.contains("rtx") || gpuRawLower.contains("gtx")
+                    || gpuRawLower.contains("radeon") || gpuRawLower.contains("amd");
+    if (hasDiscrete) return false;  // 有独显 → nvh264dec/amf 硬解正常，不强制
+    return isLegacyIntelGpu(gpuRawLower);
+}
+
 // ========== GPU 类型检测（与 Java 一致）==========
 QString GstPlayer::detectGpuType()
 {
@@ -333,6 +364,7 @@ QString GstPlayer::detectGpuType()
     process.waitForFinished(3000);
     
     QString output = QString::fromLocal8Bit(process.readAllStandardOutput()).toLower();
+    g_lastGpuRawInfo = output;
     qDebug() << "🖥️ 检测到 GPU:" << output.trimmed();
     decDiagWrite(QString("GPU 原始信息: %1").arg(output.simplified()));
     if (output.contains("todesk") || output.contains("virtual")) {
@@ -591,6 +623,16 @@ bool GstPlayer::createPipeline()
     } else {
         decoderPriority << "d3d11h264dec" << "nvh264dec" << "msdkh264dec";
         qDebug() << "📋 未知 GPU - 解码器优先级: d3d11h264dec > nvh264dec > msdkh264dec";
+    }
+
+    // 🔧 老旧 Intel 核显(legacy DXVA)/手动开关 → 强制软解：清空硬解优先级，直接落到 avdec_h264 回退分支
+    //    (这类机器 d3d11 硬解会 "Could not determine decoder config" 黑屏；640x480 软解毫无压力)
+    //    仅改解码器选择，下游显示/截图/慢放/NALU 支路逻辑完全不动
+    if (shouldForceSoftwareDecode(g_lastGpuRawInfo)) {
+        decoderPriority.clear();
+        qDebug() << "🔧 强制软解：检测到老旧 Intel 核显或手动开关，跳过 d3d11 硬解，使用 avdec_h264";
+        diagLog("🔧 强制软解：老旧 Intel 核显/手动开关 → 跳过硬解，使用 avdec_h264 软解");
+        decDiagWrite("🔧 强制软解：老旧 Intel 核显(legacy DXVA)或手动开关 → 跳过 d3d11，使用 avdec_h264");
     }
     
     // ⭐ 诊断：检查 GStreamer 插件注册表
