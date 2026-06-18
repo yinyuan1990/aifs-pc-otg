@@ -146,6 +146,70 @@ static void diagLog(const QString& msg) {
     g_diagLogStream->flush();
 }
 
+// ========== 解码器专项诊断（单独 txt：抓 d3d11 硬解失败的底层真实原因）==========
+// 背景：低端机/Todesk 远程会话下 d3d11h264dec 一喂数据就崩，app 只打印
+//       "Internal data stream error"（来自 nicesrc/queue），看不到真正原因。
+//       这里挂一个 GStreamer 调试回调，把 d3d11/解码器/流错误的底层日志单独写入
+//       decoder_diag.txt，复现后把该文件发回即可定位（是否远程会话拿不到 DXVA 等）。
+static QMutex g_decDiagMutex;
+static QFile* g_decDiagFile = nullptr;
+static QTextStream* g_decDiagStream = nullptr;
+
+static void decDiagWrite(const QString& msg) {
+    QMutexLocker locker(&g_decDiagMutex);
+    if (!g_decDiagStream) return;
+    QString ts = QDateTime::currentDateTime().toString("HH:mm:ss.zzz");
+    *g_decDiagStream << "[" << ts << "] " << msg << Qt::endl;
+    g_decDiagStream->flush();
+}
+
+// GStreamer 调试回调：只保留 d3d11 / 解码器 的全部日志，以及任何类别的 WARNING/ERROR
+static void decDiagGstLogFunc(GstDebugCategory* category, GstDebugLevel level,
+                              const gchar* file, const gchar* function, gint line,
+                              GObject* object, GstDebugMessage* message, gpointer) {
+    Q_UNUSED(file);
+    Q_UNUSED(line);
+    const gchar* catName = category ? gst_debug_category_get_name(category) : "";
+    bool isInteresting = catName && (g_str_has_prefix(catName, "d3d11")
+                                  || g_str_has_prefix(catName, "videodecoder")
+                                  || g_str_has_prefix(catName, "msdk")
+                                  || g_str_has_prefix(catName, "nvdec"));
+    // 不感兴趣的类别只记录 WARNING(2) 及更严重(ERROR=1)，避免文件爆炸
+    if (!isInteresting && level > GST_LEVEL_WARNING) return;
+
+    const gchar* objName = (object && GST_IS_OBJECT(object)) ? GST_OBJECT_NAME(object) : "";
+    decDiagWrite(QString("[%1] %2 | %3 | fn=%4 obj=%5")
+        .arg(gst_debug_level_get_name(level))
+        .arg(catName ? catName : "")
+        .arg(gst_debug_message_get(message))
+        .arg(function ? function : "")
+        .arg(objName ? objName : ""));
+}
+
+static void initDecoderDiag() {
+    static bool inited = false;
+    {
+        QMutexLocker locker(&g_decDiagMutex);
+        if (inited) return;
+        inited = true;
+        QString logPath = QCoreApplication::applicationDirPath() + "/decoder_diag.txt";
+        g_decDiagFile = new QFile(logPath);
+        if (g_decDiagFile->open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
+            g_decDiagStream = new QTextStream(g_decDiagFile);
+            *g_decDiagStream << "========== 解码器专项诊断 (d3d11 硬解定位) ==========" << Qt::endl;
+            *g_decDiagStream << "启动时间: " << QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss") << Qt::endl;
+            *g_decDiagStream << "说明: 抓 d3d11/解码器底层报错 + 全局 WARNING/ERROR" << Qt::endl;
+            *g_decDiagStream << "===================================================" << Qt::endl << Qt::endl;
+            g_decDiagStream->flush();
+            qDebug() << "📝 解码器诊断文件:" << logPath;
+        }
+    }
+    // 开启 GStreamer 调试（即使没设 GST_DEBUG 环境变量也生效），并挂上我们的回调
+    gst_debug_set_active(TRUE);
+    gst_debug_set_threshold_from_string("2,d3d11*:6,videodecoder:6,msdk*:5,nvdec*:5", TRUE);
+    gst_debug_add_log_function(decDiagGstLogFunc, nullptr, nullptr);
+}
+
 // ========== 系统信息获取函数 ==========
 static long getSystemMemoryGB() {
 #ifdef Q_OS_WIN
@@ -270,6 +334,10 @@ QString GstPlayer::detectGpuType()
     
     QString output = QString::fromLocal8Bit(process.readAllStandardOutput()).toLower();
     qDebug() << "🖥️ 检测到 GPU:" << output.trimmed();
+    decDiagWrite(QString("GPU 原始信息: %1").arg(output.simplified()));
+    if (output.contains("todesk") || output.contains("virtual")) {
+        decDiagWrite("⚠️ 检测到虚拟显示器/远程会话(todesk/virtual)，d3d11 硬解很可能不可用");
+    }
     
     // 判断 GPU 类型（按优先级）
     if (output.contains("nvidia") || output.contains("geforce") || 
@@ -287,6 +355,10 @@ QString GstPlayer::detectGpuType()
 bool GstPlayer::createPipeline()
 {
     QMutexLocker lock(&m_mutex);
+
+    // 🔧 解码器专项诊断：开启 GStreamer 底层日志捕获到 decoder_diag.txt
+    initDecoderDiag();
+    decDiagWrite("========== createPipeline 开始 ==========");
     
     if (m_pipeline) {
         qDebug() << "⚠️ Pipeline 已存在，先销毁";
@@ -638,6 +710,7 @@ bool GstPlayer::createPipeline()
     }
     
     qDebug() << "🎯 最终解码器:" << m_decoderName;
+    decDiagWrite(QString("最终解码器: %1 (硬解=%2)").arg(m_decoderName).arg(m_useHardwareDecoder ? "是" : "否"));
     
     // ⭐⭐⭐ 关键防马赛克队列 2：解码后缓冲（与 Java 一致）
     m_queueDecode = gst_element_factory_make("queue", "queue_decode");
@@ -2282,6 +2355,8 @@ GstBusSyncReply GstPlayer::onBusSyncMessage(GstBus *bus, GstMessage *message, gp
 
         captureDebugLog("GST", QString("ERROR src=%1 msg=%2 debug=%3").arg(srcName).arg(err->message).arg(debug));
         diagLog(QString("❌ ERROR src=%1: %2 | debug: %3").arg(srcName).arg(err->message).arg(debug));
+        decDiagWrite(QString("❌ BUS ERROR src=%1 | msg=%2 | debug=%3")
+            .arg(srcName).arg(err->message).arg(debug ? debug : ""));
         qCritical() << "❌ GStreamer 错误:" << err->message << "src=" << srcName;
         g_error_free(err);
         g_free(debug);
@@ -2292,6 +2367,9 @@ GstBusSyncReply GstPlayer::onBusSyncMessage(GstBus *bus, GstMessage *message, gp
         gchar *debug = nullptr;
         gst_message_parse_warning(message, &err, &debug);
         diagLog(QString("⚠️ WARNING: %1 | debug: %2").arg(err->message).arg(debug));
+        decDiagWrite(QString("⚠️ BUS WARNING src=%1 | msg=%2 | debug=%3")
+            .arg(GST_MESSAGE_SRC(message) ? GST_OBJECT_NAME(GST_MESSAGE_SRC(message)) : "")
+            .arg(err->message).arg(debug ? debug : ""));
         g_error_free(err);
         g_free(debug);
         break;
