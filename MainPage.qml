@@ -40,7 +40,7 @@ Rectangle {
     property string currentStream: "VID_59C9232BFF5576718C575E19EDE7"
     
     // P2P 直连模式属性
-    property int connectMode: 0                        // 0=SRS模式, 1=P2P直连模式（来自CONFIG_STATE.state.connectstype）
+    property int connectMode: 0                        // 0=SRS模式, 1=P2P直连模式, 2=SRT模式（来自CONFIG_STATE.state.connectstype）
     property string pairedIosDeviceId: ""              // 配对的 iOS 设备 ID
     property double _lastKeyframeWsMs: 0                // P0-1: WebSocket 关键帧兜底限流时间戳
     property var iceServers: []                        // 从登录接口获取的 ICE 服务器列表
@@ -59,6 +59,13 @@ Rectangle {
     property real videoOffsetX: 0          // X轴偏移（相对于中心）
     property real videoOffsetY: 0          // Y轴偏移（相对于中心）
 
+    // ⭐ 网页内核模式：本地变换变化时同步给 webview（CSS transform）。
+    //   GStreamer 模式下 kernelSyncTransform 内部直接 return，无副作用。
+    //   注意：videoZoom/videoOffsetX/videoOffsetY 的 kernelSyncTransform 已合并到
+    //   下方对应的信号处理器中（QML 同一对象同名信号处理器只能声明一次）。
+    onVideoRotationChanged: kernelSyncTransform()
+    onVideoMirrorModeChanged: kernelSyncTransform()
+
     function clampVideoOffsets() {
         var maxOffsetX = videoContainer.width * (videoZoom - 1) / 2
         var maxOffsetY = videoContainer.height * (videoZoom - 1) / 2
@@ -76,14 +83,17 @@ Rectangle {
     onVideoZoomChanged: {
         slowmoZoom = videoZoom
         clampVideoOffsets()
+        kernelSyncTransform()
     }
     onVideoOffsetXChanged: {
         clampVideoOffsets()
         slowmoOffsetX = videoOffsetX
+        kernelSyncTransform()
     }
     onVideoOffsetYChanged: {
         clampVideoOffsets()
         slowmoOffsetY = videoOffsetY
+        kernelSyncTransform()
     }
 
     // ⭐ 慢放回放窗口的 独立 局部缩放 (S+滚轮 触发, 鼠标位置为中心)
@@ -116,7 +126,14 @@ Rectangle {
         property real panelColorS: 0     // 面板颜色饱和度 (0-1)，默认90%白色
         property real panelColorV: 0.9   // 面板颜色明度 (0-1)，默认90%白色
         property bool halfScreenViewMode: false  // 放大查看模式：false=全屏，true=半屏（覆盖截图view）
+        // ⭐ 播放内核选择（2026-06-24）：与 LoginPage 的 kernelSettings 同 app 域(Acard/Phoenix)、同名 key，
+        //   登录页写入、这里读取，天然同步。默认 "gstreamer"。
+        property string playbackKernel: "gstreamer"  // "gstreamer" | "webengine"
     }
+
+    // ⭐ 主播放内核是否为「网页内核(Chromium WebEngine)」。
+    //   第二步会据此决定 livePanel 走 GStreamer VideoOutput 还是全屏 webview。
+    property bool useWebEngineKernel: (appSettings.playbackKernel === "webengine")
     
     // ⭐ 面板背景色（使用完整 HSV）
     property color panelBgColor: Qt.hsva(appSettings.panelColorH, appSettings.panelColorS, appSettings.panelColorV, 1)
@@ -247,9 +264,23 @@ Rectangle {
     }
     
     // FPS 显示（来自 GstPlayer 统计的实际接收帧率，已 x4）
+    //   ⭐ 网页内核作主播放器时改用 webview 上报的 kernelViewerFps（GStreamer receiveFps 此时恒为 0）。
     Item {
         id: fpsRow
-        property int displayFps: gstPlayer.receiveFps
+        property int displayFps: mainPage.useWebEngineKernel ? mainPage.kernelViewerFps : gstPlayer.receiveFps
+    }
+
+    // ⭐ 网页内核作主播放器时 webview 上报的接收帧率（GStreamer receiveFps 此时恒为 0）。
+    //   由 kernelBridge.viewerFpsChanged 驱动，供拉流心跳判断画面是否在播。
+    property int kernelViewerFps: 0
+
+    // ⭐ 接收 webview 帧率上报（仅内核模式有效）
+    Connections {
+        target: (typeof kernelBridge !== 'undefined' && kernelBridge) ? kernelBridge : null
+        ignoreUnknownSignals: true
+        function onViewerFpsChanged(fps) {
+            mainPage.kernelViewerFps = fps
+        }
     }
 
     // 拉流心跳：每秒通知 iOS"我在看"（基于画面是否显示）
@@ -259,8 +290,10 @@ Rectangle {
         repeat: true
         running: true
         onTriggered: {
-            // 只在画面实际显示时发送（receiveFps > 0）
-            if (gstPlayer.receiveFps > 0) {
+            // ⭐ 内核模式用 webview 上报的 kernelViewerFps，GStreamer 模式用 gstPlayer.receiveFps。
+            //   只在画面实际显示时发送（fps > 0），iOS 收到心跳即显示「PC 已连接」。
+            var fps = mainPage.useWebEngineKernel ? mainPage.kernelViewerFps : gstPlayer.receiveFps
+            if (fps > 0) {
                 var deviceId = HttpClient.currentDeviceId()
                 if (!deviceId) return
                 var payload = {
@@ -268,7 +301,7 @@ Rectangle {
                     "deviceId": deviceId,
                     "fromDevice": HttpClient.pcDeviceId(),   // ⭐ PC 唯一标识，供 iOS 统计观看者数
                     "networkType": "wifi",                   // ⭐ PC 为桌面控制端，视为非蜂窝宽带
-                    "fps": gstPlayer.receiveFps,
+                    "fps": fps,
                     "timestamp": Date.now()
                 }
                 var destination = "/topic/device/" + deviceId + "/config"
@@ -1035,6 +1068,58 @@ Rectangle {
                         }
                     }
                 }
+
+                // ⭐ AI 牌位置放大开关
+                Row {
+                    spacing: 4
+                    height: parent.height
+
+                    Text {
+                        text: "AI牌位"
+                        font.family: "PingFang HK"
+                        font.pixelSize: 14
+                        color: "#263238"
+                        anchors.verticalCenter: parent.verticalCenter
+
+                        MouseArea {
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            ToolTip.visible: containsMouse
+                            ToolTip.text: "AI牌位置放大：截图/切帧后自动识别牌的位置并放大居中（CPU 推理，不影响实时流）"
+                            ToolTip.delay: 300
+                        }
+                    }
+
+                    // 开关控件
+                    Rectangle {
+                        id: aiCardZoomSwitch
+                        width: 36
+                        height: 18
+                        radius: 9
+                        anchors.verticalCenter: parent.verticalCenter
+                        color: captureManager.aiCardZoomEnabled ? "#4CAF50" : "#B0BEC5"
+
+                        Rectangle {
+                            width: 14
+                            height: 14
+                            radius: 7
+                            color: "#FFFFFF"
+                            x: captureManager.aiCardZoomEnabled ? parent.width - width - 2 : 2
+                            anchors.verticalCenter: parent.verticalCenter
+
+                            Behavior on x { NumberAnimation { duration: 150 } }
+                        }
+
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: {
+                                captureManager.aiCardZoomEnabled = !captureManager.aiCardZoomEnabled
+                                console.log("🃏 AI牌位置放大:", captureManager.aiCardZoomEnabled ? "开启" : "关闭")
+                            }
+                        }
+                    }
+                }
                 
                 // ⭐ 面板颜色调节（点击打开 PS 风格颜色选择器）
                 Row {
@@ -1164,6 +1249,11 @@ Rectangle {
                     }
                 }
 
+                // ⭐ 「内核测试」对比浮窗按钮已移除（2026-06-24）：
+                //   网页内核已升级为登录页可选的「主播放内核」（见 LoginPage 播放内核开关 +
+                //   livePanel 内 kernelPlayerLoader），不再需要顶部对比浮窗入口。
+                //   浮窗本体 kernelTestOverlay 暂保留但无入口触发（P2P 退场逻辑仍在），后续可清理。
+
                 // ⭐ 滚轮帧数（步长）显示：默认1，按 F5–F8 跟随 frameStep 变化
                 Rectangle {
                     width: wheelStepText.width + 16
@@ -1244,11 +1334,11 @@ Rectangle {
                     spacing: 4
                     height: parent.height
                     Text {
-                        text: mainPage.connectMode === 1 ? "P2P" : "SRS"
+                        text: mainPage.connectMode === 1 ? "P2P" : (mainPage.connectMode === 2 ? "SRT" : "SRS")
                         font.family: "Consolas"
                         font.pixelSize: 10
                         font.bold: true
-                        color: mainPage.connectMode === 1 ? "#4CAF50" : "#FF9800"
+                        color: mainPage.connectMode === 1 ? "#4CAF50" : (mainPage.connectMode === 2 ? "#2196F3" : "#FF9800")
                         anchors.verticalCenter: parent.verticalCenter
                     }
                     Text {
@@ -1740,6 +1830,29 @@ Rectangle {
                                     itemImage.loadCurrentFrame()
                                 }
                             }
+                            // ⭐ AI 牌位置放大：把识别到的牌中心对齐到格子中心并放大
+                            //   cx/cy 为牌中心在原图的归一化坐标(0~1)
+                            function onCardZoomReady(itemIndex, frameOffset, zoom, cx, cy) {
+                                if (itemIndex !== gridCell.dataIndex) return
+                                if (frameOffset !== gridCell.currentFrame) return  // 只对"当前这一张"生效
+                                var W = imageContainer.width
+                                var H = imageContainer.height
+                                if (W <= 0 || H <= 0) return
+                                // 放大后把(cx,cy)归一化点平移到容器中心
+                                var offX = (0.5 - cx) * W * zoom
+                                var offY = (0.5 - cy) * H * zoom
+                                var maxX = W * (zoom - 1) / 2
+                                var maxY = H * (zoom - 1) / 2
+                                gridCell.itemZoom = zoom
+                                gridCell.itemOffsetX = Math.max(-maxX, Math.min(maxX, offX))
+                                gridCell.itemOffsetY = Math.max(-maxY, Math.min(maxY, offY))
+                            }
+                            function onCardZoomCleared(itemIndex) {
+                                if (itemIndex !== gridCell.dataIndex) return
+                                gridCell.itemZoom = 1.0
+                                gridCell.itemOffsetX = 0
+                                gridCell.itemOffsetY = 0
+                            }
                         }
                         
                         color: mainPage.panelBgColor  // 面板背景色（滑块可调）
@@ -2123,6 +2236,8 @@ Rectangle {
                         // 视频输出
                         VideoOutput {
                             id: liveVideoPlayer
+                            // ⭐ 网页内核模式下隐藏 GStreamer 输出（改由下方 webview 显示画面）
+                            visible: !mainPage.useWebEngineKernel
                             // 根据旋转角度调整宽高
                             width: (mainPage.videoRotation === 90 || mainPage.videoRotation === 270) 
                                    ? parent.height : parent.width
@@ -2155,12 +2270,34 @@ Rectangle {
                             
                             layer.enabled: false  // 不再使用 shader，颜色调整由 GStreamer videobalance 和 gamma 处理
                         }
+
+                        // ⭐ 网页内核（Chromium WebEngine）主播放器（2026-06-24）：
+                        //   useWebEngineKernel 时全屏铺满 videoContainer，替代上面的 VideoOutput。
+                        //   缩放/镜像/旋转由 applyTransform(CSS transform) 处理；下发 iOS 的按钮在外层
+                        //   liveControlBar，与内核无关、原样复用。生命周期由 play*/stopAll 分流到 startTest/stopTest。
+                        Loader {
+                            id: kernelPlayerLoader
+                            anchors.fill: parent
+                            z: 2  // 盖在 VideoOutput 之上（VideoOutput 此时已 visible:false）
+                            active: mainPage.useWebEngineKernel
+                            source: mainPage.useWebEngineKernel ? "KernelTestView.qml" : ""
+                            onLoaded: {
+                                item.topInset = 0  // 主播放器全屏，无标题栏留白
+                                // 加载完成后立即按当前连接模式拉流
+                                mainPage.kernelStartByMode()
+                                // 同步当前本地变换
+                                mainPage.kernelSyncTransform()
+                            }
+                        }
                         
                         
                         // 滚轮：S+滚轮控制镜头变倍(1.0-3.0)，普通滚轮控制本地缩放(1.0-5.0)
                         MouseArea {
                             id: videoZoomArea
                             anchors.fill: parent
+                            // ⭐ 网页内核模式下，画面交互（缩放等）由 webview 内部/CSS 处理，
+                            //   但本地缩放滚轮仍要可用（改 videoZoom → applyTransform），故保持启用。
+                            //   左键抓拍在内核模式走第三步 JS 侧，这里点击不再触发 GStreamer 抓拍。
                             hoverEnabled: true
                             
                             onEntered: {
@@ -2171,6 +2308,11 @@ Rectangle {
                             onClicked: {
                                 // 点击视频区域时关闭档位下拉菜单
                                 qualityMenu.visible = false
+                                // ⭐ 网页内核模式下截图走第三步 JS 侧，GStreamer 抓拍不可用，跳过
+                                if (mainPage.useWebEngineKernel) {
+                                    console.log("🌐 [网页内核] 左键抓拍：待第三步 JS 侧实现，暂跳过 GStreamer 抓拍")
+                                    return
+                                }
                                 // 鼠标左键 = 空格键，触发抓拍
                                 EventBus.triggerCapture()
                             }
@@ -4150,7 +4292,47 @@ Rectangle {
     }
 
     // ============ 函数 ============
+
+    // ⭐ 网页内核辅助（2026-06-24）：内核模式下按连接模式驱动 webview 播放。
+    function kernelStartByMode() {
+        if (!useWebEngineKernel) return
+        var view = kernelPlayerLoader.item
+        if (!view) return
+        if (connectMode === 2) {
+            // SRT：浏览器不支持 → 提示
+            view.startTest("srt", "", "", "", "")
+        } else if (connectMode === 1) {
+            // P2P：参数从 kernelBridge 拿
+            view.startTest("p2p", "", "", "", "")
+        } else {
+            // SRS：WHEP
+            view.startTest("srs", srsServer, "tenantA", currentStream, "vid-7gg4748")
+        }
+    }
+
+    function kernelStop() {
+        if (!useWebEngineKernel) return
+        var view = kernelPlayerLoader.item
+        if (view) view.stopTest()
+        // ⭐ 立即清零内核帧率，拉流心跳随之停发（不依赖 webview 卸载前是否上报到 0）。
+        kernelViewerFps = 0
+    }
+
+    // ⭐ 把本地缩放/镜像/旋转/偏移同步到 webview（CSS transform），与 GStreamer 端 QML 变换对齐。
+    function kernelSyncTransform() {
+        if (!useWebEngineKernel) return
+        var view = kernelPlayerLoader.item
+        if (view) view.applyTransform(videoZoom, videoMirrorMode, videoRotation, videoOffsetX, videoOffsetY)
+    }
+
     function playWebRTC() {
+        // ⭐ 网页内核模式：不走 GStreamer，改驱动 webview
+        if (useWebEngineKernel) {
+            console.log("🌐 [网页内核] playWebRTC → kernelStartByMode")
+            isConnecting = true
+            kernelStartByMode()
+            return
+        }
         // 检查 streamKey 是否有效
         if (!currentStream || currentStream.length === 0) {
             console.log("⚠️ playWebRTC: currentStream 为空，跳过")
@@ -4178,6 +4360,14 @@ Rectangle {
             statusText.text = "等待 iOS 设备连接..."
             return
         }
+
+        // ⭐ 网页内核模式：P2P 走 webview（QWebChannel kernelBridge 信令）
+        if (useWebEngineKernel) {
+            console.log("🌐 [网页内核] playP2P → kernelStartByMode")
+            isConnecting = true
+            kernelStartByMode()
+            return
+        }
         
         isConnecting = true
         stopAll()
@@ -4191,10 +4381,46 @@ Rectangle {
         console.log("🌐 playP2P: 启动 P2P 连接...")
         gstPlayer.connectP2P(pairedIosDeviceId, iceArray)
     }
-    
+
+    // MARK: SRT (independent) —— 方案 B：PC 端独立 SRT 拉流（与 SRS/P2P 互斥）
+    // SRT 服务端口写死 10080，IP 复用 srsServer；streamid 用 m=request（拉流）。
+    function playSRT() {
+        if (!currentStream || currentStream.length === 0) {
+            console.log("⚠️ playSRT: currentStream 为空，跳过")
+            return
+        }
+
+        // ⭐ 网页内核模式：浏览器不支持 SRT → webview 显示提示，不拉流
+        if (useWebEngineKernel) {
+            console.log("🌐 [网页内核] playSRT → 不支持，显示提示")
+            kernelStartByMode()  // connectMode===2 时内部走 startTest("srt") 提示
+            return
+        }
+
+        isConnecting = true
+        stopAll()
+
+        var srtUri = "srt://" + srsServer + ":10080?streamid=#!::r=live/" + currentStream + ",m=request"
+        console.log("🎬 playSRT: uri=" + srtUri)
+        statusText.text = "正在连接 SRT..."
+
+        gstPlayer.reset()
+        gstPlayer.connectSRT(srtUri)
+    }
+
     function stopAll() {
         console.log("🛑 stopAll: 停止所有流...")
-        if (gstPlayer.isP2PMode()) {
+
+        // ⭐ 网页内核模式：停 webview 播放即可，不碰 GStreamer（此时 GStreamer 未启动）
+        if (useWebEngineKernel) {
+            kernelStop()
+            console.log("🛑 [网页内核] stopAll: 已停 webview")
+            return
+        }
+
+        if (gstPlayer.isSRTMode()) {            // MARK: SRT (independent)
+            gstPlayer.disconnectSRT()
+        } else if (gstPlayer.isP2PMode()) {
             gstPlayer.disconnectP2P()
         } else {
             webrtcClient.disconnect()
@@ -7464,6 +7690,9 @@ Rectangle {
         
         // 收到 WebRTC 信令消息 → 转发给 GstPlayer
         function onWebrtcSignalingReceived(message) {
+            // ⭐ 网页内核模式：P2P 信令由 webview 内 kernelBridge + JS 处理，
+            //   不能再转发给 GStreamer，否则两端抢同一路 P2P 会话。
+            if (mainPage.useWebEngineKernel) return
             if (gstPlayer.isP2PMode()) {
                 console.log("[P2P-QML] 收到 WebRTC 信令: " + message.type)
                 gstPlayer.handleWebRTCSignaling(message)
@@ -7808,6 +8037,12 @@ Rectangle {
                 console.log("🔄 连接模式变更: " + mainPage.connectMode + " → " + connectstype)
                 mainPage.connectMode = connectstype
             }
+
+            // MARK: SRT (independent) —— 确定 SRT 模式即尽早后台预热解码器/编码器，
+            //   抢在真正 playSRT 之前完成 CUDA/MF 冷启动，消除首屏卡 3.3s。进程级只跑一次。
+            if (mainPage.connectMode === 2) {
+                gstPlayer.warmupSRT()
+            }
             
             // ⭐ 推流状态处理
             if (publishStatus === 1 && streamKey && streamKey.length > 0) {
@@ -7821,20 +8056,26 @@ Rectangle {
                     mainPage.deviceStatus = ""
                     statusText.text = "正在连接视频流..."
                     
-                    // 根据 connectstype 选择拉流模式
+                    // 根据 connectstype 选择拉流模式（0=SRS / 1=P2P / 2=SRT）
                     if (mainPage.connectMode === 1) {
                         console.log("🌐 使用 P2P 直连模式拉流")
                         playP2P()
+                    } else if (mainPage.connectMode === 2) {   // MARK: SRT (independent)
+                        console.log("🎬 使用 SRT 模式拉流")
+                        playSRT()
                     } else {
                         console.log("🎬 使用 SRS 模式拉流")
                         playWebRTC()
                     }
                 } else if (modeChanged) {
-                    // ⭐ 播放中 iOS 切换了连接方式（P2P↔SRS）→ 重连到新模式
-                    console.log("🔁 播放中连接方式切换 → " + (mainPage.connectMode === 1 ? "P2P" : "SRS") + "，重连")
+                    // ⭐ 播放中 iOS 切换了连接方式（SRS↔P2P↔SRT）→ 重连到新模式
+                    var modeName = mainPage.connectMode === 1 ? "P2P" : (mainPage.connectMode === 2 ? "SRT" : "SRS")
+                    console.log("🔁 播放中连接方式切换 → " + modeName + "，重连")
                     stopAll()
                     if (mainPage.connectMode === 1) {
                         playP2P()
+                    } else if (mainPage.connectMode === 2) {   // MARK: SRT (independent)
+                        playSRT()
                     } else {
                         playWebRTC()
                     }
@@ -13364,6 +13605,206 @@ Rectangle {
                 }
 
                 Item { Layout.fillWidth: true; Layout.fillHeight: true }
+            }
+        }
+    }
+
+    // ⭐⭐⭐ 内核测试浮动窗口（Chromium WebEngine 拉 SRS 流，对比 GStreamer 画质）
+    //   可拖动 + 可缩放，默认靠右半屏，下面露出 GStreamer 画面方便左右对比。
+    //   用 Loader 动态加载 KernelTestView.qml，把 WebEngine 依赖隔离；加载失败只提示不崩。
+    Rectangle {
+        id: kernelTestOverlay
+        z: 99000
+        visible: false
+        color: "#000000"
+        border.color: "#1565C0"
+        border.width: 2
+
+        // 默认：靠右、占约一半宽、上下留边
+        width: Math.min(820, mainPage.width * 0.5)
+        height: Math.min(560, mainPage.height * 0.8)
+        x: mainPage.width - width - 20
+        y: 60
+
+        function openTest() {
+            // 每次打开复位到默认位置/大小
+            width = Math.min(820, mainPage.width * 0.5)
+            height = Math.min(560, mainPage.height * 0.8)
+            x = mainPage.width - width - 20
+            y = 60
+            visible = true
+            kernelLoader.active = true
+        }
+        function closeTest() {
+            if (kernelLoader.item && kernelLoader.item.stopTest)
+                kernelLoader.item.stopTest()
+            kernelLoader.active = false
+            visible = false
+        }
+
+        // ⭐ 接 kernelBridge 信号：P2P 测试开始时断开 GStreamer P2P 让出会话；结束时恢复
+        Connections {
+            target: (typeof kernelBridge !== 'undefined' && kernelBridge) ? kernelBridge : null
+            ignoreUnknownSignals: true
+            function onRequestStopGstP2P() {
+                console.log("[内核测试] 收到请求 → 进入内核测试模式，GStreamer 彻底让出 P2P")
+                // ⭐ 用硬开关让 GStreamer 完全退场：不拉流/不渲染/不处理信令，且拦截任何自动重连重启。
+                //   （旧做法只 disconnectP2P，会被 watchdog/状态变化重新 playP2P，导致双端抢会话→内核黑屏）
+                if (gstPlayer.setKernelTestMode) gstPlayer.setKernelTestMode(true)
+            }
+            function onRequestResumeGstP2P() {
+                console.log("[内核测试] 结束 → 退出内核测试模式，恢复 GStreamer P2P")
+                if (gstPlayer.setKernelTestMode) gstPlayer.setKernelTestMode(false)
+                if (mainPage.connectMode === 1) {
+                    playP2P()
+                }
+            }
+        }
+
+        // 标题栏（可拖动整个窗口）
+        Rectangle {
+            id: kernelTitleBar
+            anchors.top: parent.top
+            anchors.left: parent.left
+            anchors.right: parent.right
+            height: 34
+            color: "#1565C0"
+            z: 10
+
+            Text {
+                anchors.left: parent.left
+                anchors.leftMargin: 12
+                anchors.right: kernelBtnRow.left
+                anchors.rightMargin: 8
+                anchors.verticalCenter: parent.verticalCenter
+                elide: Text.ElideRight
+                text: "内核测试 · Chromium · 拖标题移动 / 拖右下角缩放 / 对比下方 GStreamer"
+                font.family: "PingFang HK"
+                font.pixelSize: 13
+                color: "#FFFFFF"
+            }
+
+            // 拖动：移动整个窗口
+            MouseArea {
+                anchors.fill: parent
+                anchors.rightMargin: 140
+                cursorShape: Qt.SizeAllCursor
+                property real startX: 0
+                property real startY: 0
+                onPressed: function(mouse) { startX = mouse.x; startY = mouse.y }
+                onPositionChanged: function(mouse) {
+                    if (pressed) {
+                        kernelTestOverlay.x += (mouse.x - startX)
+                        kernelTestOverlay.y += (mouse.y - startY)
+                    }
+                }
+            }
+
+            Row {
+                id: kernelBtnRow
+                anchors.right: parent.right
+                anchors.rightMargin: 8
+                anchors.verticalCenter: parent.verticalCenter
+                spacing: 6
+
+                // 全屏 / 还原
+                Rectangle {
+                    width: 56; height: 24; radius: 4
+                    color: fsArea.containsMouse ? "#42A5F5" : "#1E88E5"
+                    Text { anchors.centerIn: parent; text: "全屏"; font.pixelSize: 12; color: "#FFFFFF" }
+                    MouseArea {
+                        id: fsArea
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            kernelTestOverlay.x = 0
+                            kernelTestOverlay.y = 0
+                            kernelTestOverlay.width = mainPage.width
+                            kernelTestOverlay.height = mainPage.height
+                        }
+                    }
+                }
+
+                Rectangle {
+                    width: 56; height: 24; radius: 4
+                    color: closeKernelArea.containsMouse ? "#E53935" : "#C62828"
+                    Text { anchors.centerIn: parent; text: "关闭"; font.pixelSize: 12; color: "#FFFFFF" }
+                    MouseArea {
+                        id: closeKernelArea
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: kernelTestOverlay.closeTest()
+                    }
+                }
+            }
+        }
+
+        Loader {
+            id: kernelLoader
+            anchors.top: kernelTitleBar.bottom
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.bottom: parent.bottom
+            anchors.margins: 2
+            active: false
+            asynchronous: true
+            source: "KernelTestView.qml"
+            onLoaded: {
+                if (item && item.startTest) {
+                    var mode = (mainPage.connectMode === 1) ? "p2p" : "srs"
+                    item.startTest(mode, mainPage.srsServer, "tenantA", mainPage.currentStream, "vid-7gg4748")
+                }
+            }
+            onStatusChanged: {
+                if (status === Loader.Error) {
+                    kernelLoadErrText.visible = true
+                }
+            }
+        }
+
+        Text {
+            id: kernelLoadErrText
+            visible: false
+            anchors.centerIn: parent
+            text: "未启用内核测试：Qt WebEngine 模块缺失或未编译。\n请确认 CMake 检测到 WebEngineQuick 并重新构建。"
+            horizontalAlignment: Text.AlignHCenter
+            font.family: "PingFang HK"
+            font.pixelSize: 16
+            color: "#FF5252"
+        }
+
+        // 右下角缩放手柄
+        Rectangle {
+            width: 18
+            height: 18
+            color: "#1565C0"
+            anchors.right: parent.right
+            anchors.bottom: parent.bottom
+            z: 20
+
+            Text {
+                anchors.centerIn: parent
+                text: "⤡"
+                font.pixelSize: 12
+                color: "#FFFFFF"
+            }
+
+            MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.SizeFDiagCursor
+                property real startX: 0
+                property real startY: 0
+                onPressed: function(mouse) { startX = mouse.x; startY = mouse.y }
+                onPositionChanged: function(mouse) {
+                    if (pressed) {
+                        var nw = kernelTestOverlay.width + (mouse.x - startX)
+                        var nh = kernelTestOverlay.height + (mouse.y - startY)
+                        kernelTestOverlay.width = Math.max(320, nw)
+                        kernelTestOverlay.height = Math.max(240, nh)
+                    }
+                }
             }
         }
     }

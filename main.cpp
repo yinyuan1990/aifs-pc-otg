@@ -30,6 +30,12 @@
 #include "qrcodegenerator.h"
 #include "autoupdater.h"
 
+// ⭐ Qt WebEngine（Chromium 内核）—— 仅当 CMake 检测到 WebEngine 时启用（HAVE_WEBENGINE）
+#ifdef HAVE_WEBENGINE
+#include <QtWebEngineQuick/QtWebEngineQuick>
+#include "kernelbridge.h"
+#endif
+
 // GStreamer
 #include <gst/gst.h>
 
@@ -390,7 +396,22 @@ int main(int argc, char *argv[])
     
     // 设置 Qt Quick Controls 2 风格为 Fusion，避免原生风格自定义警告
     QQuickStyle::setStyle("Fusion");
-    
+
+    // ⭐ Qt WebEngine（Chromium 内核）初始化 —— 必须在 QGuiApplication 之前。
+    //   仅「内核测试」按钮会用到；未启用 WebEngine 编译时此段不存在，主程序不受影响。
+#ifdef HAVE_WEBENGINE
+    //   --disable-web-security：SRS WHEP 是 http 明文 + 跨域 fetch，浏览器默认会被 CORS/混合内容拦，
+    //     竞品 CefSharp 直连无此限。测试场景关掉 Web 安全策略，确保只要网络通就能拉到流。
+    //   --autoplay-policy：允许无用户手势自动播放（视频自动播）。
+    //   --use-gl=angle / d3d11：尽量走硬件解码，降低 CPU（不影响画质）。
+    qputenv("QTWEBENGINE_CHROMIUM_FLAGS",
+            "--disable-web-security "
+            "--autoplay-policy=no-user-gesture-required "
+            "--ignore-certificate-errors");
+    QtWebEngineQuick::initialize();
+    earlyLog("[WebEngine] QtWebEngineQuick::initialize() done");
+#endif
+
     QGuiApplication app(argc, argv);
     
     // 设置应用程序信息（QML Settings 需要）
@@ -511,8 +532,17 @@ int main(int argc, char *argv[])
     
     // 注册 AutoUpdater 单例（自动更新）
     qmlRegisterSingletonInstance("Aifs.Components", 1, 0, "AutoUpdater", AutoUpdater::instance());
-    
+
     QQmlApplicationEngine engine;
+
+    // ⭐ 内核测试桥（QWebChannel）：把 P2P 信令暴露给 WebEngine JS。仅启用 WebEngine 时存在。
+#ifdef HAVE_WEBENGINE
+    KernelBridge *kernelBridge = new KernelBridge(&app);
+    // ⭐ QML WebChannel.registeredObjects 用 objectName 作为 JS 侧的发布标识；
+    //   不设则 JS 的 channel.objects.kernelBridge 取不到（即使 transport 已注入）。
+    kernelBridge->setObjectName("kernelBridge");
+    engine.rootContext()->setContextProperty("kernelBridge", kernelBridge);
+#endif
     
     // 连接 QML 的 Qt.quit() 到应用退出
     QObject::connect(&engine, &QQmlApplicationEngine::quit, &app, &QGuiApplication::quit);

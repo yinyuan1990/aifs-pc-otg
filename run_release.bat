@@ -29,7 +29,7 @@ echo ========================================
 echo.
 
 REM 运行 Release 版本
-cd /d "%~dp0build\Desktop_Qt_6_10_1_MSVC2022_64bit-Release"
+cd /d "%~dp0build\Desktop_Qt_6_10_3_MSVC2022_64bit-Release"
 echo Starting appAifs.exe (Release) from %CD%
 echo.
 appAifs.exe

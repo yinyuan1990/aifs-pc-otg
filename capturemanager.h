@@ -18,6 +18,9 @@
 #include "gstplayer.h"
 #include "gstcapturedecoder.h"
 #include "naluframestore.h"
+#include "carddetector.h"
+
+class QTimer;
 
 // 前向声明
 struct AVCodecContext;
@@ -224,6 +227,9 @@ class CaptureManager : public QObject
     Q_PROPERTY(bool slowMotionActive READ slowMotionActive WRITE setSlowMotionActive NOTIFY slowMotionActiveChanged)
     Q_PROPERTY(SlowMotionPlayer* slowMotionPlayer READ slowMotionPlayer WRITE setSlowMotionPlayer NOTIFY slowMotionPlayerChanged)
 
+    // AI 牌位置识别放大（与实时流解耦，CPU 推理；详见 carddetector.h）
+    Q_PROPERTY(bool aiCardZoomEnabled READ aiCardZoomEnabled WRITE setAiCardZoomEnabled NOTIFY aiCardZoomEnabledChanged)
+
 public:
     static constexpr int MAX_ITEMS = 1000;
     static constexpr int DEFAULT_PRE_FRAMES = 10;
@@ -347,6 +353,12 @@ public:
     GstPlayer* gstPlayer() const { return m_gstPlayer; }
     void setGstPlayer(GstPlayer* player);
 
+    // ── AI 牌位置识别放大 ────────────────────────────────────
+    bool aiCardZoomEnabled() const { return m_aiCardZoomEnabled; }
+    void setAiCardZoomEnabled(bool enabled);
+    // 模型放大倍数（与黄金瞳一致，默认 3.0）
+    Q_INVOKABLE void setAiZoomScale(double scale) { m_aiZoomScale = scale; }
+
 public slots:
     void onFrameReceived(const QImage &frame, qint64 frameIndex);
     void onFrameIndexReady(qint64 frameIndex);  // 新增：只接收帧索引
@@ -370,9 +382,15 @@ signals:
     void frameChanged(int itemIndex, int frameOffset);
     void frameImageReady(int itemIndex, int frameOffset);
 
+    // AI 放大：cx/cy 为牌中心在原图的归一化坐标(0~1)；QML 据此设置 itemZoom/itemOffset
+    void cardZoomReady(int itemIndex, int frameOffset, double zoom, double cx, double cy);
+    void cardZoomCleared(int itemIndex);          // 该帧未检出牌 / 关闭功能
+    void aiCardZoomEnabledChanged();
+
 private slots:
     void onFrameEncoded(qint64 index);
     void onBatchWritten(int tag);  // 后台落盘完成后触发可见帧解码
+    void onCardDetected(int itemIndex, int frameOffset, CardBox box, int origW, int origH);
 
 private:
     void removeOldest();
@@ -381,6 +399,8 @@ private:
     QImage decodeFromDisk(int itemIndex, int frameOffset);
     static QByteArray readNaluFile(const QString &dir, int frameOffset);
     void scheduleFrameDecode(int itemIndex, int frameOffset);
+    void ensureCardDetector();                                  // 懒加载检测器+模型
+    void requestCardDetect(int itemIndex, int frameOffset);     // 防抖派发检测
     bool tryGetFrameCache(int itemIndex, int frameOffset, QImage *out) const;
     void putFrameCache(int itemIndex, int frameOffset, const QImage &img);
     void evictFrameCache();
@@ -431,6 +451,16 @@ private:
     // 慢放抓拍模式
     bool m_slowMotionActive = false;
     SlowMotionPlayer *m_slowMotionPlayer = nullptr;
+
+    // AI 牌位置识别放大
+    bool m_aiCardZoomEnabled = false;
+    double m_aiZoomScale = 3.0;
+    CardDetector *m_cardDetector = nullptr;     // 独立后台线程，懒加载
+    QTimer *m_aiDebounceTimer = nullptr;        // 滚动切帧防抖
+    int m_aiPendingItem = -1;
+    int m_aiPendingFrame = -1;
+    int m_aiPendingCaptureItem = -1;            // 截图后等事件帧解码就绪再检测
+    int m_aiPendingCaptureFrame = -1;
     
     // 单帧快速缓存（最近一帧）
     mutable int m_cachedItemIndex = -1;

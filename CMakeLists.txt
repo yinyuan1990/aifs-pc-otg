@@ -22,6 +22,12 @@ set(FFMPEG_INCLUDE_DIR "${FFMPEG_ROOT}/include")
 set(FFMPEG_LIB_DIR "${FFMPEG_ROOT}/lib")
 set(FFMPEG_BIN_DIR "${FFMPEG_ROOT}/bin")
 
+# ONNX Runtime 路径（AI 牌位置识别，CPU 版）
+# 下载 onnxruntime-win-x64-<ver>.zip，把 include/ 和 lib/ 拷到 C:/onnxruntime
+set(ONNXRUNTIME_ROOT "C:/onnxruntime")
+set(ONNXRUNTIME_INCLUDE_DIR "${ONNXRUNTIME_ROOT}/include")
+set(ONNXRUNTIME_LIB_DIR "${ONNXRUNTIME_ROOT}/lib")
+
 # vcpkg 安装路径（仅用于 turbojpeg，不使用 vcpkg 的 GStreamer）
 set(VCPKG_ROOT "D:/javafx/Acard/aic/vcpkg/installed/x64-windows")
 set(VCPKG_INCLUDE_DIR "${VCPKG_ROOT}/include")
@@ -37,6 +43,18 @@ set(GSTREAMER_BIN_DIR "${GSTREAMER_ROOT}/bin")
 find_package(Qt6 REQUIRED COMPONENTS Quick Widgets Network QuickControls2 Concurrent Multimedia ShaderTools WebSockets)
 find_package(Qt6 COMPONENTS Qt5Compat QUIET)  # 可选：用于 GraphicalEffects
 
+# ⭐ Qt WebEngine（Chromium 内核）—— 浏览器内核兜底/画质对比测试用。
+#   可选依赖：装了 QtWebEngine 才编译「内核测试」功能（定义 HAVE_WEBENGINE 宏）；
+#   没装则自动跳过，不影响主程序构建（环境差异零回归）。
+find_package(Qt6 COMPONENTS WebEngineQuick WebChannel QUIET)
+if(Qt6WebEngineQuick_FOUND AND Qt6WebChannel_FOUND)
+    message(STATUS "✅ Qt WebEngine + WebChannel 已找到 → 启用「内核测试」(Chromium 内核拉流对比)")
+    set(HAVE_KERNEL_TEST ON)
+else()
+    message(STATUS "⚠️ Qt WebEngine/WebChannel 未找到 → 跳过「内核测试」功能（主程序不受影响）")
+    set(HAVE_KERNEL_TEST OFF)
+endif()
+
 qt_standard_project_setup(REQUIRES 6.8)
 
 # 源文件
@@ -48,6 +66,8 @@ qt_add_executable(Phoenix
     # webrtcclient.h
     capturemanager.cpp
     capturemanager.h
+    carddetector.cpp     # AI 牌位置识别（ONNX Runtime，CPU 推理，独立后台线程）
+    carddetector.h
     slowmotionplayer.cpp
     slowmotionplayer.h
     imageprovider.cpp
@@ -66,6 +86,8 @@ qt_add_executable(Phoenix
     capturedebuglog.h
     gstplayer.cpp        # GStreamer 实时流 + NALU 存储
     gstplayer.h
+    gstsrtsource.cpp     # MARK: SRT (independent) 方案B PC端独立 SRT 拉流前段
+    gstsrtsource.h
     httpclient.cpp
     httpclient.h
     websocketclient.cpp
@@ -90,10 +112,20 @@ target_include_directories(Phoenix PRIVATE
     "${GSTREAMER_ROOT}/lib/glib-2.0/include"
     # vcpkg（仅用于 turbojpeg.h）
     ${VCPKG_INCLUDE_DIR}
+    # ONNX Runtime（AI 牌位置识别）
+    ${ONNXRUNTIME_INCLUDE_DIR}
 )
 
 # ⭐ GStreamer WebRTC API 需要此宏定义
 target_compile_definitions(Phoenix PRIVATE GST_USE_UNSTABLE_API)
+
+# ⭐ Qt WebEngine + WebChannel 可用时定义 HAVE_WEBENGINE，main.cpp / 测试逻辑据此条件编译
+#   并加入桥对象 kernelbridge（QWebChannel 把 C++ P2P 信令暴露给 WebEngine 里的 JS）。
+if(HAVE_KERNEL_TEST)
+    target_compile_definitions(Phoenix PRIVATE HAVE_WEBENGINE)
+    target_link_libraries(Phoenix PRIVATE Qt6::WebEngineQuick Qt6::WebChannel)
+    target_sources(Phoenix PRIVATE kernelbridge.cpp kernelbridge.h)
+endif()
 
 # 注意：MSVC 不支持 #warning 指令，需要手动修补 GStreamer 头文件
 # 已通过 PowerShell 管理员命令修补：
@@ -104,6 +136,7 @@ target_link_directories(Phoenix PRIVATE
     ${GSTREAMER_LIB_DIR}
     ${FFMPEG_LIB_DIR}
     ${VCPKG_LIB_DIR}  # 仅用于 turbojpeg
+    ${ONNXRUNTIME_LIB_DIR}  # ONNX Runtime（AI 牌位置识别）
 )
 
 # 链接库
@@ -124,6 +157,8 @@ target_link_libraries(Phoenix PRIVATE
     # datachannel
     # libjpeg-turbo (软件 JPEG 编码/解码，备用)
     turbojpeg
+    # ONNX Runtime（AI 牌位置识别，CPU 推理）
+    onnxruntime
     # GStreamer（核心 + WebRTC）
     gstreamer-1.0
     gstapp-1.0
@@ -142,18 +177,28 @@ target_link_libraries(Phoenix PRIVATE
     Shell32
 )
 
+# ⭐ QML 文件列表：KernelTestView.qml 含 `import QtWebEngine`，仅在装了 WebEngine 时编入，
+#   否则 qmlcachegen 会因找不到 QtWebEngine 模块而构建失败。
+set(PHOENIX_QML_FILES
+    Main.qml
+    LoginPage.qml
+    MainPage.qml
+)
+if(HAVE_KERNEL_TEST)
+    list(APPEND PHOENIX_QML_FILES KernelTestView.qml)
+endif()
+
 qt_add_qml_module(Phoenix
     URI Aifs
     QML_FILES
-        Main.qml
-        LoginPage.qml
-        MainPage.qml
+        ${PHOENIX_QML_FILES}
     RESOURCES
         images/yql.png
         images/zwtp.png
         images/avatar.png
         images/icon.png
         images/fh.png
+        webplayer_test.html
 )
 
 # MinGW: QML AOT 原生代码会调用 copysign，链接时需 libm；--only-bytecode 避免生成该原生代码
@@ -220,7 +265,39 @@ add_custom_command(TARGET Phoenix POST_BUILD
         "${GSTREAMER_ROOT}/bin/gsttag-1.0-0.dll"
         "${GSTREAMER_ROOT}/bin/gstnet-1.0-0.dll"
         "${GSTREAMER_ROOT}/bin/gstsctp-1.0-0.dll"
+        # ONNX Runtime（AI 牌位置识别，CPU 推理）
+        "${ONNXRUNTIME_LIB_DIR}/onnxruntime.dll"
         $<TARGET_FILE_DIR:Phoenix>
+)
+
+# ⭐ Qt WebEngine 运行时（仅当启用时）：QtWebEngineProcess.exe + resources + locales
+#   注意：windeployqt 也会处理，但开发期直接 copy 更省事；版本须严格对齐当前 Qt 6.10.3。
+if(HAVE_KERNEL_TEST)
+    get_target_property(_qmake_exe Qt6::qmake IMPORTED_LOCATION)
+    get_filename_component(_qt_bin_dir "${_qmake_exe}" DIRECTORY)            # .../msvc2022_64/bin
+    get_filename_component(_qt_root_dir "${_qt_bin_dir}" DIRECTORY)           # .../msvc2022_64
+    add_custom_command(TARGET Phoenix POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${_qt_bin_dir}/QtWebEngineProcess.exe"
+            $<TARGET_FILE_DIR:Phoenix>
+        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:Phoenix>/resources"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${_qt_root_dir}/resources"
+            "$<TARGET_FILE_DIR:Phoenix>/resources"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:Phoenix>/translations/qtwebengine_locales"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${_qt_root_dir}/translations/qtwebengine_locales"
+            "$<TARGET_FILE_DIR:Phoenix>/translations/qtwebengine_locales"
+        COMMENT "复制 Qt WebEngine 运行时（QtWebEngineProcess + resources + locales）"
+    )
+endif()
+
+# ⭐ 拷贝 AI 模型到输出目录的 models/ 子目录（代码用 applicationDirPath()/models 读取）
+add_custom_command(TARGET Phoenix POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:Phoenix>/models"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_SOURCE_DIR}/resources/models/cardYolov8.onnx"
+        "$<TARGET_FILE_DIR:Phoenix>/models/cardYolov8.onnx"
 )
 
 # ⭐ 子进程守护程序（主程序关闭时运行，打开时终止）

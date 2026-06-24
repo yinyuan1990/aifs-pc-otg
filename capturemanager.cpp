@@ -10,6 +10,7 @@
 #include <QDir>
 #include <QFile>
 #include <QBuffer>
+#include <QTimer>
 #include <QDebug>
 #include <QTextStream>
 #include <QDateTime>
@@ -490,10 +491,108 @@ CaptureManager::~CaptureManager()
     if (m_diskWriter) {
         m_diskWriter->stop();  // 子对象析构时会 wait()，这里先唤醒退出
     }
+    if (m_cardDetector) {
+        m_cardDetector->stop();  // 停止后台推理线程并 wait()
+    }
     for (auto &state : m_itemDecoders) {
         delete state.decoder;
     }
     m_itemDecoders.clear();
+}
+
+// ── AI 牌位置识别放大 ───────────────────────────────────────
+void CaptureManager::setAiCardZoomEnabled(bool enabled)
+{
+    if (m_aiCardZoomEnabled == enabled)
+        return;
+    m_aiCardZoomEnabled = enabled;
+    if (enabled)
+        ensureCardDetector();
+    emit aiCardZoomEnabledChanged();
+    qDebug() << "🃏 AI牌位置放大:" << (enabled ? "开启" : "关闭");
+
+    // 关闭时通知 QML 复位所有放大
+    if (!enabled) {
+        for (int i = 0; i < m_items.size(); ++i)
+            emit cardZoomCleared(i);
+    } else {
+        // 开启时立即对当前 item 的当前帧识别一次
+        if (m_currentItemIndex >= 0 && m_currentItemIndex < m_items.size())
+            requestCardDetect(m_currentItemIndex, m_items[m_currentItemIndex].currentOffset);
+    }
+}
+
+void CaptureManager::ensureCardDetector()
+{
+    if (m_cardDetector)
+        return;
+
+    m_cardDetector = new CardDetector(this);
+    connect(m_cardDetector, &CardDetector::detected,
+            this, &CaptureManager::onCardDetected);
+
+    // 截图刚完成时事件帧可能还没解码好，等它解码就绪(frameImageReady)再触发一次检测
+    connect(this, &CaptureManager::frameImageReady, this,
+            [this](int itemIndex, int frameOffset) {
+        if (!m_aiCardZoomEnabled) return;
+        if (m_aiPendingCaptureItem == itemIndex && m_aiPendingCaptureFrame == frameOffset) {
+            m_aiPendingCaptureItem = -1;
+            m_aiPendingCaptureFrame = -1;
+            requestCardDetect(itemIndex, frameOffset);
+        }
+    });
+
+    const QString modelPath = QCoreApplication::applicationDirPath() + "/models/cardYolov8.onnx";
+    if (m_cardDetector->loadModel(modelPath)) {
+        m_cardDetector->start();
+    } else {
+        qWarning() << "🃏 AI模型加载失败，AI放大不可用:" << modelPath;
+    }
+
+    // 滚动切帧防抖：连续滚动只对停下那帧推理
+    m_aiDebounceTimer = new QTimer(this);
+    m_aiDebounceTimer->setSingleShot(true);
+    m_aiDebounceTimer->setInterval(80);
+    connect(m_aiDebounceTimer, &QTimer::timeout, this, [this]() {
+        if (m_aiPendingItem >= 0)
+            requestCardDetect(m_aiPendingItem, m_aiPendingFrame);
+    });
+}
+
+void CaptureManager::requestCardDetect(int itemIndex, int frameOffset)
+{
+    if (!m_aiCardZoomEnabled || !m_cardDetector || !m_cardDetector->isReady())
+        return;
+    if (itemIndex < 0 || itemIndex >= m_items.size())
+        return;
+
+    // 只处理"这一张"：取当前帧 QImage（已有内存/磁盘解码与缓存），深拷贝交给后台线程
+    QImage img = getFrameImage(itemIndex, frameOffset);
+    if (img.isNull())
+        return;
+    m_cardDetector->submit(itemIndex, frameOffset, img);
+}
+
+void CaptureManager::onCardDetected(int itemIndex, int frameOffset, CardBox box, int origW, int origH)
+{
+    if (!m_aiCardZoomEnabled)
+        return;
+    if (!box.valid || origW <= 0 || origH <= 0) {
+        emit cardZoomCleared(itemIndex);
+        return;
+    }
+
+    // 640 空间牌中心 → 原图像素 → 归一化(0~1)，与显示控件尺寸解耦
+    const double sx = double(origW) / 640.0;
+    const double sy = double(origH) / 640.0;
+    const double cardCx = (box.x + box.w / 2.0) * sx;
+    const double cardCy = (box.y + box.h / 2.0) * sy;
+    double nx = cardCx / origW;
+    double ny = cardCy / origH;
+    nx = qBound(0.0, nx, 1.0);
+    ny = qBound(0.0, ny, 1.0);
+
+    emit cardZoomReady(itemIndex, frameOffset, m_aiZoomScale, nx, ny);
 }
 
 void CaptureManager::ensureCapturesDir()
@@ -863,6 +962,15 @@ void CaptureManager::capture()
     emit itemAdded(newIndex);
     emit captureComplete(newIndex);
     scheduleFrameDecode(newIndex, item.currentOffset);
+
+    // ⭐ AI 牌位置识别：对截图的事件帧识别一次（异步、后台线程，不卡实时流）
+    //   事件帧此刻可能还没解码好 → 标记 pending，等 frameImageReady 再触发；
+    //   若已缓存则 requestCardDetect 立即就能拿到图直接识别。
+    if (m_aiCardZoomEnabled) {
+        m_aiPendingCaptureItem = newIndex;
+        m_aiPendingCaptureFrame = item.currentOffset;
+        requestCardDetect(newIndex, item.currentOffset);
+    }
 }
 
 void CaptureManager::onBatchWritten(int tag)
@@ -1139,6 +1247,13 @@ void CaptureManager::gotoFrame(int itemIndex, int frameOffset)
         if (off >= 0 && off < totalFrames) {
             scheduleFrameDecode(itemIndex, off);
         }
+    }
+
+    // ⭐ AI 牌位置识别：滚动切帧时只识别"当前这一张"，带 80ms 防抖（连续滚动只算停下那帧）
+    if (m_aiCardZoomEnabled && m_aiDebounceTimer) {
+        m_aiPendingItem = itemIndex;
+        m_aiPendingFrame = frameOffset;
+        m_aiDebounceTimer->start();
     }
 }
 

@@ -14,6 +14,7 @@
 #include <QNetworkRequest>
 #include <QTimer>
 #include <QUrl>
+#include <QtConcurrent>
 #include <climits>
 #include <cmath>
 
@@ -146,6 +147,155 @@ static void diagLog(const QString& msg) {
     g_diagLogStream->flush();
 }
 
+// ========== NACK 专项诊断日志（独立 txt，便于发出来快速判断 NACK/重传是否生效）==========
+static QMutex g_nackLogMutex;
+static QFile* g_nackLogFile = nullptr;
+static QTextStream* g_nackLogStream = nullptr;
+
+static void nackLog(const QString& msg) {
+    QMutexLocker locker(&g_nackLogMutex);
+    if (!g_nackLogFile) {
+        QString logPath = QCoreApplication::applicationDirPath() + "/nack_diag.txt";
+        g_nackLogFile = new QFile(logPath);
+        if (g_nackLogFile->open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
+            g_nackLogStream = new QTextStream(g_nackLogFile);
+            *g_nackLogStream << "========== NACK / 重传 专项诊断 ==========" << Qt::endl;
+            *g_nackLogStream << "启动时间: " << QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss") << Qt::endl;
+            *g_nackLogStream << "判定要点：" << Qt::endl;
+            *g_nackLogStream << "  1) SDP 出现 'a=rtcp-fb:96 nack' = NACK 协商成功" << Qt::endl;
+            *g_nackLogStream << "  2) do-nack=TRUE / do-retransmission=TRUE / mode=1 = 配置已生效" << Qt::endl;
+            *g_nackLogStream << "  3) 运行中 nack-count 持续增长 = NACK 真在发（弱网时）" << Qt::endl;
+            *g_nackLogStream << "  4) rtx-packets-received>0 = 重传包真被收到（补包成功）" << Qt::endl;
+            *g_nackLogStream << "==========================================" << Qt::endl << Qt::endl;
+            g_nackLogStream->flush();
+            qDebug() << "📝 NACK 诊断日志文件:" << logPath;
+        }
+    }
+    if (!g_nackLogStream) return;
+    QString timestamp = QDateTime::currentDateTime().toString("HH:mm:ss.zzz");
+    *g_nackLogStream << "[" << timestamp << "] " << msg << Qt::endl;
+    g_nackLogStream->flush();
+}
+
+// ========== SRT 专项诊断日志（独立 txt，便于发出来快速定位 SRT 拉流问题）==========
+//   覆盖：连接 URI/streamid、pipeline 创建耗时、首帧、分辨率、队列深度/延迟、
+//        裁帧、UNDERRUN 频率、SRT 重连等。只在 SRT 模式写，文件名 srt_diag.txt。
+static QMutex g_srtLogMutex;
+static QFile* g_srtLogFile = nullptr;
+static QTextStream* g_srtLogStream = nullptr;
+
+// UNDERRUN/OVERRUN 每秒汇总计数（避免逐条刷屏，由 SRT 每秒 stats 读取并清零）。
+static std::atomic<int> g_srtDepayUnderrun{0};
+static std::atomic<int> g_srtDecodeUnderrun{0};
+static std::atomic<int> g_srtDepayOverrun{0};
+
+static void srtLog(const QString& msg) {
+    QMutexLocker locker(&g_srtLogMutex);
+    if (!g_srtLogFile) {
+        QString logPath = QCoreApplication::applicationDirPath() + "/srt_diag.txt";
+        g_srtLogFile = new QFile(logPath);
+        if (g_srtLogFile->open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
+            g_srtLogStream = new QTextStream(g_srtLogFile);
+            *g_srtLogStream << "========== SRT 拉流专项诊断 ==========" << Qt::endl;
+            *g_srtLogStream << "启动时间: " << QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss") << Qt::endl;
+            *g_srtLogStream << "判定要点：" << Qt::endl;
+            *g_srtLogStream << "  1) [build] 出现 baseUri/streamid 明文 = streamid 解析正确" << Qt::endl;
+            *g_srtLogStream << "  2) [首帧] + [分辨率] 出现 = SRT 收到数据并解码成功" << Qt::endl;
+            *g_srtLogStream << "  3) [stats] 队列深度/延迟 = 实际端到端延迟（队列×帧间隔 + 缓冲）" << Qt::endl;
+            *g_srtLogStream << "  4) [裁帧] 频繁 = gop_cache 历史帧灌入，裁帧在生效降延迟" << Qt::endl;
+            *g_srtLogStream << "  5) [pipeline] 创建耗时 = 主线程卡顿时长（>1s 会卡 UI）" << Qt::endl;
+            *g_srtLogStream << "=====================================" << Qt::endl << Qt::endl;
+            g_srtLogStream->flush();
+            qDebug() << "📝 SRT 诊断日志文件:" << logPath;
+        }
+    }
+    if (!g_srtLogStream) return;
+    QString timestamp = QDateTime::currentDateTime().toString("HH:mm:ss.zzz");
+    *g_srtLogStream << "[" << timestamp << "] " << msg << Qt::endl;
+    g_srtLogStream->flush();
+}
+
+// ========== SRS(WebRTC) 专项诊断日志（独立 txt，定位「SRS 偶尔第一次画面出不来」）==========
+//   覆盖：connectWebRTC 入口、会话/熔断标志状态、Offer 创建/发送、SRS HTTP 响应码、
+//        重试、Answer、ICE/连接状态、首帧、断开/重置。只在 SRS(WebRTC 非 P2P) 路径写，
+//        文件名 srs_diag.txt。用于判断画面出不来时卡在哪一步（尤其 m_srsError / m_offerSentForSession 熔断）。
+static QMutex g_srsLogMutex;
+static QFile* g_srsLogFile = nullptr;
+static QTextStream* g_srsLogStream = nullptr;
+
+static void srsLog(const QString& msg) {
+    QMutexLocker locker(&g_srsLogMutex);
+    if (!g_srsLogFile) {
+        QString logPath = QCoreApplication::applicationDirPath() + "/srs_diag.txt";
+        g_srsLogFile = new QFile(logPath);
+        if (g_srsLogFile->open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
+            g_srsLogStream = new QTextStream(g_srsLogFile);
+            *g_srsLogStream << "========== SRS(WebRTC) 拉流专项诊断 ==========" << Qt::endl;
+            *g_srsLogStream << "启动时间: " << QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss") << Qt::endl;
+            *g_srsLogStream << "判定要点（画面出不来时按时间顺序看卡在哪步）：" << Qt::endl;
+            *g_srsLogStream << "  1) [connect] 每次连接入口，含 host/stream + 进入时的熔断标志状态" << Qt::endl;
+            *g_srsLogStream << "  2) [熔断] srsError/offerSent/offerInProgress 三标志 —— 若进入时已是 true 且没被重置 = 卡死根因" << Qt::endl;
+            *g_srsLogStream << "  3) [offer] Offer 创建/发送；[http] SRS 返回 code（0=成功，400/404=流未就绪重试）" << Qt::endl;
+            *g_srsLogStream << "  4) [retry] 重试次数；达 5 次用尽 → srsError=true 禁用自动重连（之后必须切账号/重登才恢复）" << Qt::endl;
+            *g_srsLogStream << "  5) [answer]/[ice]/[首帧] 出现 = 链路打通；缺哪步就是卡在前一步" << Qt::endl;
+            *g_srsLogStream << "==============================================" << Qt::endl << Qt::endl;
+            g_srsLogStream->flush();
+            qDebug() << "📝 SRS 诊断日志文件:" << logPath;
+        }
+    }
+    if (!g_srsLogStream) return;
+    QString timestamp = QDateTime::currentDateTime().toString("HH:mm:ss.zzz");
+    *g_srsLogStream << "[" << timestamp << "] " << msg << Qt::endl;
+    g_srsLogStream->flush();
+}
+
+// ========== P2P 直连专项诊断日志（独立 txt，定位「P2P 出不来画面，尤其手机连手机热点」）==========
+//   覆盖：connectP2P 入口、ICE 服务器(STUN/TURN)配置、收到/发送的 ICE 候选者(按 host/srflx/relay 分类)、
+//        WEBRTC_REQUEST/Offer/Answer 时序、ICE 连接状态机、首帧。只在 P2P 模式写，文件名 p2p_diag.txt。
+//   核心判断：手机热点= 运营商级 NAT(CGNAT)/对称 NAT，host/srflx 大概率打不通，必须走 TURN relay 候选者。
+//        若日志里【本地或远端都没有 typ relay 候选者】或 TURN 添加失败 → 这就是「热点出不来」的根因。
+static QMutex g_p2pLogMutex;
+static QFile* g_p2pLogFile = nullptr;
+static QTextStream* g_p2pLogStream = nullptr;
+
+static void p2pLog(const QString& msg) {
+    QMutexLocker locker(&g_p2pLogMutex);
+    if (!g_p2pLogFile) {
+        QString logPath = QCoreApplication::applicationDirPath() + "/p2p_diag.txt";
+        g_p2pLogFile = new QFile(logPath);
+        if (g_p2pLogFile->open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
+            g_p2pLogStream = new QTextStream(g_p2pLogFile);
+            *g_p2pLogStream << "========== P2P 直连专项诊断 ==========" << Qt::endl;
+            *g_p2pLogStream << "启动时间: " << QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss") << Qt::endl;
+            *g_p2pLogStream << "判定要点（手机连手机热点出不来画面时，按时间顺序看卡在哪步）：" << Qt::endl;
+            *g_p2pLogStream << "  1) [connect] P2P 入口；[ice-server] 看 STUN/TURN 是否都配上了（无 TURN → 热点必失败）" << Qt::endl;
+            *g_p2pLogStream << "  2) [本地候选] / [远端候选] 按 typ 分类统计：手机热点是 CGNAT/对称NAT，" << Qt::endl;
+            *g_p2pLogStream << "     host/srflx 多半打不通，【两端必须各自至少有 1 个 typ relay(TURN中继)候选者】才有戏" << Qt::endl;
+            *g_p2pLogStream << "  3) [offer]/[answer] 出现 = 信令通了；只有 request 无 offer = iOS 没上线/没回 Offer" << Qt::endl;
+            *g_p2pLogStream << "  4) [ice] Checking→Connected = ICE 打通；卡在 Checking 后 Failed = NAT 穿透失败(常见于热点无 relay)" << Qt::endl;
+            *g_p2pLogStream << "  5) [首帧] 出现 = 真出画面；ICE Connected 但无首帧 = 媒体未流动(检查 PLI/关键帧)" << Qt::endl;
+            *g_p2pLogStream << "=====================================" << Qt::endl << Qt::endl;
+            g_p2pLogStream->flush();
+            qDebug() << "📝 P2P 诊断日志文件:" << logPath;
+        }
+    }
+    if (!g_p2pLogStream) return;
+    QString timestamp = QDateTime::currentDateTime().toString("HH:mm:ss.zzz");
+    *g_p2pLogStream << "[" << timestamp << "] " << msg << Qt::endl;
+    g_p2pLogStream->flush();
+}
+
+// 从一条 ICE candidate 文本里提取类型（host/srflx/prflx/relay/unknown）。
+// 这是判断「热点能不能打通」的关键：relay = 经 TURN 中继，CGNAT/对称 NAT 下唯一可靠的通道。
+static QString p2pCandidateType(const QString& candidate) {
+    int idx = candidate.indexOf("typ ");
+    if (idx < 0) return "unknown";
+    QString rest = candidate.mid(idx + 4).trimmed();
+    QString typ = rest.section(' ', 0, 0);
+    if (typ == "host" || typ == "srflx" || typ == "prflx" || typ == "relay") return typ;
+    return typ.isEmpty() ? "unknown" : typ;
+}
+
 // ========== 系统信息获取函数 ==========
 static long getSystemMemoryGB() {
 #ifdef Q_OS_WIN
@@ -220,6 +370,13 @@ GstPlayer::GstPlayer(QObject *parent)
     qDebug().noquote() << QString("⏱️ v11动态队列 | FPS=%1 | 队列=%2帧(范围%3-%4) | 延迟=%5ms+%6ms=%7ms")
         .arg((int)m_configFps).arg(m_queueTarget).arg(queueMin).arg(queueMax)
         .arg(targetDelayMs).arg(GST_JITTER_LATENCY).arg(totalDelay);
+
+    // ⭐ 治「SRT 首屏卡 3.3s」关键：在 App 启动构造时就【尽早】后台预热解码器/编码器，
+    //   远早于 connectSRT，让首次建管线时 CUDA/MediaFoundation 已热（之前放在 connectSRT
+    //   入口与 createPipeline 并行赛跑、抢同一硬件初始化锁，等于没提前 —— 日志实证无效）。
+    //   预热是全局硬件初始化，对 SRS/P2P 同样有利，不改它们任何代码路径。
+    //   用 singleShot(0) 推到事件循环启动后执行，避免阻塞构造与 gst 初始化次序问题。
+    QTimer::singleShot(0, this, [this]() { warmupDecoderEncoderAsync(); });
 }
 
 GstPlayer::~GstPlayer()
@@ -293,6 +450,15 @@ static bool shouldForceSoftwareDecode(const QString& gpuRawLower) {
 // ========== GPU 类型检测（与 Java 一致）==========
 QString GstPlayer::detectGpuType()
 {
+    // ⭐ 缓存：GPU 类型在一个进程生命周期内不会变化。
+    // 原实现每次 createPipeline（每次拉流/重连/切流）都同步跑 wmic + waitForFinished(3000)，
+    // 而 wmic 在新版 Windows 启动极慢（数百 ms ~ 数秒），直接阻塞 GUI 主线程 → 界面卡死拖不动。
+    // 改为仅首次检测，之后直接返回缓存值。
+    static QString s_cachedGpuType;
+    if (!s_cachedGpuType.isEmpty()) {
+        return s_cachedGpuType;
+    }
+
     // Windows: 通过 WMIC 命令获取显卡信息
 #ifdef Q_OS_WIN
     QProcess process;
@@ -306,14 +472,19 @@ QString GstPlayer::detectGpuType()
     // 判断 GPU 类型（按优先级）
     if (output.contains("nvidia") || output.contains("geforce") || 
         output.contains("rtx") || output.contains("gtx")) {
-        return "NVIDIA";
+        s_cachedGpuType = "NVIDIA";
     } else if (output.contains("amd") || output.contains("radeon") || output.contains("rx ")) {
-        return "AMD";
+        s_cachedGpuType = "AMD";
     } else if (output.contains("intel") || output.contains("uhd") || output.contains("iris")) {
-        return "Intel";
+        s_cachedGpuType = "Intel";
+    } else {
+        s_cachedGpuType = "Unknown";
     }
+    return s_cachedGpuType;
+#else
+    s_cachedGpuType = "Unknown";
+    return s_cachedGpuType;
 #endif
-    return "Unknown";
 }
 
 bool GstPlayer::createPipeline()
@@ -321,6 +492,10 @@ bool GstPlayer::createPipeline()
     QMutexLocker lock(&m_mutex);
     
     if (m_pipeline) {
+        // 安全网：正常切换路径里 connectXXX 已先 destroyPipeline()，进来时应为 nullptr。
+        // 但链路频繁来回切换时，残留的异步重活/重连定时器可能在 m_pipeline 仍非空时
+        // 触发本函数。此处必须能正确销毁旧管线——依赖 m_mutex 为递归锁（QRecursiveMutex），
+        // 否则此处二次加锁会死锁（这正是「切换多了卡死」的根因，已修）。
         qDebug() << "⚠️ Pipeline 已存在，先销毁";
         destroyPipeline();
     }
@@ -340,7 +515,21 @@ bool GstPlayer::createPipeline()
     }
     
     // ========== 创建源元素（根据模式选择）==========
-    if (m_useWebRTC) {
+    // MARK: SRT (independent)
+    // SRT 模式：源元素（srtsrc/tsdemux）由独立的 GstSrtSource 在下面的链接阶段创建并加入，
+    // 这里不创建 webrtcbin/appsrc，直接跳到共享的 h264parse 及尾段。
+    if (m_useSRT) {
+        qDebug() << "🔧 创建 GStreamer Pipeline (SRT 模式)...";
+        // 仅校验插件，源元素稍后由 GstSrtSource::build 创建。
+        QString srtMissing;
+        if (!GstSrtSource::pluginsAvailable(&srtMissing)) {
+            qCritical() << "❌ SRT 插件不可用:" << srtMissing;
+            emit error(QString("SRT 插件不可用：%1（请安装 gst-plugins-bad）").arg(srtMissing));
+            gst_object_unref(m_pipeline);
+            m_pipeline = nullptr;
+            return false;
+        }
+    } else if (m_useWebRTC) {
         // WebRTC 模式：使用 webrtcbin + rtph264depay
         m_webrtcbin = gst_element_factory_make("webrtcbin", "webrtcbin");
         m_rtph264depay = gst_element_factory_make("rtph264depay", "depay");
@@ -413,29 +602,50 @@ bool GstPlayer::createPipeline()
         static JitterConfig jitterConfig;
         jitterConfig = {jitterLatencyMs, retryTimeoutMs, dropoutMs, misorderMs};
         
-        g_signal_connect(m_webrtcbin, "element-added", G_CALLBACK(+[](GstBin*, GstElement* element, gpointer) {
+        // ⭐⭐⭐ 关键修复：rtpjitterbuffer 是 webrtcbin → 内层 rtpbin 动态创建的【深层嵌套】子元素，
+        //   普通 element-added 只对 webrtcbin 的【直接】子元素触发，收不到内层 jitterbuffer，
+        //   导致 do-retransmission/mode 改造从未执行（日志里看不到“发现 jitterbuffer”/v11 即是此因）。
+        //   deep-element-added 会对所有后代元素递归触发，确保内层 jitterbuffer 一定被捕获并配置。
+        //   回调签名：(GstBin* topbin, GstBin* subbin, GstElement* element, gpointer userData)
+        g_signal_connect(m_webrtcbin, "deep-element-added", G_CALLBACK(+[](GstBin*, GstBin*, GstElement* element, gpointer userData) {
+            GstPlayer* self = static_cast<GstPlayer*>(userData);
             const gchar* name = GST_ELEMENT_NAME(element);
             if (name && g_strstr_len(name, -1, "jitterbuffer")) {
-                diagLog(QString("🎯 发现 jitterbuffer: %1，配置防马赛克参数...").arg(name));
+                // 幂等保护：同一 jitterbuffer 只配置一次（deep-element-added 可能多元素触发）
+                if (self && self->m_rtpJitterBuffer == element) return;
+                // 记下 jitterbuffer 指针，供每秒统计读取 NACK/重传 stats（仅诊断，不持有所有权）
+                if (self) self->m_rtpJitterBuffer = element;
+                diagLog(QString("🎯 发现 jitterbuffer(deep): %1，配置防马赛克参数...").arg(name));
                 
-                // ⭐⭐⭐ v10.1 防花屏配置（核心！）
-                // 🔥 关键修改：drop-on-latency=FALSE，防止丢弃关键帧导致花屏
-                // 延迟控制改为在应用层丢弃 P 帧（不丢 I 帧）
+                // ⭐⭐⭐ v11 防花屏配置（对标 Chrome：开 NACK/RTX 重传）
+                // 🔥 关键修改（本次）：
+                //   1) do-retransmission FALSE→TRUE：开重传，配合 transceiver do-nack，丢包先 NACK 补回。
+                //   2) mode 0(none)→1(slave)：none 会禁用重排序/重传调度；slave 是 webrtcbin 默认，
+                //      jitterbuffer 才会真正按序等待重传包（重传调度依赖非 none 模式）。
+                // drop-on-latency=FALSE 保留：不丢 I 帧，延迟控制仍在应用层做 P 帧追帧。
                 g_object_set(element,
-                    "latency", jitterConfig.latency,   // 100ms（超低延迟）
-                    "drop-on-latency", FALSE,          // 🔥🔥🔥 v10.1: 改回FALSE，防止丢I帧花屏！
+                    "latency", jitterConfig.latency,   // 600ms（足够容纳一次重传往返）
+                    "drop-on-latency", FALSE,          // 不丢包，防止丢 I 帧花屏
                     "max-dropout-time", jitterConfig.dropout,
                     "max-misorder-time", jitterConfig.misorder,
-                    "do-retransmission", FALSE,        // 禁用重传（延迟太高）
-                    "do-lost", TRUE,                   // 🔥 v10.1: 发送丢包事件，触发等待关键帧
-                    "mode", 0,                         // none模式（纯透传）
+                    "do-retransmission", TRUE,         // 🔥🔥🔥 v11: 开 NACK/RTX 重传（对标 Chrome，丢包补回不花屏）
+                    "do-lost", TRUE,                   // 发送丢包事件（重传补不回时仍触发请求关键帧兜底）
+                    "mode", 1,                         // 🔥 v11: slave 模式（none 不重传调度），启用重排序+重传等待
                     "max-rtcp-rtp-time-diff", -1,      // 禁用 RTCP 检查
                     nullptr);
                 
-                diagLog(QString("✅ v10.1 jitterbuffer: latency=%1ms, drop-on-latency=FALSE(防花屏), do-lost=TRUE")
+                diagLog(QString("✅ v11 jitterbuffer: latency=%1ms, do-retransmission=TRUE(NACK重传), mode=1(slave), drop-on-latency=FALSE")
                     .arg(jitterConfig.latency));
+
+                // NACK 专项日志：回读 jitterbuffer 关键属性，确认真的生效
+                {
+                    gboolean doRtx = FALSE; gint jbMode = -1; guint jbLatency = 0;
+                    g_object_get(element, "do-retransmission", &doRtx, "mode", &jbMode, "latency", &jbLatency, nullptr);
+                    nackLog(QString("[配置] jitterbuffer 回读: do-retransmission=%1(1=开), mode=%2(1=slave), latency=%3ms")
+                        .arg(doRtx ? 1 : 0).arg(jbMode).arg(jbLatency));
+                }
             }
-        }), nullptr);
+        }), this);
         
         qDebug() << "✅ WebRTCBin 创建成功 [" << machineType << "]";
     } else {
@@ -519,9 +729,11 @@ bool GstPlayer::createPipeline()
         
         // ⭐ 监听 overrun 信号（队列满时触发）
         g_signal_connect(m_queueDepay, "overrun", G_CALLBACK(+[](GstElement*, gpointer) {
+            g_srtDepayOverrun.fetch_add(1);
             diagLog("⚠️ queueDepay OVERRUN - 队列满，可能丢帧！");
         }), nullptr);
         g_signal_connect(m_queueDepay, "underrun", G_CALLBACK(+[](GstElement*, gpointer) {
+            g_srtDepayUnderrun.fetch_add(1);
             diagLog("⚠️ queueDepay UNDERRUN - 队列空，数据不足！");
         }), nullptr);
         
@@ -698,6 +910,7 @@ bool GstPlayer::createPipeline()
             diagLog("⚠️ queueDecode OVERRUN - 解码队列满，可能丢帧！");
         }), nullptr);
         g_signal_connect(m_queueDecode, "underrun", G_CALLBACK(+[](GstElement*, gpointer) {
+            g_srtDecodeUnderrun.fetch_add(1);
             diagLog("⚠️ queueDecode UNDERRUN - 解码队列空！");
         }), nullptr);
         
@@ -785,7 +998,11 @@ bool GstPlayer::createPipeline()
     }
 
     // 检查所有元素
-    bool srcOk = m_useWebRTC ? (m_webrtcbin && m_rtph264depay) : (m_appsrc != nullptr);
+    // MARK: SRT (independent)
+    // SRT 模式：源元素（srtsrc/tsdemux）由 GstSrtSource::build 在链接阶段创建，
+    // 此处无 webrtcbin/appsrc，源可用性已在上方 pluginsAvailable 校验过，故视为 OK。
+    bool srcOk = m_useSRT ? true
+                          : (m_useWebRTC ? (m_webrtcbin && m_rtph264depay) : (m_appsrc != nullptr));
     if (!srcOk || !m_h264parse || !m_naluTee || !m_naluQueue || !m_naluAppsink
         || !m_queueDepay || !m_decoder || !m_queueDecode ||
         !m_displayQueue || !m_convert || !m_appsink ||
@@ -799,7 +1016,11 @@ bool GstPlayer::createPipeline()
     }
     
     // ========== 配置源元素 ==========
-    if (m_useWebRTC) {
+    // MARK: SRT (independent)
+    // SRT 模式：源（srtsrc/tsdemux）由 GstSrtSource::build 创建/配置，此处不配置 appsrc/webrtcbin。
+    if (m_useSRT) {
+        // no-op：SRT 源在链接阶段由 m_srtSource.build() 配置。
+    } else if (m_useWebRTC) {
         // WebRTC 模式：设置 webrtcbin 信号
         setupWebRTCSignals();
     } else {
@@ -884,6 +1105,95 @@ bool GstPlayer::createPipeline()
     gst_object_unref(bus);
     
     // ========== 添加所有元素到 Pipeline ==========
+    // MARK: SRT (independent)
+    if (m_useSRT) {
+        // SRT 模式：共享尾段（h264parse→naluTee→解码→显示+截图/慢放）与 WebRTC 完全一致，
+        // 仅源头换成 srtsrc→tsdemux（由 GstSrtSource 创建/链接，封装在独立文件）。
+        if (m_useHardwareDecoder && m_download) {
+            gst_bin_add_many(GST_BIN(m_pipeline),
+                m_h264parse, m_naluTee, m_naluQueue, m_naluAppsink,
+                m_queueDepay, m_decoder, m_queueDecode,
+                m_download, m_videoScale, m_videoBalance, m_gamma, m_rawFrameTee,
+                m_displayQueue, m_convert, m_appsink,
+                m_h264FrameQueue, m_h264FrameConvert, m_h264FrameEncoder, m_h264FrameParse,
+                m_h264FrameCaps, m_h264FrameAppsink,
+                nullptr);
+
+            if (!linkNaluTeeBranch()
+                || !gst_element_link_many(m_queueDepay, m_decoder, m_queueDecode,
+                                       m_download, m_videoScale, m_videoBalance, m_gamma, nullptr)
+                || !linkRawFrameTeeBranch(m_gamma, m_displayQueue)) {
+                qCritical() << "❌ 链接主路径失败 (SRT 硬解模式)";
+                emit error("链接主路径失败");
+                destroyPipeline();
+                return false;
+            }
+            qDebug() << "✅ SRT 硬解尾段就绪：parse→tee(main→decode, store→appsink)";
+        } else {
+            gst_bin_add_many(GST_BIN(m_pipeline),
+                m_h264parse, m_naluTee, m_naluQueue, m_naluAppsink,
+                m_queueDepay, m_decoder, m_queueDecode,
+                m_videoScale, m_videoBalance, m_gamma, m_rawFrameTee,
+                m_displayQueue, m_convert, m_appsink,
+                m_h264FrameQueue, m_h264FrameConvert, m_h264FrameEncoder, m_h264FrameParse,
+                m_h264FrameCaps, m_h264FrameAppsink,
+                nullptr);
+
+            if (!linkNaluTeeBranch()
+                || !gst_element_link_many(m_queueDepay, m_decoder, m_queueDecode,
+                                       m_videoScale, m_videoBalance, m_gamma, nullptr)
+                || !linkRawFrameTeeBranch(m_gamma, m_displayQueue)) {
+                qCritical() << "❌ 链接主路径失败 (SRT 软解模式)";
+                emit error("链接主路径失败");
+                destroyPipeline();
+                return false;
+            }
+            qDebug() << "✅ SRT 软解尾段就绪：parse→tee(main→decode, store→appsink)";
+        }
+
+        // 源头：srtsrc→tsdemux，动态把视频 pad 链到 m_h264parse（独立文件实现）。
+        srtLog(QString("[build] 调用 GstSrtSource::build uri=%1").arg(m_srtUri));
+        if (!m_srtSource.build(GST_BIN(m_pipeline), m_h264parse, m_srtUri)) {
+            qCritical() << "❌ 创建 SRT 源失败";
+            srtLog("[build] ❌ GstSrtSource::build 失败");
+            emit error("创建 SRT 源失败");
+            destroyPipeline();
+            return false;
+        }
+        srtLog("[build] ✅ srtsrc→tsdemux 就绪，等待视频 pad");
+
+        // ⭐⭐⭐ 关键修复：SRT 模式的「帧到达统计」probe 必须挂在 h264parse 的 src pad。
+        // 原 WebRTC 把统计 probe 挂在 rtph264depay（SRT 无此元素），导致 SRT 模式
+        // m_currentSecondFrames 永远=0 → 收=0fps → 自适应队列目标乱跳 → 队列震荡 → 碎花。
+        // 挂在 h264parse src（解码前、已分帧）位置统计帧数 + IDR，与 WebRTC 等价。
+        {
+            GstPad *parseSrcPad = gst_element_get_static_pad(m_h264parse, "src");
+            if (parseSrcPad) {
+                // 用 SRT 专用的 m_srtParseProbeId（不复用 WebRTC 的 m_depayProbeId），彻底解耦。
+                m_srtParseProbeId = gst_pad_add_probe(parseSrcPad, GST_PAD_PROBE_TYPE_BUFFER,
+                    [](GstPad*, GstPadProbeInfo* info, gpointer userData) -> GstPadProbeReturn {
+                        GstPlayer* self = static_cast<GstPlayer*>(userData);
+                        GstBuffer* buffer = GST_PAD_PROBE_INFO_BUFFER(info);
+                        if (!buffer) return GST_PAD_PROBE_OK;
+                        self->m_totalFrameCount.fetch_add(1);
+                        self->m_currentSecondFrames++;
+                        if (hasIdrInBuffer(buffer)) {
+                            self->m_preDecodeIdr.store(true);
+                        }
+                        return GST_PAD_PROBE_OK;  // 不丢帧，只统计
+                    }, this, nullptr);
+                gst_object_unref(parseSrcPad);
+                qDebug() << "✅ SRT 统计probe挂在 h264parse src（修复 收=0fps）";
+                srtLog("[build] ✅ 统计probe已挂 h264parse src（fps/IDR 统计生效）");
+            }
+        }
+
+        captureDebugLog("GST", "SRT pipeline linked (srtsrc→tsdemux→parse→naluTee, shared tail)");
+        qDebug() << "✅ GStreamer SRT Pipeline 创建成功，解码器:" << m_decoderName;
+        emit decoderChanged();
+        return true;
+    }
+
     if (m_useWebRTC) {
         // WebRTC 模式（配合 200ms + videorate 方案）
         if (m_useHardwareDecoder && m_download) {
@@ -1048,7 +1358,7 @@ void GstPlayer::destroyPipeline()
 {
     QMutexLocker lock(&m_mutex);
     
-    // 🔥 v10.4: 移除解码前 probe
+    // 🔥 v10.4: 移除解码前 probe（WebRTC/SRS 路径）
     if (m_depayProbeId != 0 && m_rtph264depay) {
         GstPad *depaySrcPad = gst_element_get_static_pad(m_rtph264depay, "src");
         if (depaySrcPad) {
@@ -1057,6 +1367,17 @@ void GstPlayer::destroyPipeline()
         }
         m_depayProbeId = 0;
     }
+
+    // SRT 专用：移除挂在 h264parse src 的统计 probe（与 WebRTC 清理解耦，互不影响）
+    if (m_srtParseProbeId != 0 && m_h264parse) {
+        GstPad *parseSrcPad = gst_element_get_static_pad(m_h264parse, "src");
+        if (parseSrcPad) {
+            gst_pad_remove_probe(parseSrcPad, m_srtParseProbeId);
+            gst_object_unref(parseSrcPad);
+        }
+        m_srtParseProbeId = 0;
+    }
+    m_srtInitialCropDone = false;
 
     if (m_naluTee && m_naluTeePadMain) {
         gst_element_release_request_pad(m_naluTee, m_naluTeePadMain);
@@ -1079,6 +1400,9 @@ void GstPlayer::destroyPipeline()
         m_rawFrameTeePadSave = nullptr;
     }
 
+    // MARK: SRT (independent) —— pipeline 置 NULL 前先让 SRT 源置空内部指针
+    m_srtSource.teardown(m_pipeline ? GST_BIN(m_pipeline) : nullptr);
+
     if (m_pipeline) {
         gst_element_set_state(m_pipeline, GST_STATE_NULL);
         gst_object_unref(m_pipeline);
@@ -1088,6 +1412,7 @@ void GstPlayer::destroyPipeline()
     // 元素已经被 Pipeline 管理，不需要单独释放
     m_appsrc = nullptr;
     m_webrtcbin = nullptr;     // ⭐ WebRTC 元素
+    m_rtpJitterBuffer = nullptr; // ⭐ 随管线销毁置空，避免悬空（不持有所有权）
     m_rtph264depay = nullptr;  // ⭐ WebRTC 元素
     m_h264parse = nullptr;
     m_naluTee = nullptr;
@@ -1977,15 +2302,32 @@ GstFlowReturn GstPlayer::onNewSample(GstAppSink *sink, gpointer userData)
         
         // 更新分辨率
         if (width != self->m_videoWidth || height != self->m_videoHeight) {
+            int oldW = self->m_videoWidth;
+            int oldH = self->m_videoHeight;
             self->m_videoWidth = width;
             self->m_videoHeight = height;
             qDebug() << "🎬 视频分辨率:" << width << "x" << height;
+            if (self->m_useSRT) srtLog(QString("[分辨率] %1x%2").arg(width).arg(height));
             emit self->videoSizeChanged();
+
+            // ⭐ 兜底「切超高清条纹 / 切挡位短暂花屏」（2026-06-24）：
+            //   分辨率中途变化(oldW/oldH 已非 0)= iOS 切挡位/超高清后新的 SPS/PPS 序列开始，
+            //   首批新分辨率帧若不完整会出条纹。主动请求一次关键帧(PLI)逼 iOS 尽快补一个干净 IDR，
+            //   让条纹「一闪而过」而非等下一个周期 IDR。
+            //   仅 WebRTC(SRS/P2P) 有效：sendPLIRequest 内部 !m_webrtcbin 直接返回，SRT 模式天然 no-op，
+            //   且自带 PLI_INTERVAL_WEAK_MS 节流，不会狂发。首帧(old=0)不算「切换」，跳过。
+            if (oldW > 0 && oldH > 0 && (oldW != width || oldH != height)) {
+                self->sendPLIRequest();
+                qDebug() << "🔑 [分辨率变化] " << oldW << "x" << oldH << "→" << width << "x" << height
+                         << " 主动请求关键帧冲刷条纹（WebRTC 路径，SRT 自动跳过）";
+            }
         }
         
         // 首帧通知
         if (!self->m_firstFrame.exchange(true)) {
             qDebug() << "🎬 首帧已接收";
+            if (self->m_useSRT) srtLog(QString("[首帧] ✅ SRT 已解码出首帧 %1x%2").arg(width).arg(height));
+            if (self->m_useP2P) p2pLog(QString("[首帧] ✅ P2P 已解码出首帧 %1x%2 → 真正出画面，全链路打通").arg(width).arg(height));
             emit self->firstFrameReceived();
         }
     }
@@ -2127,6 +2469,65 @@ GstFlowReturn GstPlayer::onNewSample(GstAppSink *sink, gpointer userData)
         
         // ⭐ x4 得到真实接收帧率，四舍五入
         int newFps = qRound(self->m_fpsEma * 4);
+
+        // ⭐ NACK / 重传 专项统计（每秒读 jitterbuffer stats，证明 NACK 是否真在工作）
+        if (self->m_rtpJitterBuffer) {
+            GstStructure *jbStats = nullptr;
+            g_object_get(self->m_rtpJitterBuffer, "stats", &jbStats, nullptr);
+            if (jbStats) {
+                guint64 numPushed = 0, numLost = 0, numLate = 0, numDup = 0;
+                guint64 rtxCount = 0, rtxSuccess = 0, rtxRtt = 0;
+                gst_structure_get_uint64(jbStats, "num-pushed", &numPushed);
+                gst_structure_get_uint64(jbStats, "num-lost", &numLost);
+                gst_structure_get_uint64(jbStats, "num-late", &numLate);
+                gst_structure_get_uint64(jbStats, "num-duplicates", &numDup);
+                gst_structure_get_uint64(jbStats, "rtx-count", &rtxCount);            // 发出的重传请求数（NACK）
+                gst_structure_get_uint64(jbStats, "rtx-success-count", &rtxSuccess);  // 成功补回的重传包数
+                gst_structure_get_uint64(jbStats, "rtx-rtt", &rtxRtt);               // 重传平均往返时间（GStreamer 单位为纳秒）
+
+                // 增量（相比上一秒），更直观看“这一秒发了多少 NACK / 补回多少”
+                static guint64 s_lastRtxCount = 0, s_lastRtxSuccess = 0, s_lastLost = 0;
+                guint64 dRtx = rtxCount >= s_lastRtxCount ? rtxCount - s_lastRtxCount : 0;
+                guint64 dSucc = rtxSuccess >= s_lastRtxSuccess ? rtxSuccess - s_lastRtxSuccess : 0;
+                guint64 dLost = numLost >= s_lastLost ? numLost - s_lastLost : 0;
+                s_lastRtxCount = rtxCount; s_lastRtxSuccess = rtxSuccess; s_lastLost = numLost;
+
+                // rtx-rtt 是纳秒，转毫秒打印（之前误标为 ms，导致 126000000ns 被读成天文数字）
+                double rtxRttMs = rtxRtt / 1000000.0;
+                nackLog(QString("[stats] 本秒: NACK请求+%1 重传补回+%2 丢失+%3 | 累计: pushed=%4 lost=%5 late=%6 dup=%7 rtx发=%8 rtx成功=%9 rtxRtt=%10ms")
+                    .arg(dRtx).arg(dSucc).arg(dLost)
+                    .arg(numPushed).arg(numLost).arg(numLate).arg(numDup)
+                    .arg(rtxCount).arg(rtxSuccess).arg(rtxRttMs, 0, 'f', 1));
+
+                // ⭐⭐⭐ 应用层「伪自适应」抗撕裂（对标棱镜OS第2层 / Chromium 内核自适应在 GStreamer 上的等价物）
+                //   背景：GStreamer rtpjitterbuffer 不支持运行时动态改 latency（官方明确），无法像 Chromium
+                //         那样真·自适应缓冲。弱网实测：重传 RTT 高达 500ms > latency 600ms，重传包太晚被丢
+                //         → rtx成功=0 → GOP 内丢的 P 帧补不回 → 持续撕裂/马赛克。
+                //   对策：检测到「本秒真丢包」即主动请求关键帧（sendPLIRequest 自带节流，不会狂发），
+                //         让 iOS 尽快推一个新 I 帧把撕裂冲刷掉 —— 这是 WebRTC 相对 SRT 独有的自愈手段。
+                //   纯增量逻辑，不碰现有追帧/队列/双缓冲；仅 P2P/SRS(WebRTC) 路径有 jitterbuffer 才会进来。
+                {
+                    static int s_weakNetSeconds = 0;   // 连续弱网秒数
+                    static int s_goodNetSeconds = 0;    // 连续良好秒数
+                    if (dLost > 0) {
+                        s_weakNetSeconds++;
+                        s_goodNetSeconds = 0;
+                        // 丢包即请求关键帧（节流由 sendPLIRequest 内部 PLI_INTERVAL_WEAK_MS 控制）
+                        self->sendPLIRequest();
+                        nackLog(QString("[自适应] 本秒丢包=%1(连续弱网%2s) → 主动请求关键帧冲刷撕裂")
+                                .arg(dLost).arg(s_weakNetSeconds));
+                    } else {
+                        s_goodNetSeconds++;
+                        if (s_weakNetSeconds > 0 && s_goodNetSeconds >= 3) {
+                            nackLog(QString("[自适应] 网络恢复（连续%1s无丢包），退出弱网自愈").arg(s_goodNetSeconds));
+                            s_weakNetSeconds = 0;
+                        }
+                    }
+                }
+
+                gst_structure_free(jbStats);
+            }
+        }
         
         // ⭐⭐⭐ 统计日志（每秒写入 yh.txt）
         {
@@ -2323,6 +2724,9 @@ GstBusSyncReply GstPlayer::onBusSyncMessage(GstBus *bus, GstMessage *message, gp
 
         captureDebugLog("GST", QString("ERROR src=%1 msg=%2 debug=%3").arg(srcName).arg(err->message).arg(debug));
         diagLog(QString("❌ ERROR src=%1: %2 | debug: %3").arg(srcName).arg(err->message).arg(debug));
+        if (self && self->m_useSRT) {
+            srtLog(QString("[ERROR] src=%1: %2 | debug: %3").arg(srcName).arg(err->message).arg(debug));
+        }
         qCritical() << "❌ GStreamer 错误:" << err->message << "src=" << srcName;
         g_error_free(err);
         g_free(debug);
@@ -2333,6 +2737,9 @@ GstBusSyncReply GstPlayer::onBusSyncMessage(GstBus *bus, GstMessage *message, gp
         gchar *debug = nullptr;
         gst_message_parse_warning(message, &err, &debug);
         diagLog(QString("⚠️ WARNING: %1 | debug: %2").arg(err->message).arg(debug));
+        if (self && self->m_useSRT) {
+            srtLog(QString("[WARNING] %1 | debug: %2").arg(err->message).arg(debug));
+        }
         g_error_free(err);
         g_free(debug);
         break;
@@ -2553,7 +2960,15 @@ void GstPlayer::setHighSpeedMode(bool enabled)
 void GstPlayer::connectWebRTC(const QString &host, const QString &app, const QString &stream)
 {
     qDebug() << "🌐 WebRTC 连接:" << host << "/" << app << "/" << stream;
-    
+
+    // [SRS诊断] 记录连接入口 + 进入时的熔断标志（用于定位「偶尔第一次画面出不来」）。
+    srsLog(QString("==== connectWebRTC 入口 ===="));
+    srsLog(QString("[connect] host=%1 app=%2 stream=%3").arg(host, app, stream));
+    srsLog(QString("[熔断·入口前] srsError=%1 offerSent=%2 offerInProgress=%3 retryCount=%4 pipeline=%5")
+           .arg(m_srsError.load()).arg(m_offerSentForSession.load())
+           .arg(m_offerInProgress.load()).arg(m_srsRetryCount.load())
+           .arg(m_pipeline ? "存在(将销毁重建)" : "无"));
+
     m_webrtcHost = host;
     m_webrtcApp = app;
     m_webrtcStream = stream;
@@ -2567,6 +2982,7 @@ void GstPlayer::connectWebRTC(const QString &host, const QString &app, const QSt
     m_reconnectScheduled.store(false);
     m_offerSentForSession.store(false);  // 🔥 重置会话级 Offer 标志
     m_offerInProgress.store(false);      // 🔥 重置 Offer 进行中标志
+    srsLog(QString("[熔断·已重置] 三标志清零，开始建管线"));
     
     m_webrtcStatus = "Connecting...";
     emit webrtcStatusChanged(m_webrtcStatus);
@@ -2582,17 +2998,22 @@ void GstPlayer::connectWebRTC(const QString &host, const QString &app, const QSt
         m_webrtcStatus = "Pipeline creation failed";
         emit webrtcStatusChanged(m_webrtcStatus);
         emit error("Failed to create WebRTC pipeline");
+        srsLog(QString("[pipeline] ❌ createPipeline 失败 → 画面必然出不来"));
         return;
     }
-    
+    srsLog(QString("[pipeline] ✅ createPipeline 成功，webrtcbin=%1").arg(m_webrtcbin ? "有" : "无"));
+
     // 启动管道
     start();
     
     // 对于接收端 WebRTC，需要主动创建 offer（on-negotiation-needed 可能不会自动触发）
     if (m_webrtcbin) {
         qDebug() << "📞 主动创建 WebRTC Offer（接收端模式）...";
+        srsLog(QString("[offer] 100ms 后将主动 createWebRTCOffer"));
         // 稍微延迟以确保管道完全启动
         QTimer::singleShot(100, this, &GstPlayer::createWebRTCOffer);
+    } else {
+        srsLog(QString("[offer] ⚠️ webrtcbin 为空，不会创建 Offer → 画面出不来"));
     }
 }
 
@@ -2612,12 +3033,199 @@ void GstPlayer::disconnectWebRTC()
     emit webrtcDisconnected();
 }
 
+// ★★★ MARK: SRT (independent) BEGIN ★★★ —— 方案 B：PC 端独立 SRT 拉流
+
+// ⭐ 治「首屏卡 3.3s」：解码器/编码器冷启动预热。
+//   根因——首次 createPipeline 时 nvh264dec(NVIDIA CUDA context) + mfh264enc(MediaFoundation)
+//   首次创建/初始化同步占用主线程 ~3.3s（SRS/P2P 不卡是因为运行时这些已热缓存）。
+//   做法——在后台线程提前跑一个最小数据流，强制 GStreamer 完成 CUDA/MF 的一次性初始化，
+//   之后真正 createPipeline 走热路径。进程级只跑一次；不阻塞主线程；不改 SRS/P2P 逻辑。
+void GstPlayer::warmupDecoderEncoderAsync()
+{
+    bool expected = false;
+    if (!m_warmupStarted.compare_exchange_strong(expected, true)) {
+        return;  // 已预热过（或正在预热），不重复
+    }
+
+    // 一个最小预热 pipeline 跑通的通用工具：set PLAYING → 等 EOS（或超时）→ set NULL 销毁。
+    //   注意：在 QtConcurrent 线程池线程执行（无 Qt 事件循环），故用 gst_bus_timed_pop_filtered 阻塞等。
+    auto runWarmup = [](const QString &desc, int timeoutSec) -> bool {
+        GError *err = nullptr;
+        GstElement *p = gst_parse_launch(desc.toUtf8().constData(), &err);
+        if (!p || err) {
+            if (err) g_error_free(err);
+            if (p) gst_object_unref(p);
+            return false;
+        }
+        gst_element_set_state(p, GST_STATE_PLAYING);
+        GstBus *bus = gst_element_get_bus(p);
+        GstMessage *msg = gst_bus_timed_pop_filtered(
+            bus, (GstClockTime)timeoutSec * GST_SECOND,
+            (GstMessageType)(GST_MESSAGE_EOS | GST_MESSAGE_ERROR));
+        bool ok = (msg && GST_MESSAGE_TYPE(msg) == GST_MESSAGE_EOS);
+        if (msg) gst_message_unref(msg);
+        gst_object_unref(bus);
+        gst_element_set_state(p, GST_STATE_NULL);
+        gst_object_unref(p);
+        return ok;
+    };
+
+    // ⭐ 解码器与编码器并行预热（各占一个线程池任务），墙钟时间取两者较大者而非相加，
+    //   尽量在用户真正 connectSRT 之前热完（MediaFoundation 首次初始化约 2s 是瓶颈）。
+    // 解码器预热：videotestsrc → x264enc(软编造码流) → h264parse → <硬解> → fakesink
+    QtConcurrent::run([this, runWarmup]() {
+        qint64 t0 = QDateTime::currentMSecsSinceEpoch();
+        srtLog(QString("[warmup] 解码器预热开始"));
+        // 不调用 detectGpuType()（其 QProcess::waitForFinished 在无事件循环线程不可靠），
+        // 直接按通用优先级探测可用硬解工厂——NVIDIA 上真实 pipeline 选 nvh264dec，此处同样优先命中。
+        const QStringList decoderCandidates = {"nvh264dec", "d3d11h264dec", "msdkh264dec", "amfh264dec"};
+        bool decWarmed = false;
+        for (const QString &dec : decoderCandidates) {
+            if (!gst_element_factory_find(dec.toUtf8().constData())) continue;
+            QString desc = QString(
+                "videotestsrc num-buffers=2 ! video/x-raw,width=320,height=240,framerate=30/1 ! "
+                "x264enc tune=zerolatency speed-preset=ultrafast ! h264parse ! %1 ! fakesink sync=false")
+                .arg(dec);
+            if (runWarmup(desc, 8)) {
+                decWarmed = true;
+                srtLog(QString("[warmup] 解码器预热完成: %1，耗时 %2ms")
+                       .arg(dec).arg(QDateTime::currentMSecsSinceEpoch() - t0));
+                break;
+            }
+            srtLog(QString("[warmup] 解码器预热尝试失败: %1（继续下一候选）").arg(dec));
+        }
+        if (!decWarmed)
+            srtLog(QString("[warmup] ⚠️ 解码器预热未成功（不影响功能，首屏可能仍偏慢）"));
+    });
+
+    // 编码器预热：videotestsrc(NV12) → mfh264enc → h264parse → fakesink（触发 MediaFoundation 初始化）
+    QtConcurrent::run([this, runWarmup]() {
+        qint64 t0 = QDateTime::currentMSecsSinceEpoch();
+        srtLog(QString("[warmup] 编码器预热开始（mfh264enc / MediaFoundation 冷启动约 2s）"));
+        if (gst_element_factory_find("mfh264enc")) {
+            QString encDesc =
+                "videotestsrc num-buffers=2 ! video/x-raw,format=NV12,width=320,height=240,framerate=30/1 ! "
+                "mfh264enc low-latency=true ! h264parse ! fakesink sync=false";
+            bool ok = runWarmup(encDesc, 8);
+            srtLog(QString("[warmup] 编码器预热完成: mfh264enc（%1），耗时 %2ms")
+                   .arg(ok ? "EOS" : "超时/错误").arg(QDateTime::currentMSecsSinceEpoch() - t0));
+        } else {
+            srtLog(QString("[warmup] mfh264enc 不可用，跳过编码器预热"));
+        }
+    });
+}
+
+void GstPlayer::connectSRT(const QString &uri)
+{
+    qDebug() << "[SRT] 启动 SRT 拉流，uri=" << uri;
+    srtLog(QString("==== connectSRT 开始 ===="));
+    srtLog(QString("[uri] %1").arg(uri));
+
+    // 兜底预热（若 QML 已提前 warmupSRT() 则此处 compare_exchange 直接跳过，不重复）。
+    warmupDecoderEncoderAsync();
+
+    m_srtUri = uri;
+    m_useSRT = true;
+    // SRT 与 WebRTC/P2P 互斥：明确关掉另两条，走独立尾段。
+    m_useWebRTC = false;
+    m_useP2P = false;
+
+    m_noFpsSeconds.store(0);
+    m_reconnectScheduled.store(false);
+
+    m_webrtcStatus = "SRT Connecting...";
+    emit webrtcStatusChanged(m_webrtcStatus);
+
+    // ⭐ 解耦 UI 冻结：createPipeline（解码器/编码器冷启动初始化，首次可达 ~2.8s）很重，
+    //   若在此同步执行会冻结 GUI（"卡死拖不动"）。这里立即返回，把重活推到下一个事件循环，
+    //   让 QML 先把"正在连接 SRT..."渲染出来、UI 先响应一拍。仅影响 SRT 路径，SRS/P2P 不动。
+    int epoch = m_srtConnectEpoch.fetch_add(1) + 1;
+    srtLog(QString("[pipeline] connectSRT 入口立即返回（epoch=%1），重活异步执行").arg(epoch));
+    QTimer::singleShot(0, this, [this, epoch]() {
+        // 若期间又发起了新的连接或已断开（epoch 变化 / 退出 SRT），放弃本次。
+        if (!m_useSRT || m_srtConnectEpoch.load() != epoch) {
+            srtLog(QString("[pipeline] 异步重活已过期（epoch=%1，当前=%2），放弃")
+                   .arg(epoch).arg(m_srtConnectEpoch.load()));
+            return;
+        }
+        doConnectSRTPipeline();
+    });
+}
+
+void GstPlayer::doConnectSRTPipeline()
+{
+    qint64 t0 = QDateTime::currentMSecsSinceEpoch();
+
+    if (m_pipeline) {
+        stop();
+        destroyPipeline();
+    }
+
+    qint64 tBeforeCreate = QDateTime::currentMSecsSinceEpoch();
+    srtLog(QString("[pipeline] 开始 createPipeline（前置清理耗时 %1ms）").arg(tBeforeCreate - t0));
+    if (!createPipeline()) {
+        srtLog(QString("[pipeline] ❌ createPipeline 失败，耗时 %1ms")
+               .arg(QDateTime::currentMSecsSinceEpoch() - tBeforeCreate));
+        m_webrtcStatus = "SRT Pipeline creation failed";
+        emit webrtcStatusChanged(m_webrtcStatus);
+        emit error("Failed to create SRT pipeline");
+        m_useSRT = false;
+        return;
+    }
+
+    qint64 tAfterCreate = QDateTime::currentMSecsSinceEpoch();
+    srtLog(QString("[pipeline] ✅ createPipeline 完成，耗时 %1ms（仍在主线程，但已让首屏先响应）")
+           .arg(tAfterCreate - tBeforeCreate));
+
+    start();
+    qint64 tAfterStart = QDateTime::currentMSecsSinceEpoch();
+    srtLog(QString("[pipeline] ✅ start(set_state PLAYING) 完成，耗时 %1ms | 重活总耗时 %2ms")
+           .arg(tAfterStart - tAfterCreate).arg(tAfterStart - t0));
+    qDebug() << "[SRT] 管线已启动，等待 srtsrc 收流...";
+}
+
+void GstPlayer::disconnectSRT()
+{
+    qDebug() << "[SRT] 断开 SRT 连接";
+
+    // 让在途的 connectSRT 异步重活失效（断开后不应再把 pipeline 建起来）。
+    m_srtConnectEpoch.fetch_add(1);
+    m_useSRT = false;
+
+    stop();
+    destroyPipeline();
+
+    m_srtUri.clear();
+    m_noFpsSeconds.store(0);
+    m_webrtcStatus = "SRT Disconnected";
+    emit webrtcStatusChanged(m_webrtcStatus);
+    emit webrtcDisconnected();
+}
+
+// ★★★ MARK: SRT (independent) END ★★★
+
 // ★★★ P2P 直连模式 BEGIN ★★★
 
 void GstPlayer::connectP2P(const QString &pairedIosDeviceId, const QJsonArray &iceServers)
 {
+    // ⭐ 内核测试模式下，GStreamer 必须让出 P2P：拦截任何（含自动重连触发的）P2P 启动，
+    //   否则会和内核(Chromium)抢同一 iOS 会话，导致内核侧出不来画面。
+    if (m_kernelTestMode.load()) {
+        qDebug() << "[P2P] 内核测试模式启用中 → 跳过 GStreamer connectP2P（让内核独占）";
+        return;
+    }
+
     qDebug() << "[P2P] 启动 P2P 直连模式，配对设备:" << pairedIosDeviceId;
-    
+
+    // ⭐ P2P 独立诊断日志：记录入口（含 ICE 服务器数量，0 个 = 热点必失败的早期信号）
+    p2pLog(QString("[connect] 启动 P2P 直连 配对设备=%1 iceServers数量=%2 %3")
+           .arg(pairedIosDeviceId)
+           .arg(iceServers.size())
+           .arg(iceServers.isEmpty() ? "⚠️ 后端没下发任何 ICE 服务器！无 TURN → 手机热点(CGNAT)必然出不来画面" : ""));
+    // 重置 P2P 候选者统计（本次连接重新计数）
+    m_p2pLocalCand[0] = m_p2pLocalCand[1] = m_p2pLocalCand[2] = m_p2pLocalCand[3] = 0;
+    m_p2pRemoteCand[0] = m_p2pRemoteCand[1] = m_p2pRemoteCand[2] = m_p2pRemoteCand[3] = 0;
+
     m_pairedIosDeviceId = pairedIosDeviceId;
     m_useP2P = true;
     m_useWebRTC = true;
@@ -2654,6 +3262,7 @@ void GstPlayer::connectP2P(const QString &pairedIosDeviceId, const QJsonArray &i
     m_waitingForP2POffer.store(true);
     emit sendViewRequest(m_pairedIosDeviceId);
     qDebug() << "[P2P] 已发送 WEBRTC_REQUEST，等待 iOS Offer...";
+    p2pLog("[request] 已发送 WEBRTC_REQUEST，等待 iOS 回 Offer（若长时间无 [offer] = iOS 不在线/未响应）");
     scheduleP2PViewRequestRetry();
 }
 
@@ -2680,8 +3289,38 @@ void GstPlayer::disconnectP2P()
     emit webrtcDisconnected();
 }
 
+void GstPlayer::setKernelTestMode(bool on)
+{
+    const bool was = m_kernelTestMode.exchange(on);
+    if (was == on) return;
+    qDebug() << "[P2P] 内核测试模式" << (on ? "开启 → GStreamer 让出 P2P（停拉流/停渲染/停信令）"
+                                            : "关闭 → 恢复 GStreamer P2P 接管");
+    if (on) {
+        // 彻底停掉当前 GStreamer P2P：停止重试、关闭管线、清状态（不再向 iOS 发 HANGUP，
+        //   避免误伤——内核会用同一 username 继续协商；让出会话仅靠不再处理信令/不重启即可）。
+        stopP2PViewRequestRetry("内核测试接管");
+        stop();
+        destroyPipeline();
+        m_webrtcConnected = false;
+        m_useP2P = false;
+        m_noFpsSeconds.store(0);
+        m_offerSentForSession.store(false);
+        m_offerInProgress.store(false);
+        m_reconnectScheduled.store(true);   // 顺带压制 watchdog 自动重连
+        m_webrtcStatus = "P2P 已让给内核测试";
+        emit webrtcStatusChanged(m_webrtcStatus);
+    } else {
+        m_reconnectScheduled.store(false);
+    }
+}
+
 void GstPlayer::handleWebRTCSignaling(const QJsonObject &message)
 {
+    // ⭐ 内核测试模式下，所有 WebRTC 信令交给内核处理，GStreamer 不碰，避免双端抢会话。
+    if (m_kernelTestMode.load()) {
+        return;
+    }
+
     QString type = message.value("type").toString();
     
     if (type == "WEBRTC_SDP") {
@@ -2703,15 +3342,25 @@ void GstPlayer::handleWebRTCSignaling(const QJsonObject &message)
         handleP2PIce(candidate, sdpMid, sdpMLineIndex);
         
     } else if (type == "WEBRTC_HANGUP") {
-        stopP2PViewRequestRetry("收到远端挂断");
         QString reason = message.value("reason").toString();
         qDebug() << "[P2P] iOS 端挂断:" << reason;
-        if (reason == "ice_failed") {
-            m_webrtcStatus = "P2P connection failed (ICE)";
-            emit webrtcStatusChanged(m_webrtcStatus);
-            emit error("P2P 直连失败：NAT穿透失败，请检查网络环境");
+        // iOS 切网主动重连：iOS 拆掉旧会话并要 PC 重新发起，这里【不彻底拆 pipeline】，
+        // 直接主动重连（重发 WEBRTC_REQUEST 让 iOS 重新发 Offer），避免“PC 拆了又没人请求”的死锁。
+        if (reason == "network_switch_reconnect" && m_useP2P && !m_pairedIosDeviceId.isEmpty()) {
+            qWarning() << "[P2P] iOS 切网重连信号 → PC 主动重发观看请求";
+            m_p2pConnected = false;
+            m_iceReconnecting = false;           // 允许本次重连
+            m_iceReconnectEpoch.fetch_add(1);    // 让待定的 DISCONNECTED 延迟检查失效
+            attemptP2PIceReconnect("iOS 切网(network_switch_reconnect)");
+        } else {
+            stopP2PViewRequestRetry("收到远端挂断");
+            if (reason == "ice_failed") {
+                m_webrtcStatus = "P2P connection failed (ICE)";
+                emit webrtcStatusChanged(m_webrtcStatus);
+                emit error("P2P 直连失败：NAT穿透失败，请检查网络环境");
+            }
+            handleP2PHangup();
         }
-        handleP2PHangup();
         
     } else if (type == "WEBRTC_REJECT") {
         stopP2PViewRequestRetry("收到观看请求拒绝");
@@ -2753,7 +3402,19 @@ void GstPlayer::handleP2POffer(const QString &sdp)
     }
     
     GstWebRTCSessionDescription *offer = gst_webrtc_session_description_new(GST_WEBRTC_SDP_TYPE_OFFER, sdpMsg);
-    
+
+    // ⭐ 诊断：Offer 里是否已内联 relay 候选者（iOS 可能把候选者写进 Offer 而非单独发）
+    {
+        int offerRelay = sdp.count("typ relay", Qt::CaseInsensitive);
+        int offerSrflx = sdp.count("typ srflx", Qt::CaseInsensitive);
+        int offerHost  = sdp.count("typ host", Qt::CaseInsensitive);
+        p2pLog(QString("[offer] 收到 iOS Offer SDP（长度=%1）。内联候选者统计：host=%2 srflx=%3 relay=%4 %5")
+               .arg(sdp.size()).arg(offerHost).arg(offerSrflx).arg(offerRelay)
+               .arg(offerRelay == 0 && offerSrflx == 0 && offerHost == 0
+                    ? "（Offer 无内联候选者，靠后续 [远端候选] trickle）"
+                    : (offerRelay > 0 ? "✅ Offer 含 relay" : "")));
+    }
+
     GstPromise *setPromise = gst_promise_new();
     g_signal_emit_by_name(m_webrtcbin, "set-remote-description", offer, setPromise);
     gst_promise_interrupt(setPromise);
@@ -2761,7 +3422,52 @@ void GstPlayer::handleP2POffer(const QString &sdp)
     gst_webrtc_session_description_free(offer);
     
     qDebug() << "[P2P] 已设置远端 Offer SDP";
-    
+
+    // ⭐⭐⭐ P2P 对标 Chrome：在 Answerer 侧的 transceiver 上启用 NACK 重传（核心！）
+    //   P2P 模式 PC 是 Answerer，不走 createWebRTCOffer()，transceiver 是 set-remote-description
+    //   后由远端 Offer 协商产生。必须在 create-answer 之前对这些 transceiver 设 do-nack=TRUE，
+    //   否则 Answer 不会带 a=rtcp-fb nack，丢包只能等关键帧 → 花屏（与 SRS 路径行为对齐）。
+    {
+        // 诊断：把收到的 Offer SDP 关键行写入 nack_diag.txt
+        bool offerHasNack = sdp.contains("nack", Qt::CaseInsensitive);
+        bool offerHasRtx = sdp.contains("rtx", Qt::CaseInsensitive) || sdp.contains("apt=", Qt::CaseInsensitive);
+        nackLog(QString("[P2P Offer来自iOS] 含 nack=%1, 含 rtx=%2  %3")
+                .arg(offerHasNack ? "是✅" : "否❌")
+                .arg(offerHasRtx ? "是✅" : "否❌")
+                .arg(offerHasNack ? "→ iOS 已协商 NACK" : "→ iOS 未在 Offer 写 nack，Answerer 也开不了，需改 iOS"));
+        for (const QString &line : sdp.split('\n')) {
+            if (line.contains("rtcp-fb", Qt::CaseInsensitive) || line.startsWith("a=rtpmap", Qt::CaseInsensitive)) {
+                nackLog(QString("[P2P Offer行] %1").arg(line.trimmed()));
+            }
+        }
+
+        GArray *transceivers = nullptr;
+        g_signal_emit_by_name(m_webrtcbin, "get-transceivers", &transceivers);
+        if (transceivers) {
+            nackLog(QString("[配置] P2P transceiver 数量=%1").arg(transceivers->len));
+            for (guint i = 0; i < transceivers->len; i++) {
+                GstWebRTCRTPTransceiver *trans = g_array_index(transceivers, GstWebRTCRTPTransceiver*, i);
+                if (!trans) continue;
+                GObjectClass *tcls = G_OBJECT_GET_CLASS(trans);
+                if (g_object_class_find_property(tcls, "do-nack")) {
+                    g_object_set(trans, "do-nack", TRUE, nullptr);
+                    gboolean nackOn = FALSE;
+                    g_object_get(trans, "do-nack", &nackOn, nullptr);
+                    qDebug() << "✅ [P2P] transceiver[" << i << "] do-nack=TRUE（Answerer 启用 NACK 重传）";
+                    diagLog(QString("✅ [P2P] transceiver[%1] do-nack=TRUE（Answerer 启用 NACK 重传，对标 Chrome）").arg(i));
+                    nackLog(QString("[配置] P2P transceiver[%1] do-nack 设置成功，回读=%2 (1=已启用)").arg(i).arg(nackOn ? 1 : 0));
+                } else {
+                    qWarning() << "⚠️ [P2P] transceiver 无 do-nack 属性（GStreamer 版本过旧？）";
+                    diagLog("⚠️ [P2P] transceiver 无 do-nack 属性，NACK 未启用（建议升级 GStreamer ≥1.20）");
+                    nackLog("⚠️ [配置] P2P transceiver 无 do-nack 属性 → NACK 未启用！请升级 GStreamer ≥1.20");
+                }
+            }
+            g_array_unref(transceivers);
+        } else {
+            nackLog("⚠️ [配置] P2P get-transceivers 返回空，无法设置 do-nack");
+        }
+    }
+
     qDebug() << "[P2P] 创建 Answer...";
     GstPromise *answerPromise = gst_promise_new_with_change_func(
         [](GstPromise *promise, gpointer userData) {
@@ -2801,6 +3507,10 @@ void GstPlayer::onP2PAnswerCreated(GstWebRTCSessionDescription *answer)
     QString sdpStr = QString::fromUtf8(sdpText);
     g_free(sdpText);
     
+    p2pLog(QString("[answer] Answer 已创建并设为本地描述（长度=%1），发送给 iOS。"
+                   "信令至此双向打通，接下来看 [本地候选]/[远端候选] 和 [ice] 状态")
+           .arg(sdpStr.size()));
+
     QMetaObject::invokeMethod(this, [this, sdpStr]() {
         qDebug() << "[P2P] 发送 Answer SDP 给 iOS";
         emit sendSdpAnswer(sdpStr, m_pairedIosDeviceId);
@@ -2811,9 +3521,19 @@ void GstPlayer::handleP2PIce(const QString &candidate, const QString &sdpMid, in
 {
     if (!m_webrtcbin) {
         qWarning() << "[P2P] webrtcbin 未初始化，缓存 ICE 候选者";
+        p2pLog("[远端候选] ⚠️ webrtcbin 未初始化，丢弃了一条远端 ICE 候选者（时序问题）");
         return;
     }
-    
+
+    // ⭐ 诊断：远端(iOS)候选者按 typ 分类统计。iOS 在手机热点时，它自己的 host/srflx 也多半无效，
+    //    关键看 iOS 有没有给出 typ relay（说明 iOS 侧 TURN 也配好了）。
+    QString typ = p2pCandidateType(candidate);
+    int slot = (typ == "host") ? 0 : (typ == "srflx") ? 1 : (typ == "relay") ? 2 : 3;
+    int n = ++m_p2pRemoteCand[slot];
+    p2pLog(QString("[远端候选 #%1] typ=%2  %3")
+           .arg(n).arg(typ)
+           .arg(typ == "relay" ? "✅ iOS 给出了 TURN relay 候选者（热点下两端都需要 relay 才能配对）" : ""));
+
     qDebug() << "[P2P] 添加远端 ICE:" << candidate.left(50) << "...";
     g_signal_emit_by_name(m_webrtcbin, "add-ice-candidate", (guint)sdpMLineIndex,
                           candidate.toUtf8().constData());
@@ -2846,6 +3566,10 @@ void GstPlayer::scheduleP2PViewRequestRetry()
             m_webrtcStatus = "P2P waiting offer timeout";
             emit webrtcStatusChanged(m_webrtcStatus);
             qWarning() << "[P2P] 等待 iOS Offer 超时，停止重试";
+            p2pLog(QString("[request] ❌ 重发 %1 次仍未收到 iOS Offer，超时放弃。"
+                           "根因在信令层(不是 NAT)：iOS 设备不在线/没收到 WEBRTC_REQUEST/没回 Offer，"
+                           "与「手机热点」无关——若是热点问题应能收到 Offer 但卡在 [ice] FAILED")
+                   .arg(P2P_VIEW_REQUEST_RETRY_MAX));
             emit error("P2P 连接超时：未收到 iOS Offer，请检查设备在线状态");
             return;
         }
@@ -2866,12 +3590,64 @@ void GstPlayer::stopP2PViewRequestRetry(const QString &reason)
     }
 }
 
+// ICE 断线/失败（典型场景：iOS 切换网络换 WiFi）后的主动重连。
+// PC 是 Answerer，最干净的恢复方式是重发 WEBRTC_REQUEST，让 iOS 重新发起 Offer（带新 ICE 候选）；
+// PC 在 handleP2POffer() 里 set-remote-description + create-answer 即可在现有 webrtcbin 上重新打通 ICE。
+void GstPlayer::attemptP2PIceReconnect(const QString &reason)
+{
+    if (!m_useP2P || m_pairedIosDeviceId.isEmpty()) return;
+    if (m_p2pConnected) return;            // 已恢复，无需重连
+    if (m_iceReconnecting) {
+        qDebug() << "[P2P] 已在重连中，忽略重复触发:" << reason;
+        return;
+    }
+
+    const int kMaxIceReconnect = 5;
+    if (m_iceRetryCount >= kMaxIceReconnect) {
+        qWarning() << "[P2P] ICE 重连已达上限(" << kMaxIceReconnect << ")，停止自动重连:" << reason;
+        p2pLog(QString("[reconnect] ❌ 已达重连上限(%1)，停止。候选者：%2 → 若始终无 relay，"
+                       "说明热点+缺TURN 无解，需切回 SRS 中转或修好 TURN")
+               .arg(kMaxIceReconnect).arg(p2pCandSummary()));
+        m_webrtcStatus = "P2P: 重连失败，请手动重试";
+        emit webrtcStatusChanged(m_webrtcStatus);
+        return;
+    }
+
+    m_iceReconnecting = true;
+    int attempt = ++m_iceRetryCount;
+    qWarning() << "[P2P] ICE 主动重连 (" << attempt << "/" << kMaxIceReconnect << ") 原因:" << reason;
+    p2pLog(QString("[reconnect] 主动重连 (%1/%2) 原因=%3（重发 WEBRTC_REQUEST 让 iOS 带新候选者重协商）")
+           .arg(attempt).arg(kMaxIceReconnect).arg(reason));
+    m_webrtcStatus = QString("P2P: 重连中(%1/%2)...").arg(attempt).arg(kMaxIceReconnect);
+    emit webrtcStatusChanged(m_webrtcStatus);
+
+    // 指数退避（首次立即，之后 1s/2s/4s...），重发 WEBRTC_REQUEST 让 iOS 重新发 Offer
+    int delayMs = (attempt <= 1) ? 0 : (500 << (attempt - 1));
+    QTimer::singleShot(delayMs, this, [this, reason]() {
+        if (!m_useP2P || m_pairedIosDeviceId.isEmpty()) { m_iceReconnecting = false; return; }
+        if (m_p2pConnected) { m_iceReconnecting = false; return; }
+        // 重置等待状态并重发观看请求；scheduleP2PViewRequestRetry 提供兜底重试
+        m_waitingForP2POffer.store(true);
+        m_p2pViewRequestRetryCount.store(0);
+        emit sendViewRequest(m_pairedIosDeviceId);
+        qWarning() << "[P2P] 已重发 WEBRTC_REQUEST 触发 iOS 重新协商:" << reason;
+        scheduleP2PViewRequestRetry();
+        m_iceReconnecting = false;  // 允许后续 ICE 事件再次触发（次数仍受 m_iceRetryCount 限制）
+    });
+}
+
 void GstPlayer::addP2PIceServers(const QJsonArray &iceServers)
 {
-    if (!m_webrtcbin || iceServers.isEmpty()) return;
-    
+    if (!m_webrtcbin || iceServers.isEmpty()) {
+        p2pLog(QString("[ice-server] ⚠️ 未配置任何 ICE 服务器（webrtcbin=%1, iceServers空=%2）"
+                       "→ 只能用 host/srflx 候选者，手机热点(CGNAT)下基本打不通")
+               .arg(m_webrtcbin ? "有" : "无").arg(iceServers.isEmpty() ? "是" : "否"));
+        return;
+    }
+
     qDebug() << "[P2P] 配置 ICE 服务器，共" << iceServers.size() << "个";
-    
+
+    int stunCount = 0, turnCount = 0, turnFail = 0;
     for (const auto &server : iceServers) {
         QJsonObject obj = server.toObject();
         QJsonArray urls = obj["urls"].toArray();
@@ -2885,6 +3661,8 @@ void GstPlayer::addP2PIceServers(const QJsonArray &iceServers)
                 g_object_set(m_webrtcbin, "stun-server",
                              urlStr.toUtf8().constData(), nullptr);
                 qDebug() << "  STUN:" << urlStr;
+                stunCount++;
+                p2pLog(QString("[ice-server] STUN = %1").arg(urlStr));
             } else if (urlStr.startsWith("turn:") || urlStr.startsWith("turns:")) {
                 QString prefix = urlStr.startsWith("turns:") ? "turns:" : "turn:";
                 QString encodedUser = QString::fromUtf8(QUrl::toPercentEncoding(username));
@@ -2898,14 +3676,34 @@ void GstPlayer::addP2PIceServers(const QJsonArray &iceServers)
                                       turnUri.toUtf8().constData(), &addResult);
                 if (addResult) {
                     qDebug() << "  TURN (add-turn-server):" << turnUri.left(60) << "...";
+                    turnCount++;
+                    p2pLog(QString("[ice-server] TURN(add-turn-server 成功) = %1").arg(urlStr));
                 } else {
                     g_object_set(m_webrtcbin, "turn-server",
                                  turnUri.toUtf8().constData(), nullptr);
                     qDebug() << "  TURN (property fallback):" << turnUri.left(60) << "...";
+                    turnFail++;
+                    p2pLog(QString("[ice-server] ⚠️ TURN add-turn-server 返回失败，已回退 property 方式 = %1 "
+                                   "（若 relay 候选者收不到，多半是这里没真正生效）").arg(urlStr));
                 }
             }
         }
     }
+
+    p2pLog(QString("[ice-server] 汇总：STUN=%1 个, TURN成功=%2 个, TURN回退=%3 个  %4")
+           .arg(stunCount).arg(turnCount).arg(turnFail)
+           .arg(turnCount + turnFail == 0
+                ? "❌ 没有任何 TURN！手机热点(CGNAT/对称NAT)下几乎不可能直连 → 这就是出不来的根因"
+                : "✅ 有 TURN，热点下应能走 relay 候选者，继续看下面是否真收到 typ relay"));
+}
+
+QString GstPlayer::p2pCandSummary() const
+{
+    return QString("本地[host=%1 srflx=%2 relay=%3 其它=%4] 远端[host=%5 srflx=%6 relay=%7 其它=%8]")
+        .arg(m_p2pLocalCand[0].load()).arg(m_p2pLocalCand[1].load())
+        .arg(m_p2pLocalCand[2].load()).arg(m_p2pLocalCand[3].load())
+        .arg(m_p2pRemoteCand[0].load()).arg(m_p2pRemoteCand[1].load())
+        .arg(m_p2pRemoteCand[2].load()).arg(m_p2pRemoteCand[3].load());
 }
 
 void GstPlayer::onIceConnectionStateChanged(GstElement *webrtcbin, GParamSpec *pspec, gpointer userData)
@@ -2924,27 +3722,65 @@ void GstPlayer::onIceConnectionStateChanged(GstElement *webrtcbin, GParamSpec *p
         case GST_WEBRTC_ICE_CONNECTION_STATE_CHECKING:
             qDebug() << "[P2P] ICE Connection: Checking...";
             self->m_webrtcStatus = "P2P: ICE Checking...";
+            p2pLog(QString("[ice] Checking... 开始 NAT 穿透配对。当前候选者：%1").arg(self->p2pCandSummary()));
             emit self->webrtcStatusChanged(self->m_webrtcStatus);
             break;
         case GST_WEBRTC_ICE_CONNECTION_STATE_CONNECTED:
             qDebug() << "[P2P] ICE Connection: Connected!";
             self->m_webrtcStatus = "P2P Connected";
+            p2pLog(QString("[ice] ✅ Connected！NAT 穿透成功。候选者：%1。接下来等 [首帧] 才算真出画面")
+                   .arg(self->p2pCandSummary()));
             self->m_p2pConnected = true;
             self->m_iceRetryCount = 0;
+            // 连接恢复：清除重连状态，并推进 epoch 让待定的 DISCONNECTED 延迟检查失效
+            self->m_iceReconnecting = false;
+            self->m_iceReconnectEpoch.fetch_add(1);
             emit self->webrtcStatusChanged(self->m_webrtcStatus);
             break;
         case GST_WEBRTC_ICE_CONNECTION_STATE_COMPLETED:
             qDebug() << "[P2P] ICE Connection: Completed!";
             break;
-        case GST_WEBRTC_ICE_CONNECTION_STATE_FAILED:
+        case GST_WEBRTC_ICE_CONNECTION_STATE_FAILED: {
             qDebug() << "[P2P] ICE Connection: FAILED!";
             self->m_webrtcStatus = "P2P: ICE Failed";
+            // ⭐ 这里是「手机热点出不来」最常见的终点：dump 候选者汇总判定根因
+            QString summary = self->p2pCandSummary();
+            bool noLocalRelay = (self->m_p2pLocalCand[2].load() == 0);
+            bool noRemoteRelay = (self->m_p2pRemoteCand[2].load() == 0);
+            p2pLog(QString("[ice] ❌ FAILED！NAT 穿透失败。候选者：%1").arg(summary));
+            if (noLocalRelay || noRemoteRelay) {
+                p2pLog(QString("[ice] 🔴 根因高度可疑：%1%2 → 手机热点是 CGNAT/对称 NAT，"
+                               "没有 relay 候选者就只能靠 host/srflx 直连，热点下基本打不通。"
+                               "对策：①确认后端给 P2P 下发了可用 TURN；②确认 iOS 侧也配了同一组 TURN；"
+                               "③TURN 服务器(47.122.115.33)的 UDP 端口对手机网络放行。")
+                       .arg(noLocalRelay ? "本地无 relay 候选者 " : "")
+                       .arg(noRemoteRelay ? "远端(iOS)无 relay 候选者" : ""));
+            } else {
+                p2pLog("[ice] 两端都有 relay 候选者却仍 FAILED → 可能 TURN 鉴权失败/中继端口被封，"
+                       "检查 TURN 账号密码(credential)有效期与服务器可达性");
+            }
             emit self->webrtcStatusChanged(self->m_webrtcStatus);
+            // FAILED 不会自愈：P2P 模式立即主动重连（重发 WEBRTC_REQUEST 让 iOS 重发 Offer）
+            self->attemptP2PIceReconnect("ICE FAILED");
             break;
+        }
         case GST_WEBRTC_ICE_CONNECTION_STATE_DISCONNECTED:
             qDebug() << "[P2P] ICE Connection: Disconnected";
             self->m_webrtcStatus = "P2P: Reconnecting...";
+            p2pLog("[ice] Disconnected（链路中断，可能 iOS 切网/热点掉线）。6s 内未恢复将主动重连");
             emit self->webrtcStatusChanged(self->m_webrtcStatus);
+            // DISCONNECTED 可能短暂自愈：推进 epoch，延迟 6s 后若仍未恢复（epoch 未变）才主动重连。
+            // iOS 换 WiFi 等场景多走到这里，避免干等 iOS 端 8s+15s 的被动超时。
+            if (self->m_useP2P) {
+                int myEpoch = self->m_iceReconnectEpoch.fetch_add(1) + 1;
+                QTimer::singleShot(6000, self, [self, myEpoch]() {
+                    if (!self->m_useP2P) return;
+                    // epoch 变了说明期间已恢复或有新状态事件，放弃本次延迟重连
+                    if (self->m_iceReconnectEpoch.load() != myEpoch) return;
+                    if (self->m_p2pConnected) return;
+                    self->attemptP2PIceReconnect("ICE DISCONNECTED 超时未恢复");
+                });
+            }
             break;
         case GST_WEBRTC_ICE_CONNECTION_STATE_CLOSED:
             qDebug() << "[P2P] ICE Connection: Closed";
@@ -3009,6 +3845,13 @@ void GstPlayer::onIceCandidate(GstElement *webrtcbin, guint mlineindex, gchar *c
     // P2P 模式：发送本地 ICE 候选者给远端
     if (self->m_useP2P && !self->m_pairedIosDeviceId.isEmpty()) {
         QString candidateStr = QString::fromUtf8(candidate);
+        // ⭐ 诊断：本地候选者按 typ 分类统计（relay = 走 TURN 中继，热点下唯一可靠通道）
+        QString typ = p2pCandidateType(candidateStr);
+        int slot = (typ == "host") ? 0 : (typ == "srflx") ? 1 : (typ == "relay") ? 2 : 3;
+        int n = ++self->m_p2pLocalCand[slot];
+        p2pLog(QString("[本地候选 #%1] typ=%2  %3")
+               .arg(n).arg(typ)
+               .arg(typ == "relay" ? "✅ 本地拿到 TURN relay 候选者（热点下的救命通道）" : ""));
         QMetaObject::invokeMethod(self, [self, candidateStr, mlineindex]() {
             emit self->sendIceCandidate(candidateStr, "0", (int)mlineindex, self->m_pairedIosDeviceId);
         }, Qt::QueuedConnection);
@@ -3190,23 +4033,28 @@ void GstPlayer::createWebRTCOffer()
     // 防止 on-negotiation-needed 和 QTimer 双重触发导致发送两个 Offer 到 SRS
     if (m_offerSentForSession.exchange(true)) {
         qDebug() << "⚠️ 本次连接已发送过 Offer，跳过重复请求";
+        srsLog(QString("[offer] ⚠️ 跳过：offerSentForSession 已是 true（本次连接发过 Offer）。"
+                       "若此时画面没出来 = 上次 Offer 没成功但标志没回退 → 卡死根因"));
         return;
     }
 
     if (m_offerInProgress.exchange(true)) {
         qDebug() << "⚠️ Offer 正在创建中，跳过重复请求";
+        srsLog(QString("[offer] ⚠️ 跳过：offerInProgress 已是 true（Offer 创建中）"));
         m_offerSentForSession.store(false);  // 回退会话标志
         return;
     }
 
     if (!m_webrtcbin) {
         qWarning() << "❌ webrtcbin 未初始化";
+        srsLog(QString("[offer] ❌ webrtcbin 未初始化 → 画面出不来"));
         m_offerInProgress.store(false);
         m_offerSentForSession.store(false);  // 回退会话标志
         return;
     }
     
     qDebug() << "📝 创建 WebRTC Offer...";
+    srsLog(QString("[offer] 开始创建 Offer（transceiverAdded=%1）").arg(m_transceiverAdded));
     
     // ⭐ 添加 recvonly transceiver（与 Java 版本一致）
     // 这是接收端 WebRTC 的关键：必须告诉 SRS 我们只接收视频
@@ -3229,6 +4077,29 @@ void GstPlayer::createWebRTCOffer()
             
             if (transceiver) {
                 qDebug() << "✅ 已添加 recvonly H264 视频 transceiver";
+
+                // ⭐⭐⭐ 对标 Chrome：在 transceiver 上启用 NACK 重传（核心！）
+                //   - do-nack 默认 FALSE，不显式设永远不发 NACK → 丢包只能等关键帧 → 花屏。
+                //   - 设 TRUE 后 SDP 会协商出 a=rtcp-fb:96 nack / nack pli，丢包先重传补回，补不回才请求关键帧。
+                //   - 必须在 SDP 协商前设（此处 add-transceiver 返回值正是协商前，时机正确）。
+                //   FEC（fec-type=UlpRed）作为第二步，需与 iOS 端协商一致，暂不开，先验证 NACK 效果。
+                {
+                    GObjectClass *tcls = G_OBJECT_GET_CLASS(transceiver);
+                    if (g_object_class_find_property(tcls, "do-nack")) {
+                        g_object_set(transceiver, "do-nack", TRUE, nullptr);
+                        // 回读确认真的写进去了
+                        gboolean nackOn = FALSE;
+                        g_object_get(transceiver, "do-nack", &nackOn, nullptr);
+                        qDebug() << "✅ transceiver: do-nack=TRUE（启用 NACK 重传，对标 Chrome）";
+                        diagLog("✅ NACK 已启用：transceiver do-nack=TRUE（丢包重传，对标 Chrome）");
+                        nackLog(QString("[配置] transceiver do-nack 设置成功，回读=%1 (1=已启用)").arg(nackOn ? 1 : 0));
+                    } else {
+                        qWarning() << "⚠️ transceiver 无 do-nack 属性（GStreamer 版本过旧？NACK 未启用）";
+                        diagLog("⚠️ transceiver 无 do-nack 属性，NACK 未启用（建议升级 GStreamer ≥1.20）");
+                        nackLog("⚠️ [配置] transceiver 无 do-nack 属性 → NACK 未启用！请升级 GStreamer ≥1.20");
+                    }
+                }
+
                 gst_object_unref(transceiver);
                 m_transceiverAdded = true;
             } else {
@@ -3282,6 +4153,24 @@ void GstPlayer::onOfferCreated(GstWebRTCSessionDescription *offer)
     gchar *sdpText = gst_sdp_message_as_text(offer->sdp);
     QString sdpStr = QString::fromUtf8(sdpText);
     g_free(sdpText);
+
+    // NACK 专项：检测本地 Offer SDP 是否协商出 nack / rtx（验证 NACK 是否真的进 SDP）
+    {
+        bool hasNack = sdpStr.contains("nack", Qt::CaseInsensitive);
+        bool hasRtx  = sdpStr.contains("rtx", Qt::CaseInsensitive) || sdpStr.contains("apt=", Qt::CaseInsensitive);
+        bool hasPli  = sdpStr.contains("nack pli", Qt::CaseInsensitive);
+        nackLog(QString("[Offer SDP] 含 nack=%1, 含 rtx=%2, 含 nack-pli=%3  %4")
+                .arg(hasNack ? "是✅" : "否❌")
+                .arg(hasRtx ? "是✅" : "否❌")
+                .arg(hasPli ? "是" : "否")
+                .arg(hasNack ? "→ NACK 协商成功" : "→ NACK 未进 SDP，检查 do-nack 是否在协商前设置"));
+        // 把含 rtcp-fb 的行摘出来，方便核对
+        for (const QString &line : sdpStr.split('\n')) {
+            if (line.contains("rtcp-fb", Qt::CaseInsensitive) || line.startsWith("a=rtpmap", Qt::CaseInsensitive)) {
+                nackLog(QString("[Offer SDP行] %1").arg(line.trimmed()));
+            }
+        }
+    }
     
     qDebug() << "📤 发送 Offer 到 SRS...";
     
@@ -3338,9 +4227,12 @@ void GstPlayer::sendOfferToSRS(const QString &sdp)
     
     QNetworkReply *reply = m_networkManager->post(request, jsonData);
     
+    srsLog(QString("[http] POST Offer 到 SRS（重试 %1/5）").arg(retryCount));
     connect(reply, &QNetworkReply::finished, this, [this, reply]() {
         if (reply->error() != QNetworkReply::NoError) {
             qWarning() << "❌ HTTP 请求失败:" << reply->errorString();
+            srsLog(QString("[http] ❌ HTTP 请求失败: %1 → 画面出不来（offerInProgress 回退，但 offerSent 仍 true，无自动重连）")
+                   .arg(reply->errorString()));
             m_webrtcStatus = "HTTP Error";
             emit webrtcStatusChanged(m_webrtcStatus);
             emit error(reply->errorString());
@@ -4165,6 +5057,32 @@ void GstPlayer::onRenderTick()
             QMutexLocker lock(&m_queueMutex);
             queueDepth = m_frameQueue.size();
         }
+
+        // ⭐ SRT 专项每秒诊断（无论是否缓冲完成都打，便于看"为什么队列一直空"）：
+        //   端到端延迟 ≈ srtsrc latency(300ms) + netQueue(120ms) + 应用层队列延迟。
+        //   UNDERRUN 频繁 + 队列长期空 = 数据供给不连续（SRT 突发到达或上行不足）。
+        if (m_useSRT) {
+            // SRT 路径的实际协议层缓冲，与 gstsrtsource.cpp 保持一致（不用 GST_JITTER_LATENCY，
+            //   那是 SRS WebRTC 的默认估值，对 SRT 不准、会高估端到端延迟）。
+            static constexpr int SRT_LATENCY_MS = 300;   // srtsrc latency
+            static constexpr int SRT_NETQUEUE_MS = 120;  // netQueue 缓冲
+            double arrivalFpsSrt = qMax(1.0, m_arrivalRateEma);
+            int appDelaySrt = static_cast<int>(queueDepth * 1000.0 / arrivalFpsSrt);
+            int e2eDelaySrt = SRT_LATENCY_MS + SRT_NETQUEUE_MS + appDelaySrt;
+            int depayUn = g_srtDepayUnderrun.exchange(0);
+            int decUn = g_srtDecodeUnderrun.exchange(0);
+            int depayOv = g_srtDepayOverrun.exchange(0);
+            srtLog(QString("[stats] 缓冲%1 | 收=%2fps 到达=%3fps | 队列=%4帧 目标=%5 | 速度=%6%% | 应用延迟=%7ms 估端到端≈%8ms | UNDERRUN(depay=%9,decode=%10) OVERRUN(depay=%11)")
+                .arg(m_bufferingStarted.load() ? "完成" : "等待")
+                .arg((int)m_lastSecondFps)
+                .arg((int)arrivalFpsSrt)
+                .arg(queueDepth)
+                .arg(m_queueTarget)
+                .arg((int)(m_playbackRate*100))
+                .arg(appDelaySrt)
+                .arg(e2eDelaySrt)
+                .arg(depayUn).arg(decUn).arg(depayOv));
+        }
         
         // ⭐⭐⭐ FPS变化检测（自动唤醒机制）
         // 当实际FPS与配置FPS差异>30%持续3秒，自动重配置
@@ -4258,6 +5176,31 @@ void GstPlayer::onRenderTick()
                 m_fpsChangeCounter = 0;
             } else {
                 return;  // 继续等待缓冲
+            }
+        }
+
+        // ⭐⭐⭐ SRT 专用：仅在「首次缓冲完成」裁一次 gop_cache 历史积压（仅 SRT 模式，
+        // 完全不影响 P2P/SRS/WebRTC）。
+        // 原因：SRS 对 SRT 拉流连接瞬间会灌入 gop_cache 的大量历史帧（秒开用），造成首帧高延迟。
+        // 说明：此处 m_frameQueue 存的是「解码后 BGRA 帧」（appsink 之后），帧间无 H.264 依赖，
+        //   丢弃任意帧只会跳帧、不会花屏。故安全。
+        // 关键教训（上一版 bug）：若「每 tick 持续裁」会与 SRT 突发到达节奏对抗 → 队列剧烈震荡、
+        //   每秒裁 4~5 次、UNDERRUN 暴涨。正确做法：只在首帧那一刻裁一次清掉历史积压，
+        //   之后完全交给现有「追帧速度」机制温和消化，不再丢帧。
+        if (m_useSRT && m_bufferingStarted.load() && !m_srtInitialCropDone) {
+            m_srtInitialCropDone = true;
+            if (queueDepth > m_queueTarget) {
+                int dropCount = 0;
+                while (m_frameQueue.size() > m_queueTarget) {
+                    GstSample *oldest = m_frameQueue.takeFirst();
+                    gst_sample_unref(oldest);
+                    dropCount++;
+                }
+                queueDepth = m_frameQueue.size();
+                qWarning().noquote() << QString("⚡ [SRT] 首帧裁掉 gop_cache 历史积压 %1 帧 | 队列 %2→%3（目标%4）")
+                    .arg(dropCount).arg(dropCount + queueDepth).arg(queueDepth).arg(m_queueTarget);
+                srtLog(QString("[裁帧] 首次裁掉历史积压 %1 帧 | 队列 %2→%3（目标%4）")
+                    .arg(dropCount).arg(dropCount + queueDepth).arg(queueDepth).arg(m_queueTarget));
             }
         }
         

@@ -21,10 +21,12 @@ ApplicationWindow {
     signal windowSizeChanged(int newWidth, int newHeight)
     
     // 初始尺寸（登录/注册卡片大小）
+    //   ⭐ 2026-06-24：登录页新增「播放内核」分段选择（约 +84px），原 502 高度会把
+    //      豪华版/至尊版/注册按钮挤出可视区，故登录态高度提到 590。
     width: 600
-    height: 502
+    height: 590
     minimumWidth: isLoggedIn ? 1280 : 600
-    minimumHeight: isLoggedIn ? 720 : 502
+    minimumHeight: isLoggedIn ? 720 : 590
     flags: Qt.Window | Qt.FramelessWindowHint
     color: "transparent"
     

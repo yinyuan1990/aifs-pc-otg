@@ -1,0 +1,458 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>内核测试 (Chromium WebEngine)</title>
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; background: #000; overflow: hidden; font-family: "PingFang HK", "Microsoft YaHei", sans-serif; }
+  /* ⭐ transform-origin 居中：缩放/镜像/旋转都以画面中心为基准，和 GStreamer 端 QML Scale/Rotation 一致 */
+  #remoteVideo { display: block; width: 100%; height: 100%; object-fit: contain; background: #000; transform-origin: center center; transition: transform 0.08s linear; }
+  /* SRT 不支持提示（网页内核无法播 SRT） */
+  #srtBox {
+    position: absolute; left: 50%; top: 50%; transform: translate(-50%,-50%);
+    z-index: 99998; color: #ffb74d; font-size: 16px; text-align: center;
+    background: rgba(0,0,0,0.8); padding: 18px 26px; border-radius: 8px; display: none; max-width: 80%;
+  }
+  #statsPanel {
+    position: absolute; left: 10px; top: 10px; z-index: 9999;
+    background: rgba(0,0,0,0.62); color: #00e676; padding: 8px 12px;
+    border-radius: 6px; font-family: Consolas, monospace; font-size: 13px; line-height: 1.55;
+    white-space: pre; pointer-events: none; min-width: 250px;
+  }
+  #statsPanel .k { color: #80d8ff; }
+  #statsPanel .warn { color: #ff5252; }
+  #badge {
+    position: absolute; right: 10px; top: 10px; z-index: 9999;
+    background: rgba(33,150,243,0.85); color: #fff; padding: 4px 10px;
+    border-radius: 4px; font-size: 12px; font-weight: bold; pointer-events: none;
+  }
+  #errBox {
+    position: absolute; left: 50%; top: 50%; transform: translate(-50%,-50%);
+    z-index: 99999; color: #ff5252; font-size: 15px; text-align: center;
+    background: rgba(0,0,0,0.8); padding: 16px 22px; border-radius: 8px; display: none; max-width: 80%;
+  }
+</style>
+</head>
+<body>
+  <video id="remoteVideo" autoplay muted playsinline></video>
+  <div id="badge">Chromium 内核</div>
+  <div id="statsPanel">等待启动…</div>
+  <div id="errBox"></div>
+  <div id="srtBox">⚠ 网页内核不支持 SRT 播放<br/>请在登录页切换到 GStreamer 内核</div>
+
+<script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+<script>
+  "use strict";
+
+  const videoEl  = document.getElementById('remoteVideo');
+  const statsEl  = document.getElementById('statsPanel');
+  const badgeEl  = document.getElementById('badge');
+  const errEl    = document.getElementById('errBox');
+  const srtEl    = document.getElementById('srtBox');
+
+  // ⭐ 本地画面变换（缩放/镜像/旋转），由 QML 在网页内核作主播放器时调用。
+  //   与 GStreamer 端 QML Scale/Rotation 语义对齐：
+  //   - zoom: 本地显示缩放 1.0~5.0（不下发 iOS）
+  //   - mirror: "none" | "horizontal" | "vertical"（纯本地翻转）
+  //   - rotation: 0/90/180/270（纯本地旋转）
+  //   - offsetX/offsetY: 缩放后的平移像素（鼠标聚焦缩放）
+  //   CSS transform 顺序：先 translate 再 rotate 再 scale（与 QML transform 列表等效）。
+  window.applyTransform = function(zoom, mirror, rotation, offsetX, offsetY) {
+    var z  = (typeof zoom === 'number' && zoom > 0) ? zoom : 1.0;
+    var ox = (typeof offsetX === 'number') ? offsetX : 0;
+    var oy = (typeof offsetY === 'number') ? offsetY : 0;
+    var sx = (mirror === 'horizontal') ? -z : z;
+    var sy = (mirror === 'vertical')   ? -z : z;
+    var rot = rotation || 0;
+    videoEl.style.transform =
+      'translate(' + ox + 'px,' + oy + 'px) rotate(' + rot + 'deg) scale(' + sx + ',' + sy + ')';
+  };
+
+  // ⭐ SRT 不支持提示（网页内核无法播 SRT）。show=true 时显示提示并清空画面。
+  window.showSrtUnsupported = function(show) {
+    if (show) {
+      try { if (window.stopPlay) window.stopPlay(); } catch(_){}
+      srtEl.style.display = 'block';
+    } else {
+      srtEl.style.display = 'none';
+    }
+  };
+
+  let pc = null;
+  let mode = '';            // 'srs' | 'p2p'
+  let cfg = null;
+  let bridge = null;        // QWebChannel: kernelBridge（P2P 信令）
+  let statsTimer = null;
+  let lastBytes = 0, lastTs = 0, lastFrames = 0, lastFrameTs = 0;
+  let lastDecoded = 0, stallSeconds = 0;
+  let reconnectTimer = null, reconnecting = false;
+  let offerHandled = false;    // 是否已成功应答过 Offer（去重 iOS 连发的多个 Offer）
+  let negotiating = false;     // 应答是否进行中（防并发 createAnswer 撞 signalingState）
+  let peerStopped = false;     // 对端(iOS)主动挂断/退出 → 绝不重连
+  let everConnected = false;   // 是否曾经连上过（区分"网络抖动"vs"从没连上"）
+  let reconnectAttempts = 0;   // 连续重连次数（从没连上时有限次后放弃）
+  const MAX_RECONNECT_BEFORE_CONNECTED = 3;
+
+  function showErr(msg) { errEl.style.display = 'block'; errEl.textContent = msg; logC('ERR ' + msg); }
+  function hideErr() { errEl.style.display = 'none'; }
+  function logC(m) { try { if (bridge) bridge.log(m); } catch(_){} console.log('[webplayer]', m); }
+
+  // ============ QWebChannel 初始化（P2P 信令桥）============
+  //   qt.webChannelTransport 由 WebEngine 在 webChannel 设好后注入，可能比页面 JS 稍晚；
+  //   且 qwebchannel.js 必须先加载（QWebChannel 才有定义）。这里：
+  //   1) 页面一加载就预连（preInitChannel），不等 startPlay，给足初始化时间；
+  //   2) 轮询等待最多 ~6s，每步把诊断打到屏幕（不用翻日志就知道卡在哪）；
+  //   3) 连上后缓存 bridge，startPlay 直接用。
+  let channelReady = false;     // QWebChannel 是否已建立（不论是否拿到 bridge）
+  let channelInitStarted = false;
+
+  function chanDiag(s) {
+    // 仅在 P2P 未出画面时，把桥状态显示到屏幕，便于排障
+    if (mode === 'p2p' && !channelReady) statsEl.textContent = s;
+    logC(s);
+  }
+
+  function initChannel(cb) {
+    // 已经连好：直接回调
+    if (channelReady) { if (cb) cb(); return; }
+
+    let tries = 0;
+    const MAX = 60;  // 60 × 100ms = 6s
+    (function waitTransport() {
+      const hasJsLib   = (typeof QWebChannel !== 'undefined');
+      const hasTrans   = (typeof qt !== 'undefined' && qt.webChannelTransport);
+      if (hasJsLib && hasTrans) {
+        try {
+          new QWebChannel(qt.webChannelTransport, function(channel) {
+            channelReady = true;
+            bridge = channel.objects.kernelBridge;
+            if (bridge) {
+              logC('QWebChannel 已连接 kernelBridge');
+              if (bridge.signalReceived) bridge.signalReceived.connect(onP2PSignal);
+            } else {
+              chanDiag('QWebChannel 连上但 channel.objects 里无 kernelBridge\n（C++ 未 registerObject?）');
+            }
+            if (cb) cb();
+          });
+        } catch (e) {
+          chanDiag('QWebChannel 构造异常: ' + (e.message || e));
+          if (cb) cb();
+        }
+        return;
+      }
+      tries++;
+      if (tries % 5 === 0 || tries === 1) {
+        chanDiag('等待 QWebChannel 就绪…(' + tries + '/' + MAX + ')\n' +
+                 'qwebchannel.js=' + (hasJsLib ? 'OK' : '未加载') +
+                 '  transport=' + (hasTrans ? 'OK' : '未注入'));
+      }
+      if (tries > MAX) {
+        let why = !hasJsLib
+          ? 'qwebchannel.js 未加载（qrc:///qtwebchannel/qwebchannel.js 取不到）'
+          : 'qt.webChannelTransport 未注入（WebChannel 未绑定到 view / registeredObjects 为空）';
+        chanDiag('QWebChannel 初始化超时\n原因: ' + why);
+        if (cb) cb();
+        return;
+      }
+      setTimeout(waitTransport, 100);
+    })();
+  }
+
+  // 页面一加载就预连（与 startPlay 解耦，争取更早就绪）
+  function preInitChannel() {
+    if (channelInitStarted) return;
+    channelInitStarted = true;
+    initChannel(null);
+  }
+  if (document.readyState === 'complete' || document.readyState === 'interactive') preInitChannel();
+  else document.addEventListener('DOMContentLoaded', preInitChannel);
+
+  // ============ 对外入口 ============
+  // SRS: window.startPlay({mode:'srs', host, app, stream, vhost})
+  // P2P: window.startPlay({mode:'p2p'})   —— 参数从 bridge 拿
+  window.startPlay = function(params) {
+    cfg = params || {};
+    mode = cfg.mode || 'srs';
+    peerStopped = false; everConnected = false; reconnectAttempts = 0;
+    badgeEl.textContent = 'Chromium 内核 · ' + mode.toUpperCase();
+    initChannel(function() {
+      if (mode === 'p2p') startP2P();
+      else startSRS();
+    });
+  };
+
+  window.stopPlay = async function() {
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+    reconnecting = false;
+    if (statsTimer) { clearInterval(statsTimer); statsTimer = null; }
+    // ⭐ 停播即上报 fps=0，QML 拉流心跳随之停发 → iOS 3s 后判定「PC 未连接」。
+    if (bridge && bridge.notifyViewerFps) { try { bridge.notifyViewerFps(0); } catch(_){} }
+    if (mode === 'p2p' && bridge && cfg && cfg._iosDev) {
+      try { bridge.sendSignal('WEBRTC_HANGUP', cfg._iosDev, '', '', '', '', 0); } catch(_){}
+      try { bridge.notifyTestStopped(); } catch(_){}
+    }
+    if (pc) { try { pc.close(); } catch(_){} pc = null; }
+    if (videoEl.srcObject) {
+      try { videoEl.srcObject.getTracks().forEach(t => t.stop()); } catch(_){}
+      videoEl.srcObject = null;
+    }
+  };
+
+  // ============ 公共：track 处理 + 双缓冲防卡顿 ============
+  function attachTrack(stream) {
+    videoEl.srcObject = stream;
+    // ⭐ 双缓冲/低延迟提示：让 Chromium 内核 jitterbuffer 维持一个小目标缓冲，
+    //   避免「缓冲耗尽 → 画面卡住不动」（这就是用户观察到的：内核无马赛克但会卡住）。
+    try {
+      const recv = pc.getReceivers().find(r => r.track && r.track.kind === 'video');
+      if (recv && 'jitterBufferTarget' in recv) {
+        recv.jitterBufferTarget = 120;   // ms，维持~120ms 缓冲做"双缓冲"防卡顿
+        logC('已设 jitterBufferTarget=120ms（应用层双缓冲防卡顿）');
+      } else if (recv && 'playoutDelayHint' in recv) {
+        recv.playoutDelayHint = 0.12;
+      }
+    } catch(e) { logC('设 jitterBufferTarget 失败: ' + e); }
+  }
+
+  // ============ SRS WHEP ============
+  async function startSRS() {
+    try {
+      hideErr();
+      if (!cfg.host || !cfg.stream) { showErr('SRS 参数缺失 host/stream'); return; }
+      cfg.app = cfg.app || 'tenantA'; cfg.vhost = cfg.vhost || 'vid-7gg4748';
+      statsEl.textContent = '正在协商 SRS WHEP…';
+      await rebuildPC();
+      pc.addTransceiver('video', { direction: 'recvonly' });   // 本系统 SRS 纯视频无音频
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      const apiUrl = 'http://' + cfg.host + ':1985/rtc/v1/play/';
+      const streamUrl = 'webrtc://' + cfg.host + '/' + cfg.app + '/' + cfg.stream + '?vhost=' + cfg.vhost + '&eip=' + cfg.host;
+      const sdpCRLF = offer.sdp.replace(/\r\n/g,'\n').replace(/\n/g,'\r\n');
+      const resp = await fetch(apiUrl, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({api:apiUrl, streamurl:streamUrl, sdp:sdpCRLF}) });
+      const data = await resp.json();
+      if (data.code && data.code !== 0) { showErr('SRS 错误 code=' + data.code); return; }
+      await pc.setRemoteDescription({ type:'answer', sdp:data.sdp });
+      logC('SRS setRemoteDescription OK');
+      startStats();
+    } catch (e) { showErr('SRS 异常: ' + (e.message||e)); }
+  }
+
+  // 等 bridge 就绪（最多 6s），避免时序误报"未就绪"
+  function waitBridge() {
+    return new Promise(resolve => {
+      if (bridge) { resolve(true); return; }
+      initChannel(function() { resolve(!!bridge); });
+    });
+  }
+
+  // ============ P2P（PC 是 Answerer，信令走 kernelBridge）============
+  async function startP2P() {
+    try {
+      hideErr();
+      if (!bridge) {
+        chanDiag('P2P：等待 QWebChannel 桥就绪…');
+        await waitBridge();
+      }
+      if (!bridge) {
+        showErr('P2P 需要 kernelBridge（QWebChannel 未就绪）\n' +
+                '检查：CMake 是否链接 Qt6::WebChannel；main.cpp 是否 registerObject("kernelBridge")；KernelTestView 的 webChannel/registeredObjects 是否绑定');
+        return;
+      }
+      const iosDev = bridge.getPairedDeviceId ? await call0(bridge.getPairedDeviceId) : '';
+      cfg._iosDev = iosDev;
+      if (!iosDev) { showErr('P2P: 配对 iOS 设备 id 为空'); return; }
+      statsEl.textContent = '正在建立 P2P…\niOS=' + iosDev;
+
+      // 通知 C++ 断开 GStreamer P2P，让出 username 会话
+      try { bridge.notifyTestStarted(); } catch(_){}
+
+      await rebuildPC();
+
+      // 发 WEBRTC_REQUEST，等 iOS 回 Offer
+      logC('发送 WEBRTC_REQUEST → ' + iosDev);
+      bridge.sendSignal('WEBRTC_REQUEST', iosDev, '', '', '', '', 0);
+      startStats();
+    } catch (e) { showErr('P2P 异常: ' + (e.message||e)); }
+  }
+
+  // QWebChannel 的 Q_INVOKABLE 返回值是异步回调形式
+  function call0(fn) { return new Promise(res => { fn(function(r){ res(r); }); }); }
+
+  async function onP2PSignal(jsonStr) {
+    if (mode !== 'p2p' || !pc) return;
+    let msg; try { msg = JSON.parse(jsonStr); } catch(e){ return; }
+    const type = msg.type;
+    if (type === 'WEBRTC_SDP' && msg.sdpType === 'offer') {
+      // ⭐ iOS 会在极短时间内连发多个内容相同的 Offer（实测 3ms 内 3 个）。
+      //   onP2PSignal 是 async，多个 Offer 会并发跑：第一个走完 setLocalDescription 后
+      //   signalingState 变成 stable，后到的 createAnswer 就会报
+      //   「cannot create an answer in a state other than have-remote-offer」。
+      //   recvonly 单向拉流，第一个 Offer 已足够 → 用 offerHandled 去重，重复 Offer 直接忽略。
+      if (offerHandled) { logC('忽略重复 Offer（已应答）'); return; }
+      if (negotiating)  { logC('忽略并发 Offer（应答进行中）'); return; }
+      negotiating = true;
+      try {
+        logC('收到 iOS Offer');
+        await pc.setRemoteDescription({ type:'offer', sdp: msg.sdp });
+        // 二次校验：setRemoteDescription 后状态必须是 have-remote-offer 才能 createAnswer
+        if (pc.signalingState !== 'have-remote-offer') {
+          logC('状态非 have-remote-offer（=' + pc.signalingState + '），跳过本次应答');
+          negotiating = false;
+          return;
+        }
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        bridge.sendSignal('WEBRTC_SDP', cfg._iosDev, 'answer', answer.sdp, '', '', 0);
+        offerHandled = true;
+        logC('已回 Answer');
+      } catch(e) { showErr('处理 Offer 失败: ' + (e.message||e)); }
+      negotiating = false;
+    } else if (type === 'WEBRTC_ICE') {
+      try {
+        if (msg.candidate) {
+          await pc.addIceCandidate({ candidate: msg.candidate, sdpMid: msg.sdpMid || '0', sdpMLineIndex: msg.sdpMLineIndex || 0 });
+        }
+      } catch(e) { logC('addIceCandidate 失败: ' + e); }
+    } else if (type === 'WEBRTC_HANGUP') {
+      // ⭐ iOS 主动挂断/退出/停止推流（reason=ios_stop_publish 等）→ 绝不重连
+      const reason = msg.reason || '';
+      logC('iOS 挂断 reason=' + reason + ' → 停止，不重连');
+      peerStopped = true;
+      if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+      reconnecting = false;
+      if (statsTimer) { clearInterval(statsTimer); statsTimer = null; }
+      if (pc) { try { pc.close(); } catch(_){} pc = null; }
+      if (videoEl.srcObject) {
+        try { videoEl.srcObject.getTracks().forEach(t => t.stop()); } catch(_){}
+        videoEl.srcObject = null;
+      }
+      statsEl.innerHTML = '<span class="warn">iOS 已退出/停止推流</span>\n（不再重连，关闭后重开测试）';
+    }
+  }
+
+  async function rebuildPC() {
+    if (pc) { try { pc.close(); } catch(_){} pc = null; }
+    // 新 PeerConnection → 允许重新接收并应答 Offer
+    offerHandled = false; negotiating = false;
+    let iceServers = [];
+    if (mode === 'p2p' && bridge && bridge.getIceServers) {
+      try { const s = await call0(bridge.getIceServers); iceServers = JSON.parse(s || '[]'); } catch(_){}
+    }
+    pc = new RTCPeerConnection({ bundlePolicy:'max-bundle', iceServers: iceServers });
+    pc.ontrack = (ev) => { if (ev.streams && ev.streams[0]) attachTrack(ev.streams[0]); };
+    pc.onicecandidate = (ev) => {
+      if (mode === 'p2p' && ev.candidate && bridge && cfg._iosDev) {
+        bridge.sendSignal('WEBRTC_ICE', cfg._iosDev, '', '',
+          ev.candidate.candidate, ev.candidate.sdpMid || '0', ev.candidate.sdpMLineIndex || 0);
+      }
+    };
+    pc.oniceconnectionstatechange = () => {
+      if (!pc) return;
+      const st = pc.iceConnectionState;
+      logC('ICE: ' + st);
+      if (st === 'connected' || st === 'completed') {
+        // ⭐ 网页内核作主播放器时 GStreamer 已让出 P2P，原本由 GStreamer 的
+        //   onFirstFrameReceived 发的 VIEWER_CONNECTED 不会触发 → iOS 收不到「PC 已连接」反馈。
+        //   这里在内核 P2P 首次连上时补发同一信令（与 GStreamer 端口径完全一致），
+        //   让 iOS 端照常显示「PC 端已连接」。只发一次，避免 connected/completed 反复触发重复发。
+        if (mode === 'p2p' && bridge && cfg && cfg._iosDev && !everConnected) {
+          try {
+            bridge.sendSignal('VIEWER_CONNECTED', cfg._iosDev, '', '', '', '', 0);
+            logC('已通知 iOS：VIEWER_CONNECTED（PC 端已连接）');
+          } catch(e) { logC('发送 VIEWER_CONNECTED 失败: ' + e); }
+        }
+        everConnected = true;
+        reconnectAttempts = 0;   // 连上了，重连计数清零
+      }
+      if (st === 'failed' || st === 'disconnected') {
+        scheduleReconnect();
+      }
+    };
+  }
+
+  // ============ 自动重连（带退出/放弃判断，避免 iOS 退了还傻乎乎无限重连）============
+  function scheduleReconnect() {
+    // ⭐ 对端主动退出/挂断 → 绝不重连
+    if (peerStopped) { logC('对端已退出，跳过重连'); return; }
+    if (reconnecting || reconnectTimer) return;
+
+    // ⭐ 从没连上过（iOS 不在线/没回 Offer）→ 有限次后放弃，不无限重连
+    if (!everConnected) {
+      reconnectAttempts++;
+      if (reconnectAttempts > MAX_RECONNECT_BEFORE_CONNECTED) {
+        logC('从未连上且已重试 ' + (reconnectAttempts-1) + ' 次 → 放弃（iOS 可能不在线/未推流）');
+        statsEl.innerHTML = '<span class="warn">连接失败</span>\niOS 可能不在线或未推流\n（关闭后重开测试）';
+        return;
+      }
+    }
+
+    reconnecting = true;
+    const tag = everConnected ? '网络中断' : ('iOS 未响应(第' + reconnectAttempts + '次)');
+    logC(tag + ' → 3 秒后自动重连');
+    statsEl.textContent = tag + '，自动重连中…';
+    reconnectTimer = setTimeout(async () => {
+      reconnectTimer = null;
+      if (peerStopped) { reconnecting = false; return; }
+      try {
+        if (mode === 'p2p') {
+          await rebuildPC();
+          bridge.sendSignal('WEBRTC_REQUEST', cfg._iosDev, '', '', '', '', 0);
+          logC('重连：已重发 WEBRTC_REQUEST');
+        } else {
+          await startSRS();
+        }
+      } catch(e) { logC('重连失败: ' + e); }
+      reconnecting = false;
+    }, 3000);
+  }
+
+  // ============ 统计 + 卡顿检测 ============
+  function startStats() {
+    lastBytes=0; lastTs=0; lastFrames=0; lastFrameTs=0; lastDecoded=0; stallSeconds=0;
+    if (statsTimer) clearInterval(statsTimer);
+    statsTimer = setInterval(async () => {
+      if (!pc) return;
+      try {
+        const stats = await pc.getStats();
+        let inbound = null;
+        stats.forEach(r => { if (r.type==='inbound-rtp' && r.kind==='video') inbound = r; });
+        if (!inbound) { statsEl.textContent = '等待视频流…'; return; }
+        const now = inbound.timestamp;
+        let kbps = (lastTs>0 && inbound.bytesReceived!=null) ? Math.round((inbound.bytesReceived-lastBytes)*8/(now-lastTs)) : 0;
+        lastBytes = inbound.bytesReceived||0; lastTs = now;
+        let fps = (lastFrameTs>0 && inbound.framesDecoded!=null) ? Math.round((inbound.framesDecoded-lastFrames)*1000/(now-lastFrameTs)) : 0;
+        lastFrames = inbound.framesDecoded||0; lastFrameTs = now;
+
+        // ⭐ 上报帧率给 C++（内核作主播放器时，QML 据此发 VIEWER_HEARTBEAT，让 iOS 显示「PC 已连接」）。
+        //   fps>0 即代表画面在播；P2P/SRS 都报，QML 侧只在内核模式采用。
+        if (bridge && bridge.notifyViewerFps) { try { bridge.notifyViewerFps(fps); } catch(_){} }
+
+        // 卡顿检测：解码帧数 1 秒没涨 = 画面卡住（双缓冲耗尽）
+        const dec = inbound.framesDecoded||0;
+        if (dec === lastDecoded) { stallSeconds++; } else { stallSeconds = 0; }
+        lastDecoded = dec;
+
+        const w = inbound.frameWidth||0, h = inbound.frameHeight||0;
+        const lost = inbound.packetsLost||0, nack = inbound.nackCount||0, pli = inbound.pliCount||0;
+        const jb = (inbound.jitterBufferDelay!=null && inbound.jitterBufferEmittedCount) ? Math.round(inbound.jitterBufferDelay/inbound.jitterBufferEmittedCount*1000) : 0;
+        const freeze = inbound.freezeCount!=null ? inbound.freezeCount : '-';
+        const stallTxt = stallSeconds>=2 ? ('<span class="warn">画面卡住 '+stallSeconds+'s</span>') : ('<span class="k">流畅</span>');
+
+        statsEl.innerHTML =
+          '<span class="k">内核</span>: Chromium · ' + mode.toUpperCase() + '\n' +
+          '<span class="k">分辨率</span>: ' + w + 'x' + h + '\n' +
+          '<span class="k">解码FPS</span>: ' + fps + '\n' +
+          '<span class="k">码率</span>: ' + kbps + ' kbps\n' +
+          '<span class="' + (lost>0?'warn':'k') + '">丢包</span>: ' + lost + '　<span class="k">NACK</span>: ' + nack + ' <span class="k">PLI</span>: ' + pli + '\n' +
+          '<span class="k">抖动缓冲</span>: ' + jb + ' ms (内核自适应)\n' +
+          '<span class="k">卡顿次数</span>: ' + freeze + '　状态: ' + stallTxt;
+
+        // 卡住超过 2 秒 → 主动重连兜底
+        if (stallSeconds >= 5) { logC('画面卡住≥5s → 触发重连'); scheduleReconnect(); }
+      } catch(e) { statsEl.textContent = 'getStats 异常: ' + e; }
+    }, 1000);
+  }
+</script>
+</body>
+</html>

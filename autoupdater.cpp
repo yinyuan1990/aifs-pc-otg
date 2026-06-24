@@ -46,7 +46,7 @@ AutoUpdater* AutoUpdater::instance()
 AutoUpdater::AutoUpdater(QObject *parent)
     : QObject(parent)
     , m_networkManager(new QNetworkAccessManager(this))
-    , m_currentVersion("6.0.7")  // 当前版本号，每次发布时更新
+    , m_currentVersion("7.0.0")  // 当前版本号，每次发布时更新
 {
     // 从设置中读取跳过的版本
     QSettings settings;

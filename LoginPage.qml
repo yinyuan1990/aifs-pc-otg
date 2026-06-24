@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import QtCore
 import Aifs.Components 1.0
 
 // 登录/注册卡片
@@ -13,6 +14,15 @@ Rectangle {
     clip: true
     
     signal loginSuccess(string server)
+
+    // ⭐ 播放内核选择持久化（2026-06-24）：
+    //   登录页选「GStreamer / 网页内核」，默认 gstreamer，记住上次选择。
+    //   MainPage 读取此值决定主播放器走 GStreamer 还是 Chromium WebEngine。
+    //   用 QtCore.Settings，与 MainPage 的 appSettings 同 app 域（Acard/Phoenix），零 C++ 改动。
+    Settings {
+        id: kernelSettings
+        property string playbackKernel: "gstreamer"  // "gstreamer" | "webengine"
+    }
     
     // 当前视图：login / register
     property string currentView: "login"
@@ -537,7 +547,11 @@ Rectangle {
                                 
                                 MouseArea {
                                     id: usernameItemArea
+                                    // ⭐ 不覆盖右侧「✕」删除按钮：留出删除按钮宽度+左右间距的右边距，
+                                    //    否则整行 MouseArea 盖在 ✕ 上 → 点 ✕ 变成「切换账号」而非「清本地记录」。
+                                    //    ✕ 只调本地 HttpClient.removeAccount（不调 delete 接口、不切账号）。
                                     anchors.fill: parent
+                                    anchors.rightMargin: deleteUsernameBtn.width + 16
                                     hoverEnabled: true
                                     cursorShape: Qt.PointingHandCursor
                                     // 点击整行选择账号，但排除删除按钮区域
@@ -692,6 +706,83 @@ Rectangle {
                         anchors.fill: parent
                         cursorShape: Qt.PointingHandCursor
                         onClicked: loginPage.rememberPassword = !loginPage.rememberPassword
+                    }
+                }
+
+                // ⭐ 播放内核选择（2026-06-24）：GStreamer / 网页内核，默认上次选择
+                Item {
+                    Layout.fillWidth: true
+                    height: 52
+
+                    Column {
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.verticalCenter: parent.verticalCenter
+                        spacing: 6
+
+                        Text {
+                            text: "播放内核"
+                            font.family: "PingFang HK"
+                            font.pixelSize: 13
+                            color: "#B0B0B0"
+                        }
+
+                        Row {
+                            width: parent.width
+                            height: 30
+                            spacing: 0
+
+                            // GStreamer（默认/推荐）
+                            Rectangle {
+                                id: kernelGstBtn
+                                width: parent.width / 2
+                                height: 30
+                                radius: 6
+                                // 只圆左侧，和右侧拼成分段控件
+                                color: kernelSettings.playbackKernel === "gstreamer" ? "#3993D2" : "#2a2a2a"
+                                border.color: kernelSettings.playbackKernel === "gstreamer" ? "#3993D2" : "#4a4a4a"
+                                border.width: 1.4
+
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: "GStreamer"
+                                    font.family: "PingFang HK"
+                                    font.pixelSize: 13
+                                    color: kernelSettings.playbackKernel === "gstreamer" ? "#FFFFFF" : "#B0B0B0"
+                                }
+
+                                MouseArea {
+                                    anchors.fill: parent
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: kernelSettings.playbackKernel = "gstreamer"
+                                }
+                            }
+
+                            // 网页内核（Chromium WebEngine）
+                            Rectangle {
+                                id: kernelWebBtn
+                                width: parent.width / 2
+                                height: 30
+                                radius: 6
+                                color: kernelSettings.playbackKernel === "webengine" ? "#3993D2" : "#2a2a2a"
+                                border.color: kernelSettings.playbackKernel === "webengine" ? "#3993D2" : "#4a4a4a"
+                                border.width: 1.4
+
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: "网页内核"
+                                    font.family: "PingFang HK"
+                                    font.pixelSize: 13
+                                    color: kernelSettings.playbackKernel === "webengine" ? "#FFFFFF" : "#B0B0B0"
+                                }
+
+                                MouseArea {
+                                    anchors.fill: parent
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: kernelSettings.playbackKernel = "webengine"
+                                }
+                            }
+                        }
                     }
                 }
 

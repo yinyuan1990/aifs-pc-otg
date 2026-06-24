@@ -5,6 +5,7 @@
 #include <QVideoSink>
 #include <QVideoFrame>
 #include <QMutex>
+#include <QRecursiveMutex>
 #include <QThread>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
@@ -14,6 +15,7 @@
 #include <QSet>
 #include <QHash>
 #include "naluframestore.h"
+#include "gstsrtsource.h"   // MARK: SRT (independent)
 #include <gst/gst.h>
 #include <gst/app/gstappsrc.h>
 #include <gst/app/gstappsink.h>
@@ -104,6 +106,30 @@ public:
     Q_INVOKABLE void disconnectP2P();
     Q_INVOKABLE void handleWebRTCSignaling(const QJsonObject &message);
     Q_INVOKABLE bool isP2PMode() const { return m_useP2P; }
+
+    // ⭐ 内核测试模式：内核（Chromium）独占 P2P 时，GStreamer 必须彻底退场——
+    //   不拉流、不渲染、不处理任何 WebRTC 信令、且任何自动重连/重启 P2P 都被拦截，
+    //   否则两端都向同一 username 抢 iOS 会话，导致内核侧出不来画面。
+    Q_INVOKABLE void setKernelTestMode(bool on);
+    Q_INVOKABLE bool isKernelTestMode() const { return m_kernelTestMode.load(); }
+
+    // MARK: SRT (independent) —— 方案 B：PC 端独立 SRT 拉流（GStreamer srtsrc，与 WebRTC/P2P 解耦）
+    Q_INVOKABLE void connectSRT(const QString &uri);
+    Q_INVOKABLE void disconnectSRT();
+    // ⭐ 供 QML 在确定 SRT 模式时尽早调用，提前预热解码器/编码器（消除首屏卡 3.3s）。进程级只跑一次。
+    Q_INVOKABLE void warmupSRT() { warmupDecoderEncoderAsync(); }
+private:
+    // SRT 专用：真正的 pipeline 创建+启动（重活），由 connectSRT 异步触发，避免冻结 GUI 首屏。
+    void doConnectSRTPipeline();
+    // 标记本次 SRT 连接会话，异步触发时校验是否已被新的连接/断开取代。
+    std::atomic<int> m_srtConnectEpoch{0};
+    // ⭐ 解码器/编码器预热（治「首屏卡 3.3s」）：在后台线程提前初始化 NVIDIA CUDA 解码器
+    //   + MediaFoundation 截图编码器，使后续真正 createPipeline 走热路径。进程级只跑一次。
+    //   预热是「全局」的硬件初始化，对 SRS/P2P 同样有利，但不改它们任何代码路径。
+    void warmupDecoderEncoderAsync();
+    std::atomic<bool> m_warmupStarted{false};
+public:
+    Q_INVOKABLE bool isSRTMode() const { return m_useSRT; }
     
     // QML 兼容（JPEG 管线已移除，保留空方法避免 QML 报错）
     Q_INVOKABLE void clearJpegFiles() {}
@@ -183,6 +209,10 @@ private:
     void addP2PIceServers(const QJsonArray &iceServers);
     void scheduleP2PViewRequestRetry();
     void stopP2PViewRequestRetry(const QString &reason = QString());
+    // ICE 断线/失败（如 iOS 切网换 WiFi）后，P2P 主动重连：重发 WEBRTC_REQUEST 让 iOS 重新发 Offer
+    void attemptP2PIceReconnect(const QString &reason);
+    // P2P 诊断：返回本地/远端候选者按类型(host/srflx/relay/other)的汇总字符串，供 p2p_diag.txt 在关键节点打印
+    QString p2pCandSummary() const;
     
     // GStreamer 回调
     static GstFlowReturn onNewSample(GstAppSink *sink, gpointer userData);
@@ -208,6 +238,7 @@ private:
     GstElement *m_pipeline = nullptr;
     GstElement *m_appsrc = nullptr;       // 保留用于兼容模式
     GstElement *m_webrtcbin = nullptr;    // ⭐ WebRTCBin 元素
+    GstElement *m_rtpJitterBuffer = nullptr; // ⭐ webrtcbin 内部 rtpjitterbuffer（NACK/重传 stats 读取，仅诊断用，不持引用所有权）
     GstElement *m_rtph264depay = nullptr; // ⭐ RTP H264 解包
     GstElement *m_h264parse = nullptr;
     GstElement *m_naluTee = nullptr;      // NALU 存储 tee（与直播主路径分离）
@@ -286,11 +317,28 @@ private:
     bool m_transceiverAdded = false;  // 防止重复添加 transceiver
     bool m_useWebRTC = false;  // 是否使用 WebRTC 模式
     bool m_useP2P = false;     // P2P 直连模式
+    std::atomic<bool> m_kernelTestMode{false};   // 内核测试模式：GStreamer 完全让出 P2P
     QString m_pairedIosDeviceId;  // 配对的 iOS 设备 ID
+
+    // ⭐ P2P 独立诊断：ICE 候选者按类型计数（索引：0=host 1=srflx 2=relay 3=other）
+    //   relay 计数=0 是「手机连手机热点出不来」的核心判据（CGNAT/对称 NAT 必须走 TURN relay）。
+    //   仅 P2P 路径读写，对 SRS/SRT 无影响。
+    std::atomic<int> m_p2pLocalCand[4]{};   // 本地（PC）收集到的候选者
+    std::atomic<int> m_p2pRemoteCand[4]{};  // 远端（iOS）发来的候选者
+
+    // MARK: SRT (independent) —— 方案 B：PC 端独立 SRT 拉流（与 WebRTC/P2P 互斥，只走一条）
+    bool m_useSRT = false;        // 是否使用 SRT 拉流模式
+    QString m_srtUri;             // SRT 完整地址（srt://ip:port?streamid=...）
+    GstSrtSource m_srtSource;     // SRT 前段（srtsrc→tsdemux），元素创建/链接/销毁封装在独立文件
+    gulong m_srtParseProbeId = 0; // SRT 专用：h264parse src 统计 probe（与 WebRTC 的 m_depayProbeId 解耦）
+    bool m_srtInitialCropDone = false; // SRT 专用：首帧 gop_cache 历史帧是否已裁过一次
     bool m_p2pConnected = false;  // P2P ICE 连接是否已建立
     int m_iceRetryCount = 0;      // ICE 失败重试计数
     std::atomic<bool> m_waitingForP2POffer{false};  // 等待 iOS Offer
     std::atomic<int> m_p2pViewRequestRetryCount{0}; // WEBRTC_REQUEST 重发次数
+    // ICE 断线主动重连：epoch 让“DISCONNECTED 延迟检查”在期间状态已恢复时自动失效
+    std::atomic<int> m_iceReconnectEpoch{0};
+    bool m_iceReconnecting = false;                 // 是否正在主动重连（防重复触发）
     static constexpr int P2P_VIEW_REQUEST_RETRY_MAX = 5;
     static constexpr int P2P_VIEW_REQUEST_RETRY_INTERVAL_MS = 1500;
     std::atomic<bool> m_offerInProgress{false};  // 防止重复创建 Offer
@@ -524,7 +572,10 @@ private:
     void checkPushFpsControl(double waterLevel); // ⭐⭐⭐ 第二道防线：推流帧率控制
     
     
-    QMutex m_mutex;
+    // ⚠️ 必须是递归锁：createPipeline() 持有本锁后会内部调用 destroyPipeline()，
+    //   而 destroyPipeline() 同样要锁本锁。普通 QMutex 不可重入 → 二次加锁直接死锁
+    //   （表现为「链路来回切换多了，主线程卡死、UI 拖不动」）。改用 QRecursiveMutex 彻底消除。
+    QRecursiveMutex m_mutex;
 
     static constexpr int H264_FRAME_KEEP_COUNT = 3000;
     static constexpr int H264_CLEANUP_INTERVAL = 600;
