@@ -34,6 +34,7 @@
 #ifdef HAVE_WEBENGINE
 #include <QtWebEngineQuick/QtWebEngineQuick>
 #include "kernelbridge.h"
+#include "webframesource.h"   // ⭐ 网页内核截图/慢放帧源
 #endif
 
 // GStreamer
@@ -542,6 +543,13 @@ int main(int argc, char *argv[])
     //   不设则 JS 的 channel.objects.kernelBridge 取不到（即使 transport 已注入）。
     kernelBridge->setObjectName("kernelBridge");
     engine.rootContext()->setContextProperty("kernelBridge", kernelBridge);
+
+    // ⭐ 网页内核作主播放器时的截图/慢放帧源（JS 经 kernelBridge 回传 JPEG 落盘）。
+    //   app 级单例：模式切换时 QML 调 captureManager/slowMotionPlayer.setFrameSourceObject(webFrameSource)。
+    WebFrameSource *webFrameSource = new WebFrameSource(&app);
+    webFrameSource->setObjectName("webFrameSource");
+    kernelBridge->setWebFrameSource(webFrameSource);
+    engine.rootContext()->setContextProperty("webFrameSource", webFrameSource);
 #endif
     
     // 连接 QML 的 Qt.quit() 到应用退出

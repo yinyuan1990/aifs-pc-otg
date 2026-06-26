@@ -2,6 +2,7 @@
 #include "gpupipeline.h"
 #include "imageprovider.h"
 #include "slowmotionplayer.h"
+#include "webframesource.h"
 #include "capturedebuglog.h"
 #include <QtConcurrent>
 #include <QStandardPaths>
@@ -778,22 +779,42 @@ void CaptureManager::setGpuPipeline(GpuPipeline *pipeline)
 
 void CaptureManager::setGstPlayer(GstPlayer *player)
 {
-    if (m_gstPlayer != player) {
-        if (m_gstPlayer) {
-            disconnect(m_gstPlayer, &GstPlayer::h264FrameStored,
-                       this, &CaptureManager::onFrameEncoded);
-        }
+    // QML 默认绑定走这里（GStreamer 帧源）；统一委托给 setFrameSource。
+    setFrameSource(player);
+}
 
-        m_gstPlayer = player;
+void CaptureManager::setFrameSource(IFrameSource *source)
+{
+    if (m_frameSource == source) return;
 
-        if (m_gstPlayer) {
-            connect(m_gstPlayer, &GstPlayer::h264FrameStored,
-                    this, &CaptureManager::onFrameEncoded, Qt::QueuedConnection);
-        }
-        qDebug() << "CaptureManager: H.264 frame file source ready";
-
-        emit gstPlayerChanged();
+    // ⭐ 信号统一用 SIGNAL/SLOT 宏经 asQObject() 连接：GstPlayer 与 WebFrameSource
+    //   都声明同名信号 h264FrameStored(qint64)，接口层无需知道具体类型。
+    if (m_frameSource) {
+        disconnect(m_frameSource->asQObject(), SIGNAL(h264FrameStored(qint64)),
+                   this, SLOT(onFrameEncoded(qint64)));
     }
+
+    m_frameSource = source;
+
+    if (m_frameSource) {
+        connect(m_frameSource->asQObject(), SIGNAL(h264FrameStored(qint64)),
+                this, SLOT(onFrameEncoded(qint64)), Qt::QueuedConnection);
+    }
+    qDebug() << "CaptureManager: frame source ready, format="
+             << (m_frameSource && m_frameSource->frameFormat() == IFrameSource::FrameFormat::JPEG ? "JPEG" : "H264");
+
+    emit gstPlayerChanged();
+}
+
+void CaptureManager::setFrameSourceObject(QObject *source)
+{
+    IFrameSource *fs = nullptr;
+    if (GstPlayer *gst = qobject_cast<GstPlayer*>(source)) {
+        fs = gst;
+    } else if (WebFrameSource *web = qobject_cast<WebFrameSource*>(source)) {
+        fs = web;
+    }
+    setFrameSource(fs);
 }
 
 void CaptureManager::onFrameReceived(const QImage &frame, qint64 frameIndex)
@@ -842,10 +863,10 @@ void CaptureManager::capture()
     qDebug() << "📷 Capture: slowMotionActive=" << m_slowMotionActive
              << ", slowMotionPlayer=" << (m_slowMotionPlayer ? "有效" : "NULL");
 
-    if (m_gstPlayer) {
-        qDebug() << "📷 Capture: h264Frame newest=" << m_gstPlayer->newestH264Frame()
-                 << ", oldest=" << m_gstPlayer->oldestH264Frame()
-                 << ", dir=" << m_gstPlayer->h264FrameDirectory();
+    if (m_frameSource) {
+        qDebug() << "📷 Capture: frame newest=" << m_frameSource->newestH264Frame()
+                 << ", oldest=" << m_frameSource->oldestH264Frame()
+                 << ", dir=" << m_frameSource->h264FrameDirectory();
     }
     
     // 根据慢放模式选择事件帧来源
@@ -858,10 +879,10 @@ void CaptureManager::capture()
                  << "recordedFrames=" << m_slowMotionPlayer->recordedFrames();
     } else {
         // 实时流模式：从独立 H.264 帧文件索引获取最新帧
-        if (m_gstPlayer) {
-            qint64 newestIdx = m_gstPlayer->newestH264Frame();
-            int queueDepth = m_gstPlayer->bufferSize();
-            qint64 oldestIdx = m_gstPlayer->oldestH264Frame();
+        if (m_frameSource) {
+            qint64 newestIdx = m_frameSource->newestH264Frame();
+            int queueDepth = m_frameSource->bufferSize();
+            qint64 oldestIdx = m_frameSource->oldestH264Frame();
             if (newestIdx < 0 || oldestIdx < 0) {
                 eventIndex = -1;
             } else {
@@ -882,8 +903,8 @@ void CaptureManager::capture()
         return;
     }
 
-    if (m_gstPlayer) {
-        m_gstPlayer->requestKeyFrame();
+    if (m_frameSource) {
+        m_frameSource->requestKeyFrame();
         captureDebugLog("CAP", "requestKeyFrame before capture");
     }
     
@@ -915,8 +936,8 @@ void CaptureManager::capture()
         } else {
             qDebug() << "📷 Capture (SlowMotion): followLive，endIndex=" << endIndex << "(不压到慢放 endIndex)";
         }
-    } else if (m_gstPlayer) {
-        oldestAvailable = m_gstPlayer->oldestH264Frame();
+    } else if (m_frameSource) {
+        oldestAvailable = m_frameSource->oldestH264Frame();
         startIndex = qMax(startIndex, oldestAvailable);
     } else if (m_gpuPipeline) {
         oldestAvailable = m_gpuPipeline->oldestFrame();
@@ -936,13 +957,13 @@ void CaptureManager::capture()
 
     item.naluDir.clear();
     item.savedFrameCount = item.totalFrames();
-    if (m_gstPlayer) {
-        item.h264ValidRangeId = m_gstPlayer->registerH264ValidRange(startIndex, endIndex);
+    if (m_frameSource) {
+        item.h264ValidRangeId = m_frameSource->registerH264ValidRange(startIndex, endIndex);
     }
 
     // 直接抓取当前直播画面（仅用于抓拍缩略/首屏兜底，不作为目标帧解码 fallback）
-    if (m_gstPlayer) {
-        item.liveSnapshot = m_gstPlayer->grabCurrentFrame();
+    if (m_frameSource) {
+        item.liveSnapshot = m_frameSource->grabCurrentFrame();
     }
     if (!item.liveSnapshot.isNull() && m_videoRotation != 0) {
         QTransform transform;
@@ -955,7 +976,7 @@ void CaptureManager::capture()
 
     qDebug() << "Capture: item" << item.id
              << "range:" << startIndex << "-" << endIndex
-             << "source:" << (m_gstPlayer ? m_gstPlayer->h264FrameDirectory() : QString())
+             << "source:" << (m_frameSource ? m_frameSource->h264FrameDirectory() : QString())
              << "frames:" << item.totalFrames();
 
     emit countChanged();
@@ -1027,11 +1048,11 @@ QImage CaptureManager::decodeFromDisk(int itemIndex, int frameOffset)
     }
 
     if (m_clearGeneration.load(std::memory_order_acquire) != gen) return QImage();
-    if (!m_gstPlayer) return QImage();
+    if (!m_frameSource) return QImage();
 
-    QByteArray data = m_gstPlayer->readH264Frame(globalIndex);
+    QByteArray data = m_frameSource->readH264Frame(globalIndex);
     if (data.isEmpty()) {
-        captureDebugLog("CAP", QString("decodeFromDisk H264 file MISSING item=%1 frame=%2 global=%3")
+        captureDebugLog("CAP", QString("decodeFromDisk file MISSING item=%1 frame=%2 global=%3")
             .arg(itemIndex).arg(frameOffset).arg(globalIndex));
         return QImage();
     }
@@ -1040,21 +1061,31 @@ QImage CaptureManager::decodeFromDisk(int itemIndex, int frameOffset)
 
     if (m_clearGeneration.load(std::memory_order_acquire) != gen) return QImage();
 
-    ItemDecodeState &state = m_itemDecoders[itemIndex];
-    if (!state.decoder) {
-        state.decoder = new GstCaptureDecoder();
-        captureDebugLog("CAP", QString("decodeFromDisk create decoder item=%1").arg(itemIndex));
-    }
+    QImage result;
+    // ⭐ 按帧源格式分支：网页内核(JPEG)直接 QImage 解，GStreamer(H264) 走软解码器。
+    if (m_frameSource->frameFormat() == IFrameSource::FrameFormat::JPEG) {
+        if (!result.loadFromData(data, "JPEG")) {
+            captureDebugLog("CAP", QString("decodeFromDisk JPEG FAIL item=%1 frame=%2 global=%3 bytes=%4")
+                .arg(itemIndex).arg(frameOffset).arg(globalIndex).arg(data.size()));
+            return QImage();
+        }
+    } else {
+        ItemDecodeState &state = m_itemDecoders[itemIndex];
+        if (!state.decoder) {
+            state.decoder = new GstCaptureDecoder();
+            captureDebugLog("CAP", QString("decodeFromDisk create decoder item=%1").arg(itemIndex));
+        }
 
-    state.decoder->flush();
-    QImage result = state.decoder->decodeNalu(data);
-    if (result.isNull()) {
-        captureDebugLog("CAP", QString("decodeFromDisk H264 FAIL item=%1 frame=%2 global=%3 %4")
-            .arg(itemIndex).arg(frameOffset).arg(globalIndex).arg(captureDebugNaluPreview(data)));
-        state.lastOffset = -1;
-        return QImage();
+        state.decoder->flush();
+        result = state.decoder->decodeNalu(data);
+        if (result.isNull()) {
+            captureDebugLog("CAP", QString("decodeFromDisk H264 FAIL item=%1 frame=%2 global=%3 %4")
+                .arg(itemIndex).arg(frameOffset).arg(globalIndex).arg(captureDebugNaluPreview(data)));
+            state.lastOffset = -1;
+            return QImage();
+        }
+        state.lastOffset = frameOffset;
     }
-    state.lastOffset = frameOffset;
 
     if (m_videoRotation != 0) {
         QTransform t;
@@ -1116,7 +1147,7 @@ void CaptureManager::clearAll()
     emit countChanged();
     setCurrentItemIndex(-1);
 
-    GstPlayer *player = m_gstPlayer;
+    IFrameSource *player = m_frameSource;
     for (int rangeId : rangesToRelease) {
         if (player) player->unregisterH264ValidRange(rangeId);
     }
@@ -1172,8 +1203,8 @@ void CaptureManager::removeItem(int index)
     emit itemRemoved(index);
     emit countChanged();
 
-    if (rangeToRelease >= 0 && m_gstPlayer) {
-        m_gstPlayer->unregisterH264ValidRange(rangeToRelease);
+    if (rangeToRelease >= 0 && m_frameSource) {
+        m_frameSource->unregisterH264ValidRange(rangeToRelease);
     }
 
     if (!dirToDelete.isEmpty()) {
@@ -1494,8 +1525,8 @@ void CaptureManager::setSlowMotionPlayer(SlowMotionPlayer* player)
 
 qint64 CaptureManager::currentFrameIndex() const
 {
-    if (m_gstPlayer) {
-        return m_gstPlayer->newestH264Frame();
+    if (m_frameSource) {
+        return m_frameSource->newestH264Frame();
     }
     if (m_gpuPipeline) {
         return m_gpuPipeline->newestFrame();
@@ -1664,9 +1695,10 @@ void CaptureManager::zoomLog(const QString &msg)
 
 void CaptureManager::syncColorToJpegEncoder()
 {
-    // 同步颜色参数到 GStreamer（使用 videobalance 和 gamma，不再使用 shader）
-    if (m_gstPlayer) {
-        m_gstPlayer->setAllImageParams(m_brightness, m_contrast, m_saturation, m_hue, m_gamma);
+    // 同步颜色参数到 GStreamer（使用 videobalance 和 gamma，不再使用 shader）。
+    // ⭐ 仅 GStreamer 帧源有此能力；网页内核帧源(WebFrameSource)无 GStreamer 管线，跳过。
+    if (GstPlayer *gst = qobject_cast<GstPlayer*>(m_frameSource ? m_frameSource->asQObject() : nullptr)) {
+        gst->setAllImageParams(m_brightness, m_contrast, m_saturation, m_hue, m_gamma);
     }
     // 保留 GpuPipeline 的调用（如果存在）用于兼容
     if (m_gpuPipeline) {

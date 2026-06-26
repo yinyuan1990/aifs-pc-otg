@@ -745,7 +745,7 @@ Rectangle {
 
                                 Text {
                                     anchors.centerIn: parent
-                                    text: "GStreamer"
+                                    text: "高配电脑"
                                     font.family: "PingFang HK"
                                     font.pixelSize: 13
                                     color: kernelSettings.playbackKernel === "gstreamer" ? "#FFFFFF" : "#B0B0B0"
@@ -770,7 +770,7 @@ Rectangle {
 
                                 Text {
                                     anchors.centerIn: parent
-                                    text: "网页内核"
+                                    text: "低端电脑"
                                     font.family: "PingFang HK"
                                     font.pixelSize: 13
                                     color: kernelSettings.playbackKernel === "webengine" ? "#FFFFFF" : "#B0B0B0"

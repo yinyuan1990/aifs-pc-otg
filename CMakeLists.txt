@@ -86,6 +86,9 @@ qt_add_executable(Phoenix
     capturedebuglog.h
     gstplayer.cpp        # GStreamer 实时流 + NALU 存储
     gstplayer.h
+    iframesource.h       # ⭐ 帧源抽象接口（截图/慢放数据源解耦：GStreamer / 网页内核）
+    webframesource.cpp   # ⭐ 网页内核帧源（JS 回传 JPEG → 落盘，供截图/慢放复用）
+    webframesource.h
     gstsrtsource.cpp     # MARK: SRT (independent) 方案B PC端独立 SRT 拉流前段
     gstsrtsource.h
     httpclient.cpp

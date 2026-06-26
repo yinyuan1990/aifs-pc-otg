@@ -16,6 +16,7 @@
 #include <atomic>
 #include "gpupipeline.h"
 #include "gstplayer.h"
+#include "iframesource.h"   // ⭐ 帧源抽象（GStreamer / 网页内核 二选一注入）
 #include "gstcapturedecoder.h"
 #include "naluframestore.h"
 #include "carddetector.h"
@@ -349,9 +350,18 @@ public:
     GpuPipeline* gpuPipeline() const { return m_gpuPipeline; }
     void setGpuPipeline(GpuPipeline* pipeline);
     
-    // GstPlayer 访问（JPEG 读取）
-    GstPlayer* gstPlayer() const { return m_gstPlayer; }
+    // GstPlayer 访问（QML 默认绑定 GStreamer 帧源）
+    GstPlayer* gstPlayer() const { return qobject_cast<GstPlayer*>(m_frameSource ? m_frameSource->asQObject() : nullptr); }
     void setGstPlayer(GstPlayer* player);
+
+    // ⭐ 帧源注入（截图数据源）：GStreamer 模式注入 GstPlayer，网页内核模式注入 WebFrameSource。
+    //   两者都实现 IFrameSource，截图逻辑只认接口，UI 完全复用。
+    void setFrameSource(IFrameSource* source);
+    IFrameSource* frameSource() const { return m_frameSource; }
+
+    // ⭐ 供 QML 调用的帧源切换（QML 传 QObject*：GstPlayer 或 WebFrameSource 的 context property）。
+    //   内部 qobject_cast 到具体类型再取 IFrameSource* 注入。nullptr 时清空帧源。
+    Q_INVOKABLE void setFrameSourceObject(QObject* source);
 
     // ── AI 牌位置识别放大 ────────────────────────────────────
     bool aiCardZoomEnabled() const { return m_aiCardZoomEnabled; }
@@ -414,7 +424,7 @@ private:
     };
     QHash<int, ItemDecodeState> m_itemDecoders;
     GpuPipeline *m_gpuPipeline = nullptr;  // GPU 管道（颜色调整）
-    GstPlayer *m_gstPlayer = nullptr;      // GStreamer 播放器（NALU 帧存储）
+    IFrameSource *m_frameSource = nullptr; // 帧源（GstPlayer 或 WebFrameSource）
     NaluDiskWriter *m_diskWriter = nullptr; // NALU 后台落盘线程
     QVector<CaptureItem> m_items;
     QList<PendingCapture> m_pendingCaptures;

@@ -13,6 +13,7 @@
 #include <QQueue>
 #include <QWaitCondition>
 #include <atomic>
+#include "iframesource.h"   // ⭐ 帧源抽象（GStreamer / 网页内核 二选一注入）
 
 class GpuPipeline;
 class GstPlayer;
@@ -22,7 +23,7 @@ class SlowMotionDecodeThread : public QThread
 {
     Q_OBJECT
 public:
-    explicit SlowMotionDecodeThread(GstPlayer *player, QObject *parent = nullptr);
+    explicit SlowMotionDecodeThread(IFrameSource *player, QObject *parent = nullptr);
     ~SlowMotionDecodeThread();
 
     void requestDecode(qint64 globalFrameIndex, int frameOffset, bool scale = false);
@@ -35,7 +36,7 @@ protected:
     void run() override;
 
 private:
-    GstPlayer *m_player;
+    IFrameSource *m_player;
     GstCaptureDecoder *m_decoder = nullptr;
     std::atomic<bool> m_running{true};
     QMutex m_queueMutex;
@@ -116,7 +117,7 @@ public:
     bool followLive() const { return m_followLive; }
     
     GpuPipeline* gpuPipeline() const { return m_gpuPipeline; }
-    GstPlayer* gstPlayer() const { return m_gstPlayer; }
+    GstPlayer* gstPlayer() const;   // QML 默认绑定（GStreamer 帧源）
     QVideoSink* videoSink() const { return m_videoSink; }
     
     // 设置
@@ -127,6 +128,12 @@ public:
     void setMaxFrameRate(int fps);
     void setGpuPipeline(GpuPipeline* pipeline);
     void setGstPlayer(GstPlayer* player);
+    // ⭐ 帧源注入：GStreamer 模式注入 GstPlayer，网页内核模式注入 WebFrameSource。
+    void setFrameSource(IFrameSource* source);
+    IFrameSource* frameSource() const { return m_gstPlayer; }
+
+    // ⭐ 供 QML 调用的帧源切换（QML 传 QObject*：GstPlayer 或 WebFrameSource）。
+    Q_INVOKABLE void setFrameSourceObject(QObject* source);
 
     // 控制
     Q_INVOKABLE void startRecording();   // 开启慢放（进入RECORDING状态）
@@ -186,7 +193,7 @@ private:
 
 private:
     GpuPipeline *m_gpuPipeline = nullptr;
-    GstPlayer *m_gstPlayer = nullptr;
+    IFrameSource *m_gstPlayer = nullptr;   // 帧源（GstPlayer 或 WebFrameSource），保留旧名减少改动面
     QVideoSink *m_videoSink = nullptr;
     
     State m_state = IDLE;

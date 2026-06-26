@@ -423,15 +423,18 @@ ApplicationWindow {
             // 先切换状态（这样 minimumWidth/Height 的绑定会生效）
             isLoggedIn = false
             
-            // 恢复登录页窗口尺寸（与初始值完全一致：600 x 502）
+            // ⭐ 恢复登录页窗口尺寸（必须与首次启动初始值完全一致：600 x 590）。
+            //   2026-06-24：登录页加了「播放内核」分段选择后初始高度从 502 提到 590，
+            //   此处退出登录路径之前漏改、还写 502，导致退出后窗口比首次启动矮 88px，
+            //   豪华版/至尊版/注册按钮被挤出可视区。统一改 590。
             mainWindow.minimumWidth = 600
-            mainWindow.minimumHeight = 502
+            mainWindow.minimumHeight = 590
             mainWindow.maximumWidth = 600
-            mainWindow.maximumHeight = 502
+            mainWindow.maximumHeight = 590
             mainWindow.width = 600
-            mainWindow.height = 502
+            mainWindow.height = 590
             mainWindow.x = (Screen.width - 600) / 2
-            mainWindow.y = (Screen.height - 502) / 2
+            mainWindow.y = (Screen.height - 590) / 2
             mainWindow.color = "transparent"
             
             // 延迟一帧后解除最大尺寸限制

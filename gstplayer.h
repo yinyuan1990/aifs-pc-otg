@@ -15,6 +15,7 @@
 #include <QSet>
 #include <QHash>
 #include "naluframestore.h"
+#include "iframesource.h"   // ⭐ 帧源抽象接口（截图/慢放数据源解耦）
 #include "gstsrtsource.h"   // MARK: SRT (independent)
 #include <gst/gst.h>
 #include <gst/app/gstappsrc.h>
@@ -32,7 +33,7 @@ typedef struct _GstWebRTCSessionDescription GstWebRTCSessionDescription;
  *   ├→ queueDepay → decoder → ... → appsink（直播主路径）
  *   └→ nalu_queue(leaky) → nalu_appsink → NaluFrameStore（异步存储，不阻塞直播）
  */
-class GstPlayer : public QObject
+class GstPlayer : public QObject, public IFrameSource
 {
     Q_OBJECT
     Q_PROPERTY(QVideoSink* videoSink READ videoSink WRITE setVideoSink NOTIFY videoSinkChanged)
@@ -62,25 +63,29 @@ public:
     int receiveFps() const { return m_receiveFps; }
     
     // ⭐ 缓冲队列信息（供 QML 显示）
-    int bufferSize() const { return m_bufferSize; }
+    int bufferSize() const override { return m_bufferSize; }
     int bufferTarget() const { return m_bufferTarget; }
     
     // NALU 帧存储（H.264 ring buffer，替代 JPEG 文件）
     NaluFrameStore* naluFrameStore() const { return m_naluStore; }
     QByteArray spsPpsAnnexB() const { return m_spsPpsAnnexB; }
 
-    QString h264FrameDirectory() const { return m_h264FrameDirectory; }
+    QString h264FrameDirectory() const override { return m_h264FrameDirectory; }
     QString h264SessionPrefix() const { return m_h264SessionPrefix; }
     QString h264FramePath(qint64 frameIndex) const;
     bool hasH264Frame(qint64 frameIndex) const;
-    QByteArray readH264Frame(qint64 frameIndex) const;
-    qint64 newestH264Frame() const { return m_newestH264Frame.load(std::memory_order_acquire); }
-    qint64 oldestH264Frame() const { return m_oldestH264Frame.load(std::memory_order_acquire); }
-    int registerH264ValidRange(qint64 start, qint64 end);
-    void updateH264ValidRange(int id, qint64 start, qint64 end);
-    void unregisterH264ValidRange(int id);
+    QByteArray readH264Frame(qint64 frameIndex) const override;
+    qint64 newestH264Frame() const override { return m_newestH264Frame.load(std::memory_order_acquire); }
+    qint64 oldestH264Frame() const override { return m_oldestH264Frame.load(std::memory_order_acquire); }
+    int registerH264ValidRange(qint64 start, qint64 end) override;
+    void updateH264ValidRange(int id, qint64 start, qint64 end) override;
+    void unregisterH264ValidRange(int id) override;
 
-    QImage grabCurrentFrame();
+    QImage grabCurrentFrame() override;
+
+    // ⭐ IFrameSource 接口实现（GStreamer 帧源）
+    QObject *asQObject() override { return this; }
+    IFrameSource::FrameFormat frameFormat() const override { return IFrameSource::FrameFormat::H264; }
 
     // 推送 H.264 NALU 数据（保留用于兼容，WebRTCBin 模式下不使用）
     Q_INVOKABLE void pushNalu(const QByteArray &nalu);
@@ -95,7 +100,7 @@ public:
     Q_INVOKABLE void disconnectWebRTC();
     Q_INVOKABLE bool isWebRTCConnected() const { return m_webrtcConnected; }
     Q_INVOKABLE QString webrtcStatus() const { return m_webrtcStatus; }
-    Q_INVOKABLE void requestKeyFrame();  // 请求关键帧（发送 PLI）
+    Q_INVOKABLE void requestKeyFrame() override;  // 请求关键帧（发送 PLI）
     Q_INVOKABLE void startAutoKeyFrameRequest(int intervalMs = 1000);  // 周期性请求关键帧
     Q_INVOKABLE void stopAutoKeyFrameRequest();  // 停止周期性请求
     Q_INVOKABLE bool isAutoKeyFrameEnabled() const { return m_autoKeyFrameEnabled; }

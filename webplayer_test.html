@@ -6,8 +6,11 @@
 <title>内核测试 (Chromium WebEngine)</title>
 <style>
   html, body { margin: 0; padding: 0; height: 100%; background: #000; overflow: hidden; font-family: "PingFang HK", "Microsoft YaHei", sans-serif; }
-  /* ⭐ transform-origin 居中：缩放/镜像/旋转都以画面中心为基准，和 GStreamer 端 QML Scale/Rotation 一致 */
-  #remoteVideo { display: block; width: 100%; height: 100%; object-fit: contain; background: #000; transform-origin: center center; transition: transform 0.08s linear; }
+  /* ⭐ transform-origin 居中：缩放/镜像/旋转都以画面中心为基准，和 GStreamer 端 QML Scale/Rotation 一致。
+     object-fit:fill = GStreamer 端 VideoOutput.Stretch（拉伸铺满容器、不留黑边），二者口径对齐。
+     宽高默认铺满容器；旋转 90/270 时由 applyTransform 把宽高对调（等价 GStreamer 的宽高互换），
+     position:absolute + 居中定位，便于旋转后仍居中铺满。 */
+  #remoteVideo { position: absolute; left: 50%; top: 50%; display: block; width: 100%; height: 100%; object-fit: fill; background: #000; transform-origin: center center; transform: translate(-50%,-50%); transition: transform 0.08s linear; }
   /* SRT 不支持提示（网页内核无法播 SRT） */
   #srtBox {
     position: absolute; left: 50%; top: 50%; transform: translate(-50%,-50%);
@@ -19,14 +22,28 @@
     background: rgba(0,0,0,0.62); color: #00e676; padding: 8px 12px;
     border-radius: 6px; font-family: Consolas, monospace; font-size: 13px; line-height: 1.55;
     white-space: pre; pointer-events: none; min-width: 250px;
+    /* ⭐ 默认隐藏统计信息，点右上角「信息」按钮才显示 */
+    display: none;
   }
   #statsPanel .k { color: #80d8ff; }
   #statsPanel .warn { color: #ff5252; }
   #badge {
-    position: absolute; right: 10px; top: 10px; z-index: 9999;
+    position: absolute; right: 74px; top: 10px; z-index: 9999;
     background: rgba(33,150,243,0.85); color: #fff; padding: 4px 10px;
     border-radius: 4px; font-size: 12px; font-weight: bold; pointer-events: none;
+    /* ⭐ badge 也默认隐藏，跟随统计开关一起显示（避免右上角常驻一个标识）；
+       右移到开关按钮左侧（right:74px），开启时与开关并排不重叠。 */
+    display: none;
   }
+  /* ⭐ 统计信息开关按钮（右上角，默认关闭态） */
+  #statsToggle {
+    position: absolute; right: 10px; top: 10px; z-index: 10000;
+    background: rgba(0,0,0,0.45); color: #cfd8dc; padding: 4px 10px;
+    border-radius: 4px; font-size: 12px; cursor: pointer; user-select: none;
+    border: 1px solid rgba(255,255,255,0.18); transition: background 0.15s;
+  }
+  #statsToggle:hover { background: rgba(0,0,0,0.7); }
+  #statsToggle.on { background: rgba(33,150,243,0.85); color: #fff; border-color: transparent; }
   #errBox {
     position: absolute; left: 50%; top: 50%; transform: translate(-50%,-50%);
     z-index: 99999; color: #ff5252; font-size: 15px; text-align: center;
@@ -36,6 +53,7 @@
 </head>
 <body>
   <video id="remoteVideo" autoplay muted playsinline></video>
+  <div id="statsToggle" title="显示/隐藏统计信息">信息</div>
   <div id="badge">Chromium 内核</div>
   <div id="statsPanel">等待启动…</div>
   <div id="errBox"></div>
@@ -50,24 +68,81 @@
   const badgeEl  = document.getElementById('badge');
   const errEl    = document.getElementById('errBox');
   const srtEl    = document.getElementById('srtBox');
+  const toggleEl = document.getElementById('statsToggle');
+
+  // ⭐ 统计信息默认关闭，点右上角「信息」按钮才显示（含分辨率/码率/FPS/丢包等 + Chromium 标识）。
+  let statsVisible = false;
+  function applyStatsVisibility() {
+    statsEl.style.display = statsVisible ? 'block' : 'none';
+    badgeEl.style.display = statsVisible ? 'block' : 'none';
+    if (statsVisible) toggleEl.classList.add('on'); else toggleEl.classList.remove('on');
+  }
+  if (toggleEl) {
+    toggleEl.addEventListener('click', function() {
+      statsVisible = !statsVisible;
+      applyStatsVisibility();
+    });
+  }
+  applyStatsVisibility();
 
   // ⭐ 本地画面变换（缩放/镜像/旋转），由 QML 在网页内核作主播放器时调用。
-  //   与 GStreamer 端 QML Scale/Rotation 语义对齐：
-  //   - zoom: 本地显示缩放 1.0~5.0（不下发 iOS）
-  //   - mirror: "none" | "horizontal" | "vertical"（纯本地翻转）
-  //   - rotation: 0/90/180/270（纯本地旋转）
-  //   - offsetX/offsetY: 缩放后的平移像素（鼠标聚焦缩放）
-  //   CSS transform 顺序：先 translate 再 rotate 再 scale（与 QML transform 列表等效）。
+  //   与 GStreamer 端 VideoOutput 完全对齐：
+  //   - GStreamer：90/270 时把 VideoOutput 的 width/height 对调成容器的 height/width，
+  //     fillMode=Stretch 铺满该框，再 Rotation 居中旋转 → 旋转后正好铺满容器。
+  //   - 这里照搬：90/270 把 #remoteVideo 的像素宽高对调（= 容器 height×width），object-fit:fill
+  //     铺满，再 rotate 居中旋转 → 旋转后铺满，且不留黑边（与 Stretch 一致）。
+  //   - zoom 1.0~5.0、mirror、offsetX/Y 与 GStreamer 端 Scale/偏移语义一致。
+  //   CSS transform 顺序：translate(-50%,-50%) 先把绝对定位元素居中（对齐 origin），
+  //     再 translate(offset) → rotate → scale（与 QML transform 列表 [Rotation, Scale] + 偏移等效）。
   window.applyTransform = function(zoom, mirror, rotation, offsetX, offsetY) {
     var z  = (typeof zoom === 'number' && zoom > 0) ? zoom : 1.0;
     var ox = (typeof offsetX === 'number') ? offsetX : 0;
     var oy = (typeof offsetY === 'number') ? offsetY : 0;
     var sx = (mirror === 'horizontal') ? -z : z;
     var sy = (mirror === 'vertical')   ? -z : z;
-    var rot = rotation || 0;
+    var rot = ((rotation || 0) % 360 + 360) % 360;
+
+    // 记录本次参数，供窗口 resize 时重算（保持铺满）。
+    window._lastTransform = { zoom: z, mirror: mirror, rotation: rotation, offsetX: ox, offsetY: oy };
+
+    // 容器尺寸 = webview 视口（KernelTestView 铺满 videoContainer，故等于容器大小）。
+    var cw = window.innerWidth || document.documentElement.clientWidth || 0;
+    var ch = window.innerHeight || document.documentElement.clientHeight || 0;
+    // 尺寸还没就绪（极早调用）：用百分比兜底铺满，避免 0 尺寸黑屏。
+    if (!cw || !ch) {
+      videoEl.style.width = '100%';
+      videoEl.style.height = '100%';
+      videoEl.style.transform =
+        'translate(-50%,-50%) translate(' + ox + 'px,' + oy + 'px) rotate(' + rot + 'deg) scale(' + sx + ',' + sy + ')';
+      return;
+    }
+    var swapped = (rot === 90 || rot === 270);
+    // 90/270 对调宽高（等价 GStreamer 的 VideoOutput 宽高互换），其余铺满容器。
+    videoEl.style.width  = (swapped ? ch : cw) + 'px';
+    videoEl.style.height = (swapped ? cw : ch) + 'px';
+
     videoEl.style.transform =
-      'translate(' + ox + 'px,' + oy + 'px) rotate(' + rot + 'deg) scale(' + sx + ',' + sy + ')';
+      'translate(-50%,-50%) translate(' + ox + 'px,' + oy + 'px) rotate(' + rot + 'deg) scale(' + sx + ',' + sy + ')';
   };
+
+  // 容器尺寸变化（窗口拖动/全屏切换）时，重算当前变换以保持铺满。
+  window.addEventListener('resize', function() {
+    if (window._lastTransform) {
+      var t = window._lastTransform;
+      window.applyTransform(t.zoom, t.mirror, t.rotation, t.offsetX, t.offsetY);
+    }
+  });
+
+  // ⭐ 滚轮缩放：网页内核作主播放器时 webview 会吃掉滚轮事件（QML 的 videoZoomArea.onWheel 收不到）。
+  //   这里在页面里监听 wheel，把方向+鼠标坐标转发给 C++（kernelBridge），由 QML 复用 GStreamer
+  //   同款「聚焦缩放 + 偏移约束 + 跨 PC 推送」逻辑改 videoZoom → 再经 applyTransform 回写本页面。
+  //   这样网页内核与 GStreamer 的滚轮缩放行为完全一致。
+  window.addEventListener('wheel', function(e) {
+    e.preventDefault();   // 避免页面滚动
+    if (bridge && bridge.notifyWheelZoom) {
+      try { bridge.notifyWheelZoom(e.deltaY, e.clientX, e.clientY); } catch(_){}
+    }
+  }, { passive: false });
 
   // ⭐ SRT 不支持提示（网页内核无法播 SRT）。show=true 时显示提示并清空画面。
   window.showSrtUnsupported = function(show) {
@@ -87,6 +162,33 @@
   let lastBytes = 0, lastTs = 0, lastFrames = 0, lastFrameTs = 0;
   let lastDecoded = 0, stallSeconds = 0;
   let reconnectTimer = null, reconnecting = false;
+
+  // ⭐ 截图/慢放帧源：把解码后的 VideoFrame 连续编码成 JPEG 回传 C++（WebFrameSource 落盘）。
+  //   与 GStreamer 端「逐帧 H.264 落盘」对等——截图要取事件帧前 N 帧，故必须持续落帧，
+  //   不能只在按下时编。
+  //   ⭐⭐ 治本（2026-06-26）：drawImage+convertToBlob(JPEG)+base64 这一串「重活」从主线程
+  //   迁到 Worker——主线程只跑 MediaStreamTrackProcessor 读帧（轻），把 VideoFrame 用
+  //   Transferable 直接转移给 Worker 编码，编完回传 base64，主线程仅做一次 bridge 调用。
+  //   这样网络再好、编码再重也不再顶住 <video> 合成线程（消「顿住/freezeCount」主因）。
+  //   Worker 用内联 Blob 构建（无需额外 qrc 文件）；不支持时自动退回主线程 encodeAndPush。
+  let frameReader = null;       // ReadableStreamDefaultReader<VideoFrame>
+  let frameAbort = false;       // 停止帧抓取标志
+  let capCanvas = null;         // OffscreenCanvas（主线程兜底路径用）
+  let capCtx = null;
+  let capWorker = null;         // ⭐ 编码 Worker（VideoFrame→JPEG→base64，离开主线程）
+  let capWorkerOk = false;      // Worker 是否可用（false=退回主线程编码）
+  let lastCapTs = 0;            // 上次落帧时间戳（节流）
+  let captureEnabled = true;    // ⭐ A/B 开关：关掉可验证"顿住"是否由抓帧引起（window.setCaptureEnabled(false)）
+  let capBusy = false;          // ⭐ 上一帧是否仍在编码（防编码堆叠/无界排队）
+  const CAP_MAX_FPS = 15;       // 落帧上限（慢放够用，控编码 CPU）
+  const CAP_JPEG_QUALITY = 0.85;
+  // ⭐ 排障/调优开关：网络好却顿住时，先 setCaptureEnabled(false) 看 freeze 是否归零。
+  window.setCaptureEnabled = function(on){ captureEnabled = !!on; logC('截图/慢放抓帧 ' + (captureEnabled?'开':'关')); };
+  // ⭐ 与竞品 webrtc-preview 对齐：帧宽 > CAP_MAX_WIDTH 才按宽等比缩到该值，≤ 则保留原始分辨率。
+  //   （竞品 frameProcessor.worker：c=Math.min(1,1920/displayWidth)，仅 c<1 时 resize。
+  //    所以 1080p=1920宽 不缩，仅 >1920(如4K) 缩到 1920。）
+  const CAP_MAX_WIDTH = 1920;
+
   let offerHandled = false;    // 是否已成功应答过 Offer（去重 iOS 连发的多个 Offer）
   let negotiating = false;     // 应答是否进行中（防并发 createAnswer 撞 signalingState）
   let peerStopped = false;     // 对端(iOS)主动挂断/退出 → 绝不重连
@@ -188,6 +290,8 @@
     if (statsTimer) { clearInterval(statsTimer); statsTimer = null; }
     // ⭐ 停播即上报 fps=0，QML 拉流心跳随之停发 → iOS 3s 后判定「PC 未连接」。
     if (bridge && bridge.notifyViewerFps) { try { bridge.notifyViewerFps(0); } catch(_){} }
+    // ⭐ 停止截图/慢放帧抓取（QML kernelStop 会调 resetCaptureFrames 清盘）。
+    stopFrameCapture();
     if (mode === 'p2p' && bridge && cfg && cfg._iosDev) {
       try { bridge.sendSignal('WEBRTC_HANGUP', cfg._iosDev, '', '', '', '', 0); } catch(_){}
       try { bridge.notifyTestStopped(); } catch(_){}
@@ -207,12 +311,169 @@
     try {
       const recv = pc.getReceivers().find(r => r.track && r.track.kind === 'video');
       if (recv && 'jitterBufferTarget' in recv) {
-        recv.jitterBufferTarget = 120;   // ms，维持~120ms 缓冲做"双缓冲"防卡顿
-        logC('已设 jitterBufferTarget=120ms（应用层双缓冲防卡顿）');
+        recv.jitterBufferTarget = 600;   // ms，200→600：进一步放宽缓冲，吸收主线程卡顿/抖动，优先消顿住（延迟略增）
+        logC('已设 jitterBufferTarget=600ms（加大双缓冲，优先消顿住）');
       } else if (recv && 'playoutDelayHint' in recv) {
-        recv.playoutDelayHint = 0.12;
+        recv.playoutDelayHint = 0.6;
       }
     } catch(e) { logC('设 jitterBufferTarget 失败: ' + e); }
+
+    // ⭐ 启动截图/慢放帧抓取（把解码帧连续编 JPEG 回传 C++）。
+    startFrameCapture(stream);
+  }
+
+  // ============ 截图/慢放：连续抓帧编 JPEG 回传 C++ ============
+  function startFrameCapture(stream) {
+    stopFrameCapture();
+    // 前置能力检查：需 MediaStreamTrackProcessor + OffscreenCanvas + kernelBridge。
+    if (!bridge || !bridge.pushCaptureFrame) { logC('帧抓取跳过：无 kernelBridge.pushCaptureFrame'); return; }
+    if (typeof MediaStreamTrackProcessor === 'undefined') { logC('帧抓取跳过：浏览器无 MediaStreamTrackProcessor'); return; }
+    const vtrack = stream.getVideoTracks ? stream.getVideoTracks()[0] : null;
+    if (!vtrack) { logC('帧抓取跳过：无视频轨'); return; }
+
+    frameAbort = false;
+    lastCapTs = 0;
+    ensureCaptureWorker();      // ⭐ 尝试建编码 Worker（失败则走主线程兜底）
+    try {
+      const processor = new MediaStreamTrackProcessor({ track: vtrack });
+      frameReader = processor.readable.getReader();
+    } catch(e) { logC('创建 MediaStreamTrackProcessor 失败: ' + e); return; }
+
+    const minInterval = 1000 / CAP_MAX_FPS;
+
+    (async function pump() {
+      logC('帧抓取已启动（≤' + CAP_MAX_FPS + 'fps，编码在 ' + (capWorkerOk ? 'Worker' : '主线程兜底') + '）');
+      while (!frameAbort && frameReader) {
+        let result;
+        try { result = await frameReader.read(); }
+        catch(e) { logC('帧读取异常: ' + e); break; }
+        if (result.done) break;
+        const vf = result.value;   // VideoFrame
+        const ts = (typeof performance !== 'undefined') ? performance.now() : Date.now();
+        // ⭐ 防顿住关键：仅在 capture 开启、上一帧已编完(capBusy=false)、未超节流上限时才编码。
+        if (captureEnabled && !capBusy && (ts - lastCapTs >= minInterval)) {
+          lastCapTs = ts;
+          capBusy = true;
+          if (capWorkerOk && capWorker) {
+            // ⭐ 把 VideoFrame Transferable 转移给 Worker —— 转移后主线程的 vf 即失效，无需再 close。
+            try {
+              capWorker.postMessage({ vf: vf, maxWidth: CAP_MAX_WIDTH, quality: CAP_JPEG_QUALITY }, [vf]);
+            } catch(e) {
+              // 转移失败（运行时不支持 VideoFrame transfer）：本帧退回主线程编码并禁用 Worker。
+              capWorkerOk = false;
+              encodeAndPush(vf).catch(()=>{}).finally(() => { try { vf.close(); } catch(_){} capBusy = false; });
+            }
+          } else {
+            // 主线程兜底：编码不 await，后台跑，编完 close 并清 capBusy。
+            encodeAndPush(vf).catch(()=>{}).finally(() => { try { vf.close(); } catch(_){} capBusy = false; });
+          }
+        } else {
+          try { vf.close(); } catch(_){}
+        }
+      }
+      logC('帧抓取已停止');
+    })();
+  }
+
+  // ============ 编码 Worker（VideoFrame→JPEG→base64，离开主线程）============
+  //   主线程只负责读帧 + 转移 VideoFrame；重活全在 Worker。Worker 回传 base64 后，
+  //   主线程做唯一一次 bridge.pushCaptureFrame（QWebChannel 只能在主线程调）。
+  function ensureCaptureWorker() {
+    if (capWorker || capWorkerOk) return;
+    // 前置能力：需 VideoFrame 可转移 + Worker + OffscreenCanvas + convertToBlob。
+    if (typeof Worker === 'undefined' || typeof VideoFrame === 'undefined' || typeof OffscreenCanvas === 'undefined') {
+      capWorkerOk = false; logC('编码 Worker 不可用 → 退回主线程编码'); return;
+    }
+    const workerSrc = [
+      'let cv=null, cx=null;',
+      'self.onmessage = async (e) => {',
+      '  const d = e.data; const vf = d.vf;',
+      '  try {',
+      '    const sw = vf.displayWidth || vf.codedWidth, sh = vf.displayHeight || vf.codedHeight;',
+      '    if (!sw || !sh) { try{vf.close();}catch(_){}; self.postMessage({ok:false}); return; }',
+      '    const scale = Math.min(1, d.maxWidth / sw);',
+      '    const w = scale < 1 ? Math.round(sw * scale) : sw;',
+      '    const h = scale < 1 ? Math.round(sh * scale) : sh;',
+      '    if (!cv || cv.width !== w || cv.height !== h) { cv = new OffscreenCanvas(w, h); cx = cv.getContext("2d", { alpha:false }); }',
+      '    cx.drawImage(vf, 0, 0, w, h);',
+      '    try { vf.close(); } catch(_){}',
+      '    const blob = await cv.convertToBlob({ type:"image/jpeg", quality: d.quality });',
+      '    const buf = await blob.arrayBuffer();',
+      '    const bytes = new Uint8Array(buf);',
+      '    let binary = ""; const chunk = 0x8000;',
+      '    for (let i = 0; i < bytes.length; i += chunk) { binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk)); }',
+      '    self.postMessage({ ok:true, b64: btoa(binary) });',
+      '  } catch(err) { try{vf.close();}catch(_){}; self.postMessage({ ok:false, err: String(err) }); }',
+      '};'
+    ].join('\n');
+    try {
+      const url = URL.createObjectURL(new Blob([workerSrc], { type: 'application/javascript' }));
+      capWorker = new Worker(url);
+      URL.revokeObjectURL(url);
+      capWorker.onmessage = (e) => {
+        const d = e.data || {};
+        if (d.ok && d.b64) { try { bridge.pushCaptureFrame(d.b64, -1); } catch(_){} }
+        capBusy = false;   // ⭐ 一帧编码完成，放行下一帧
+      };
+      capWorker.onerror = (e) => {
+        logC('编码 Worker 出错 → 退回主线程编码: ' + (e.message || e));
+        capWorkerOk = false; capBusy = false;
+        try { capWorker.terminate(); } catch(_){}
+        capWorker = null;
+      };
+      capWorkerOk = true;
+      logC('编码 Worker 已就绪（抓帧编码已离开主线程）');
+    } catch(e) {
+      capWorkerOk = false; capWorker = null;
+      logC('创建编码 Worker 失败 → 退回主线程编码: ' + e);
+    }
+  }
+
+  async function encodeAndPush(vf) {
+    const sw = vf.displayWidth || vf.codedWidth;
+    const sh = vf.displayHeight || vf.codedHeight;
+    if (!sw || !sh) return;
+    // ⭐ 与竞品对齐：宽 > CAP_MAX_WIDTH 才等比缩；否则原始分辨率（1080p 不缩）。
+    const scale = Math.min(1, CAP_MAX_WIDTH / sw);
+    const w = (scale < 1) ? Math.round(sw * scale) : sw;
+    const h = (scale < 1) ? Math.round(sh * scale) : sh;
+    if (!capCanvas || capCanvas.width !== w || capCanvas.height !== h) {
+      capCanvas = new OffscreenCanvas(w, h);
+      capCtx = capCanvas.getContext('2d', { alpha: false, desynchronized: true });
+    }
+    // drawImage 指定目标 w/h 完成缩放（高质量重采样由内核保证）。
+    capCtx.drawImage(vf, 0, 0, w, h);
+    // OffscreenCanvas → JPEG Blob → base64（去掉 data: 前缀）→ 回传 C++。
+    const blob = await capCanvas.convertToBlob({ type: 'image/jpeg', quality: CAP_JPEG_QUALITY });
+    const buf = await blob.arrayBuffer();
+    const b64 = bytesToBase64(new Uint8Array(buf));
+    try { bridge.pushCaptureFrame(b64, -1); } catch(e) { /* 落盘失败忽略 */ }
+  }
+
+  // Uint8Array → base64（分块避免 String.fromCharCode 爆栈）。
+  function bytesToBase64(bytes) {
+    let binary = '';
+    const chunk = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunk) {
+      binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+    }
+    return btoa(binary);
+  }
+
+  function stopFrameCapture() {
+    frameAbort = true;
+    if (frameReader) {
+      try { frameReader.cancel(); } catch(_){}
+      try { frameReader.releaseLock && frameReader.releaseLock(); } catch(_){}
+      frameReader = null;
+    }
+    // ⭐ 关掉编码 Worker，释放 OffscreenCanvas/线程，避免重连后堆叠多个 Worker。
+    if (capWorker) {
+      try { capWorker.terminate(); } catch(_){}
+      capWorker = null;
+    }
+    capWorkerOk = false;
+    capBusy = false;
   }
 
   // ============ SRS WHEP ============
@@ -322,6 +583,9 @@
       if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
       reconnecting = false;
       if (statsTimer) { clearInterval(statsTimer); statsTimer = null; }
+      // ⭐ iOS 挂断也上报 fps=0 + 停帧抓取（与 stopPlay 口径一致）。
+      if (bridge && bridge.notifyViewerFps) { try { bridge.notifyViewerFps(0); } catch(_){} }
+      stopFrameCapture();
       if (pc) { try { pc.close(); } catch(_){} pc = null; }
       if (videoEl.srcObject) {
         try { videoEl.srcObject.getTracks().forEach(t => t.stop()); } catch(_){}
@@ -407,22 +671,73 @@
     }, 3000);
   }
 
+  // ⭐ 防马赛克快速恢复：花屏风险时立即（非 3s 延时）刷新关键帧。
+  //   P2P：重发 WEBRTC_REQUEST → iOS 重新协商 → 吐新 IDR（iOS 无需改动）。
+  //   SRS：重新 startSRS（重发 Offer）→ SRS 吐新关键帧。
+  //   损坏的参考帧链路整段刷新后，马赛克消除。节流由调用处 ARTIFACT_MIN_INTERVAL 控制。
+  async function scheduleKeyframeRecovery() {
+    if (peerStopped) return;
+    // ⭐ 2026 改：花屏恢复「只请求关键帧」，不再 rebuildPC / 重发 WEBRTC_REQUEST / 重建 Offer。
+    //   旧实现重建整个 PeerConnection（P2P）或重发 Offer（SRS），每次都有 ICE/DTLS 重协商空窗，
+    //   导致媒体断流、packetsLost 计数跳变 —— 弱网下越抖越重建、越重建越抖（自残）。
+    //   新口径与竞品 / GStreamer 端 requestKeyframeWithFallback 一致：
+    //     · 主路：Chromium 检测到丢包/花屏会自动发 RTCP PLI → iOS(P2P 直收) / SRS(转发) 自动补 IDR；
+    //     · 兜底：经 kernelBridge 发 WebSocket request_keyframe，防 SRS 不回传 RTCP 时 iOS 收不到 PLI。
+    //   节流由调用处 ARTIFACT_MIN_INTERVAL(4s) 控制。
+    try {
+      if (bridge && bridge.requestKeyframe) {
+        bridge.requestKeyframe();
+        logC('花屏恢复：已请求关键帧（WS request_keyframe，不重建PC）');
+      } else {
+        logC('花屏恢复：依赖自动 RTCP PLI（bridge.requestKeyframe 暂不可用，需重新构建 PC 端）');
+      }
+    } catch(e) { logC('请求关键帧失败: ' + e); }
+  }
+
+  // ============ 防马赛克：弱网花屏风险检测（搬竞品 webrtc-preview 策略）============
+  // 竞品做法：PC 端监控「丢包增量 / 丢帧增量」超阈值 → 给设备发 requestKeyFrame 补 IDR 刷掉马赛克。
+  // 本端按方案a（纯前端、先不碰 iOS）：检测到花屏风险 → 节流触发一次重连（SRS 重发 Offer / P2P 重发
+  //   WEBRTC_REQUEST），强制服务器/设备吐出新关键帧，把已损坏的参考帧链路整段刷新 → 马赛克消除。
+  var lastPktLost = 0;        // 上次累计丢包
+  var lastFramesDropped = 0;  // 上次累计丢帧
+  var lastKeyRecoverTs = 0;   // 上次触发恢复的时间戳（节流用）
+  var artifactStreak = 0;     // 连续花屏风险计数
+  const ARTIFACT_LOST_DELTA = 8;     // 单采样丢包增量阈值
+  const ARTIFACT_DROP_DELTA = 5;     // 单采样丢帧增量阈值
+  const ARTIFACT_MIN_INTERVAL = 4000; // 两次恢复最小间隔(ms)，避免抖动期狂重连
+
   // ============ 统计 + 卡顿检测 ============
   function startStats() {
     lastBytes=0; lastTs=0; lastFrames=0; lastFrameTs=0; lastDecoded=0; stallSeconds=0;
+    lastPktLost=0; lastFramesDropped=0; artifactStreak=0;
     if (statsTimer) clearInterval(statsTimer);
     statsTimer = setInterval(async () => {
       if (!pc) return;
       try {
         const stats = await pc.getStats();
-        let inbound = null;
-        stats.forEach(r => { if (r.type==='inbound-rtp' && r.kind==='video') inbound = r; });
+        let inbound = null, selPair = null;
+        stats.forEach(r => {
+          if (r.type==='inbound-rtp' && r.kind==='video') inbound = r;
+          // ⭐ 选中的候选对：判断真实走的是「直连(host/srflx/prflx)」还是「公网中继(relay)」
+          if (r.type==='candidate-pair' && (r.nominated || r.selected)) selPair = r;
+        });
         if (!inbound) { statsEl.textContent = '等待视频流…'; return; }
+        // ⭐ 线路类型（relay = 绕公网 TURN，同局域网下应为直连）
+        let routeTxt = '—';
+        if (selPair) {
+          const lc = stats.get(selPair.localCandidateId), rc = stats.get(selPair.remoteCandidateId);
+          const lt = lc ? lc.candidateType : '?', rt = rc ? rc.candidateType : '?';
+          const isRelay = (lt === 'relay' || rt === 'relay');
+          routeTxt = '<span class="' + (isRelay ? 'warn' : 'k') + '">' + lt + '/' + rt + (isRelay ? '（中继!）' : '（直连）') + '</span>';
+        }
         const now = inbound.timestamp;
         let kbps = (lastTs>0 && inbound.bytesReceived!=null) ? Math.round((inbound.bytesReceived-lastBytes)*8/(now-lastTs)) : 0;
         lastBytes = inbound.bytesReceived||0; lastTs = now;
-        let fps = (lastFrameTs>0 && inbound.framesDecoded!=null) ? Math.round((inbound.framesDecoded-lastFrames)*1000/(now-lastFrameTs)) : 0;
+        let fpsReal = (lastFrameTs>0 && inbound.framesDecoded!=null) ? Math.round((inbound.framesDecoded-lastFrames)*1000/(now-lastFrameTs)) : 0;
         lastFrames = inbound.framesDecoded||0; lastFrameTs = now;
+        // ⭐ FPS x4 对齐 GStreamer：GStreamer 端显示的 receiveFps = m_fpsEma*4（gstplayer.cpp:2471），
+        //   网页内核这里同样 x4，让两边 UI 的 FPS 数值口径一致（含右上角面板与拉流心跳上报）。
+        const fps = fpsReal * 4;
 
         // ⭐ 上报帧率给 C++（内核作主播放器时，QML 据此发 VIEWER_HEARTBEAT，让 iOS 显示「PC 已连接」）。
         //   fps>0 即代表画面在播；P2P/SRS 都报，QML 侧只在内核模式采用。
@@ -439,12 +754,44 @@
         const freeze = inbound.freezeCount!=null ? inbound.freezeCount : '-';
         const stallTxt = stallSeconds>=2 ? ('<span class="warn">画面卡住 '+stallSeconds+'s</span>') : ('<span class="k">流畅</span>');
 
+        // ⭐ 防马赛克：丢包/丢帧增量超阈值 = 花屏风险 → 节流触发重连刷新关键帧
+        const dropped = inbound.framesDropped || 0;
+        const lostDelta = Math.max(0, lost - lastPktLost);
+        const dropDelta = Math.max(0, dropped - lastFramesDropped);
+        lastPktLost = lost; lastFramesDropped = dropped;
+        // ⭐ 真正反映链路质量的是「丢包率」（不是累计 packetsLost）：lost/(lost+received)。
+        //   累计 lost 跑久了到几千很正常；丢包率 < 1~2% 即肉眼无感。lostDelta = 本秒新增丢包。
+        const recv = inbound.packetsReceived || 0;
+        const lossRate = (recv + lost) > 0 ? (lost / (recv + lost) * 100) : 0;
+        const artifactRisk = (lostDelta >= ARTIFACT_LOST_DELTA) || (dropDelta >= ARTIFACT_DROP_DELTA);
+        if (artifactRisk && dec !== lastDecoded /* 仍在出帧才算花屏(非纯卡死) */) {
+          artifactStreak++;
+          const nowMs = Date.now();
+          if (nowMs - lastKeyRecoverTs >= ARTIFACT_MIN_INTERVAL) {
+            lastKeyRecoverTs = nowMs;
+            logC('⚠️ 花屏风险(丢包+'+lostDelta+'/丢帧+'+dropDelta+') → 请求关键帧(不重建PC)');
+            scheduleKeyframeRecovery();
+          }
+        } else {
+          artifactStreak = 0;
+        }
+
+        // ⭐ 抓帧编码路径：直观显示「重活」是在 Worker 还是退回了主线程（顿住排查用）。
+        var capTxt;
+        if (!frameReader) { capTxt = '<span class="warn">未启动</span>'; }
+        else if (!captureEnabled) { capTxt = '关闭(A/B)'; }
+        else if (capWorkerOk) { capTxt = '<span class="k">Worker（离主线程）</span>'; }
+        else { capTxt = '<span class="warn">主线程兜底</span>'; }
+
         statsEl.innerHTML =
           '<span class="k">内核</span>: Chromium · ' + mode.toUpperCase() + '\n' +
           '<span class="k">分辨率</span>: ' + w + 'x' + h + '\n' +
           '<span class="k">解码FPS</span>: ' + fps + '\n' +
           '<span class="k">码率</span>: ' + kbps + ' kbps\n' +
-          '<span class="' + (lost>0?'warn':'k') + '">丢包</span>: ' + lost + '　<span class="k">NACK</span>: ' + nack + ' <span class="k">PLI</span>: ' + pli + '\n' +
+          '<span class="' + (lossRate>=2?'warn':'k') + '">丢包率</span>: ' + lossRate.toFixed(2) + '%　(累计' + lost + ' / +' + lostDelta + '/s)\n' +
+          '<span class="k">NACK</span>: ' + nack + '　<span class="k">PLI</span>: ' + pli + '\n' +
+          '<span class="k">线路</span>: ' + routeTxt + '\n' +
+          '<span class="k">抓帧编码</span>: ' + capTxt + '\n' +
           '<span class="k">抖动缓冲</span>: ' + jb + ' ms (内核自适应)\n' +
           '<span class="k">卡顿次数</span>: ' + freeze + '　状态: ' + stallTxt;
 

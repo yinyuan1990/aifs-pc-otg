@@ -281,6 +281,12 @@ Rectangle {
         function onViewerFpsChanged(fps) {
             mainPage.kernelViewerFps = fps
         }
+        // ⭐ 网页内核滚轮缩放：webview 把 wheel 转发上来（DOM deltaY<0=上滚=放大，
+        //   与 QML angleDelta 相反），这里复用 GStreamer 同款聚焦缩放数学。
+        function onWheelZoomRequested(deltaY, mouseX, mouseY) {
+            if (!mainPage.useWebEngineKernel) return
+            mainPage.applyWheelZoom(deltaY < 0, mouseX, mouseY)
+        }
     }
 
     // 拉流心跳：每秒通知 iOS"我在看"（基于画面是否显示）
@@ -1075,7 +1081,7 @@ Rectangle {
                     height: parent.height
 
                     Text {
-                        text: "AI牌位"
+                        text: "自动放大"
                         font.family: "PingFang HK"
                         font.pixelSize: 14
                         color: "#263238"
@@ -1186,8 +1192,9 @@ Rectangle {
                     }
                 }
                 
-                // ⭐ AI自动识别按钮
+                // ⭐ AI自动识别按钮（2026-06-24：按需求隐藏顶部菜单栏入口，功能为「敬请期待」占位，先不展示）
                 Rectangle {
+                    visible: false
                     width: aiBtnText.width + 16
                     height: 24
                     radius: 4
@@ -2331,46 +2338,11 @@ Rectangle {
                                         console.log("🔍 S+滚轮 镜头变倍:", oldLensZoom.toFixed(1), "->", newLensZoom.toFixed(1))
                                     }
                                 } else {
-                                    // 普通滚轮：本地显示缩放 (1.0-5.0)
-                                    // ⭐ 实时流本地放大始终可用，PC等级限制只影响截图item继承和慢放
-                                    var oldZoom = mainPage.videoZoom
-                                    var delta = wheel.angleDelta.y > 0 ? 0.2 : -0.2
-                                    var newZoom = Math.max(1.0, Math.min(5.0, oldZoom + delta))
-                                    
-                                    if (newZoom !== oldZoom) {
-                                        // 计算鼠标相对于容器中心的位置
-                                        var containerCenterX = videoContainer.width / 2
-                                        var containerCenterY = videoContainer.height / 2
-                                        var mouseRelX = wheel.x - containerCenterX
-                                        var mouseRelY = wheel.y - containerCenterY
-                                        
-                                        // 计算缩放比例变化
-                                        var zoomRatio = newZoom / oldZoom
-                                        
-                                        // 调整偏移以保持鼠标位置不变
-                                        var newOffsetX = mouseRelX - (mouseRelX - mainPage.videoOffsetX) * zoomRatio
-                                        var newOffsetY = mouseRelY - (mouseRelY - mainPage.videoOffsetY) * zoomRatio
-                                        
-                                        // ⭐ 边界约束：确保偏移量在有效范围内
-                                        // 有效范围 = ±(containerSize * (zoom - 1) / 2)
-                                        var maxOffsetX = videoContainer.width * (newZoom - 1) / 2
-                                        var maxOffsetY = videoContainer.height * (newZoom - 1) / 2
-                                        mainPage.videoOffsetX = Math.max(-maxOffsetX, Math.min(maxOffsetX, newOffsetX))
-                                        mainPage.videoOffsetY = Math.max(-maxOffsetY, Math.min(maxOffsetY, newOffsetY))
-                                        
-                                        mainPage.videoZoom = newZoom
-                                        captureManager.zoomLog("🎥 实时流缩放: videoZoom=" + newZoom.toFixed(2) + " offsetX=" + mainPage.videoOffsetX.toFixed(1) + " offsetY=" + mainPage.videoOffsetY.toFixed(1) + " maxOffset=" + maxOffsetX.toFixed(1))
-                                        
-                                        // 如果缩放到1倍，重置偏移
-                                        if (newZoom === 1.0) {
-                                            mainPage.videoOffsetX = 0
-                                            mainPage.videoOffsetY = 0
-                                        }
-                                        console.log("🔍 滚轮 本地缩放:", oldZoom.toFixed(1), "->", newZoom.toFixed(1))
-                                        
-                                        // ⭐ 推送本地视觉效果到其他PC
-                                        sendLocalViewUpdate(mainPage.videoZoom, mainPage.videoOffsetX, mainPage.videoOffsetY)
-                                    }
+                                    // 普通滚轮：本地显示缩放 (1.0-5.0)，复用统一的聚焦缩放数学。
+                                    // ⭐ 实时流本地放大始终可用，PC等级限制只影响截图item继承和慢放。
+                                    //   （网页内核模式下 webview 吃掉滚轮，改由 kernelBridge.wheelZoomRequested
+                                    //    走同一个 applyWheelZoom，行为完全一致。）
+                                    mainPage.applyWheelZoom(wheel.angleDelta.y > 0, wheel.x, wheel.y)
                                 }
                             }
                         }
@@ -4294,18 +4266,35 @@ Rectangle {
     // ============ 函数 ============
 
     // ⭐ 网页内核辅助（2026-06-24）：内核模式下按连接模式驱动 webview 播放。
+    // ⭐ 截图/慢放帧源切换：网页内核模式注入 webFrameSource（JPEG），否则 gstPlayer（H264）。
+    //   CaptureManager/SlowMotionPlayer 只认 IFrameSource，UI 完全复用、只换数据源。
+    function kernelBindFrameSource() {
+        if (typeof webFrameSource === 'undefined' || !webFrameSource) return
+        captureManager.setFrameSourceObject(webFrameSource)
+        slowMotionPlayer.setFrameSourceObject(webFrameSource)
+        console.log("📷 [网页内核] 截图/慢放数据源 → WebFrameSource(JPEG)")
+    }
+    function gstBindFrameSource() {
+        captureManager.setFrameSourceObject(gstPlayer)
+        slowMotionPlayer.setFrameSourceObject(gstPlayer)
+        console.log("📷 [GStreamer] 截图/慢放数据源 → GstPlayer(H264)")
+    }
+
     function kernelStartByMode() {
         if (!useWebEngineKernel) return
         var view = kernelPlayerLoader.item
         if (!view) return
-        if (connectMode === 2) {
-            // SRT：浏览器不支持 → 提示
-            view.startTest("srt", "", "", "", "")
-        } else if (connectMode === 1) {
+        // ⭐ 进内核模式：截图/慢放切到 WebFrameSource，并清掉上次会话残帧。
+        if (typeof webFrameSource !== 'undefined' && webFrameSource && kernelBridge) {
+            kernelBridge.resetCaptureFrames()
+        }
+        kernelBindFrameSource()
+        if (connectMode === 1) {
             // P2P：参数从 kernelBridge 拿
             view.startTest("p2p", "", "", "", "")
         } else {
-            // SRS：WHEP
+            // ⭐ SRS 与 SRT 都走 WHEP：SRT 由 SRS 桥接成 WebRTC（方案A），网页内核天然适配。
+            //   （connectMode===2 不再显示「不支持 SRT」提示。）
             view.startTest("srs", srsServer, "tenantA", currentStream, "vid-7gg4748")
         }
     }
@@ -4316,6 +4305,9 @@ Rectangle {
         if (view) view.stopTest()
         // ⭐ 立即清零内核帧率，拉流心跳随之停发（不依赖 webview 卸载前是否上报到 0）。
         kernelViewerFps = 0
+        // ⭐ 退内核模式：截图/慢放数据源恢复 GStreamer，并清掉 webframes 残帧。
+        if (kernelBridge) kernelBridge.resetCaptureFrames()
+        gstBindFrameSource()
     }
 
     // ⭐ 把本地缩放/镜像/旋转/偏移同步到 webview（CSS transform），与 GStreamer 端 QML 变换对齐。
@@ -4323,6 +4315,31 @@ Rectangle {
         if (!useWebEngineKernel) return
         var view = kernelPlayerLoader.item
         if (view) view.applyTransform(videoZoom, videoMirrorMode, videoRotation, videoOffsetX, videoOffsetY)
+    }
+
+    // ⭐ 滚轮聚焦缩放（GStreamer 与网页内核共用同一套数学）。
+    //   up=true 放大、false 缩小；mouseX/Y 为相对 videoContainer 的像素坐标。
+    //   videoZoom/offset 变化后会自动触发 onVideoZoomChanged→kernelSyncTransform（内核模式回写 webview）。
+    function applyWheelZoom(up, mouseX, mouseY) {
+        var oldZoom = mainPage.videoZoom
+        var delta = up ? 0.2 : -0.2
+        var newZoom = Math.max(1.0, Math.min(5.0, oldZoom + delta))
+        if (newZoom === oldZoom) return
+
+        var containerCenterX = videoContainer.width / 2
+        var containerCenterY = videoContainer.height / 2
+        var mouseRelX = mouseX - containerCenterX
+        var mouseRelY = mouseY - containerCenterY
+        var zoomRatio = newZoom / oldZoom
+        var newOffsetX = mouseRelX - (mouseRelX - mainPage.videoOffsetX) * zoomRatio
+        var newOffsetY = mouseRelY - (mouseRelY - mainPage.videoOffsetY) * zoomRatio
+        var maxOffsetX = videoContainer.width * (newZoom - 1) / 2
+        var maxOffsetY = videoContainer.height * (newZoom - 1) / 2
+        mainPage.videoOffsetX = Math.max(-maxOffsetX, Math.min(maxOffsetX, newOffsetX))
+        mainPage.videoOffsetY = Math.max(-maxOffsetY, Math.min(maxOffsetY, newOffsetY))
+        mainPage.videoZoom = newZoom
+        if (newZoom === 1.0) { mainPage.videoOffsetX = 0; mainPage.videoOffsetY = 0 }
+        sendLocalViewUpdate(mainPage.videoZoom, mainPage.videoOffsetX, mainPage.videoOffsetY)
     }
 
     function playWebRTC() {
@@ -4382,30 +4399,14 @@ Rectangle {
         gstPlayer.connectP2P(pairedIosDeviceId, iceArray)
     }
 
-    // MARK: SRT (independent) —— 方案 B：PC 端独立 SRT 拉流（与 SRS/P2P 互斥）
-    // SRT 服务端口写死 10080，IP 复用 srsServer；streamid 用 m=request（拉流）。
+    // MARK: SRT (independent)
+    // ⭐ 2026-06-24：SRT 改走方案A（iOS SRT→SRS 桥接成 WebRTC，PC 仍 WHEP 拉）。
+    //   原方案B（PC srtsrc 直拉）延迟~3s/碎花/画质差，已弃用。playSRT 现直接转 playWebRTC，
+    //   PC 端 SRT 与 SRS 完全等同；iOS 端不用改（照旧推 SRT 到 SRS）；网页内核也天然适配。
+    //   保留此函数仅为兼容残留调用点；GStreamer 的 connectSRT/warmupSRT/gstsrtsource 已不再使用。
     function playSRT() {
-        if (!currentStream || currentStream.length === 0) {
-            console.log("⚠️ playSRT: currentStream 为空，跳过")
-            return
-        }
-
-        // ⭐ 网页内核模式：浏览器不支持 SRT → webview 显示提示，不拉流
-        if (useWebEngineKernel) {
-            console.log("🌐 [网页内核] playSRT → 不支持，显示提示")
-            kernelStartByMode()  // connectMode===2 时内部走 startTest("srt") 提示
-            return
-        }
-
-        isConnecting = true
-        stopAll()
-
-        var srtUri = "srt://" + srsServer + ":10080?streamid=#!::r=live/" + currentStream + ",m=request"
-        console.log("🎬 playSRT: uri=" + srtUri)
-        statusText.text = "正在连接 SRT..."
-
-        gstPlayer.reset()
-        gstPlayer.connectSRT(srtUri)
+        console.log("🎬 playSRT → 方案A：改走 SRS/WHEP（SRT 由 SRS 桥接成 WebRTC）")
+        playWebRTC()
     }
 
     function stopAll() {
@@ -8038,11 +8039,8 @@ Rectangle {
                 mainPage.connectMode = connectstype
             }
 
-            // MARK: SRT (independent) —— 确定 SRT 模式即尽早后台预热解码器/编码器，
-            //   抢在真正 playSRT 之前完成 CUDA/MF 冷启动，消除首屏卡 3.3s。进程级只跑一次。
-            if (mainPage.connectMode === 2) {
-                gstPlayer.warmupSRT()
-            }
+            // ⭐ 2026-06-24：SRT 改走方案A（SRS 桥接 WebRTC），PC 不再用 GStreamer srtsrc 直拉，
+            //   故不再预热 SRT 专用解码/编码（warmupSRT 已无意义，移除避免无谓冷启动开销）。
             
             // ⭐ 推流状态处理
             if (publishStatus === 1 && streamKey && streamKey.length > 0) {
@@ -8057,25 +8055,24 @@ Rectangle {
                     statusText.text = "正在连接视频流..."
                     
                     // 根据 connectstype 选择拉流模式（0=SRS / 1=P2P / 2=SRT）
+                    // ⭐ 2026-06-24：SRT 改走方案A（iOS SRT→SRS 桥接成 WebRTC，PC 仍 WHEP 拉），
+                    //   弃用方案B（PC srtsrc 直拉，延迟~3s/碎花/画质差）。SRT 模式 PC 端等同 SRS，
+                    //   iOS 端不用改（照旧推 SRT 到 SRS）；网页内核也因此天然适配 SRT。
                     if (mainPage.connectMode === 1) {
                         console.log("🌐 使用 P2P 直连模式拉流")
                         playP2P()
-                    } else if (mainPage.connectMode === 2) {   // MARK: SRT (independent)
-                        console.log("🎬 使用 SRT 模式拉流")
-                        playSRT()
                     } else {
-                        console.log("🎬 使用 SRS 模式拉流")
+                        console.log("🎬 使用 SRS/WHEP 模式拉流（含 SRT→SRS 桥接）")
                         playWebRTC()
                     }
                 } else if (modeChanged) {
                     // ⭐ 播放中 iOS 切换了连接方式（SRS↔P2P↔SRT）→ 重连到新模式
+                    //   SRT 走方案A（等同 SRS/WHEP），见上方说明。
                     var modeName = mainPage.connectMode === 1 ? "P2P" : (mainPage.connectMode === 2 ? "SRT" : "SRS")
                     console.log("🔁 播放中连接方式切换 → " + modeName + "，重连")
                     stopAll()
                     if (mainPage.connectMode === 1) {
                         playP2P()
-                    } else if (mainPage.connectMode === 2) {   // MARK: SRT (independent)
-                        playSRT()
                     } else {
                         playWebRTC()
                     }

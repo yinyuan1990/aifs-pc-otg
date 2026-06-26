@@ -1,6 +1,7 @@
 #include "slowmotionplayer.h"
 #include "gpupipeline.h"
 #include "gstplayer.h"
+#include "webframesource.h"
 #include "imageprovider.h"
 #include "gstcapturedecoder.h"
 #include "naluframestore.h"
@@ -79,40 +80,63 @@ void SlowMotionPlayer::setGpuPipeline(GpuPipeline* pipeline)
     }
 }
 
+GstPlayer* SlowMotionPlayer::gstPlayer() const
+{
+    return qobject_cast<GstPlayer*>(m_gstPlayer ? m_gstPlayer->asQObject() : nullptr);
+}
+
 void SlowMotionPlayer::setGstPlayer(GstPlayer* player)
 {
-    if (m_gstPlayer != player) {
-        // 断开旧连接
-        if (m_gstPlayer) {
-            disconnect(m_gstPlayer, &GstPlayer::h264FrameStored,
-                       this, &SlowMotionPlayer::onFrameEncoded);
-        }
+    // QML 默认绑定走这里（GStreamer 帧源）；统一委托给 setFrameSource。
+    setFrameSource(player);
+}
 
-        // 停止旧解码线程
-        if (m_decodeThread) {
-            m_decodeThread->stop();
-            delete m_decodeThread;
-            m_decodeThread = nullptr;
-        }
+void SlowMotionPlayer::setFrameSource(IFrameSource* source)
+{
+    if (m_gstPlayer == source) return;
 
-        m_gstPlayer = player;
-
-        if (m_gstPlayer) {
-            connect(m_gstPlayer, &GstPlayer::h264FrameStored,
-                    this, &SlowMotionPlayer::onFrameEncoded, Qt::QueuedConnection);
-
-            delete m_gstDecoder;
-            m_gstDecoder = new GstCaptureDecoder();
-
-            m_decodeThread = new SlowMotionDecodeThread(m_gstPlayer, this);
-            connect(m_decodeThread, &SlowMotionDecodeThread::frameDecoded,
-                    this, &SlowMotionPlayer::onFrameDecoded, Qt::QueuedConnection);
-            m_decodeThread->start();
-            qDebug() << "SlowMotionPlayer: H.264 file decoder thread created";
-        }
-
-        emit gstPlayerChanged();
+    // 断开旧连接（SIGNAL/SLOT 宏经 asQObject，兼容 GstPlayer / WebFrameSource）
+    if (m_gstPlayer) {
+        disconnect(m_gstPlayer->asQObject(), SIGNAL(h264FrameStored(qint64)),
+                   this, SLOT(onFrameEncoded(qint64)));
     }
+
+    // 停止旧解码线程
+    if (m_decodeThread) {
+        m_decodeThread->stop();
+        delete m_decodeThread;
+        m_decodeThread = nullptr;
+    }
+
+    m_gstPlayer = source;
+
+    if (m_gstPlayer) {
+        connect(m_gstPlayer->asQObject(), SIGNAL(h264FrameStored(qint64)),
+                this, SLOT(onFrameEncoded(qint64)), Qt::QueuedConnection);
+
+        delete m_gstDecoder;
+        m_gstDecoder = new GstCaptureDecoder();
+
+        m_decodeThread = new SlowMotionDecodeThread(m_gstPlayer, this);
+        connect(m_decodeThread, &SlowMotionDecodeThread::frameDecoded,
+                this, &SlowMotionPlayer::onFrameDecoded, Qt::QueuedConnection);
+        m_decodeThread->start();
+        qDebug() << "SlowMotionPlayer: decoder thread created, format="
+                 << (m_gstPlayer->frameFormat() == IFrameSource::FrameFormat::JPEG ? "JPEG" : "H264");
+    }
+
+    emit gstPlayerChanged();
+}
+
+void SlowMotionPlayer::setFrameSourceObject(QObject *source)
+{
+    IFrameSource *fs = nullptr;
+    if (GstPlayer *gst = qobject_cast<GstPlayer*>(source)) {
+        fs = gst;
+    } else if (WebFrameSource *web = qobject_cast<WebFrameSource*>(source)) {
+        fs = web;
+    }
+    setFrameSource(fs);
 }
 
 void SlowMotionPlayer::setVideoSink(QVideoSink* sink)
@@ -459,16 +483,23 @@ QImage SlowMotionPlayer::getFrameImage(int frameOffset) const
 
     QImage img;
 
-    if (m_gstDecoder && m_gstPlayer) {
+    if (m_gstPlayer) {
         QByteArray data = m_gstPlayer->readH264Frame(globalIndex);
         if (!data.isEmpty()) {
-            m_gstDecoder->flush();
-            img = const_cast<GstCaptureDecoder*>(m_gstDecoder)->decodeNalu(data);
-            if (img.isNull()) {
-                captureDebugLog("SLW", QString("getFrameImage H264 decode NULL global=%1").arg(globalIndex));
+            // ⭐ 按帧源格式分支：网页内核(JPEG)直接 QImage 解；GStreamer(H264) 走软解码器。
+            if (m_gstPlayer->frameFormat() == IFrameSource::FrameFormat::JPEG) {
+                if (!img.loadFromData(data, "JPEG")) {
+                    captureDebugLog("SLW", QString("getFrameImage JPEG decode NULL global=%1").arg(globalIndex));
+                }
+            } else if (m_gstDecoder) {
+                m_gstDecoder->flush();
+                img = const_cast<GstCaptureDecoder*>(m_gstDecoder)->decodeNalu(data);
+                if (img.isNull()) {
+                    captureDebugLog("SLW", QString("getFrameImage H264 decode NULL global=%1").arg(globalIndex));
+                }
             }
         } else {
-            captureDebugLog("SLW", QString("getFrameImage H264 file missing global=%1").arg(globalIndex));
+            captureDebugLog("SLW", QString("getFrameImage file missing global=%1").arg(globalIndex));
         }
     } else {
         captureDebugLog("SLW", "getFrameImage no decoder/player");
@@ -610,7 +641,7 @@ void SlowMotionPlayer::onFrameDecoded(int frameOffset, const QVideoFrame &frame)
 
 // ============ SlowMotionDecodeThread 实现 ============
 
-SlowMotionDecodeThread::SlowMotionDecodeThread(GstPlayer *player, QObject *parent)
+SlowMotionDecodeThread::SlowMotionDecodeThread(IFrameSource *player, QObject *parent)
     : QThread(parent)
     , m_player(player)
 {
@@ -661,10 +692,17 @@ void SlowMotionDecodeThread::run()
             QImage img;
             QByteArray data = m_player->readH264Frame(request.globalIndex);
             if (!data.isEmpty()) {
-                m_decoder->flush();
-                img = m_decoder->decodeNalu(data);
+                // ⭐ 按帧源格式分支：网页内核(JPEG)直接 QImage 解；GStreamer(H264) 走软解码器。
+                if (m_player->frameFormat() == IFrameSource::FrameFormat::JPEG) {
+                    if (!img.loadFromData(data, "JPEG")) {
+                        captureDebugLog("SLW", QString("decodeThread JPEG decode NULL global=%1").arg(request.globalIndex));
+                    }
+                } else {
+                    m_decoder->flush();
+                    img = m_decoder->decodeNalu(data);
+                }
             } else {
-                captureDebugLog("SLW", QString("decodeThread H264 file missing global=%1").arg(request.globalIndex));
+                captureDebugLog("SLW", QString("decodeThread file missing global=%1").arg(request.globalIndex));
             }
 
             if (img.isNull()) {
