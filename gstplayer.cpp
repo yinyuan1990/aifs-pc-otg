@@ -1,5 +1,7 @@
 #include "gstplayer.h"
 #include "capturedebuglog.h"
+#include "p2ploguploader.h"
+#include "h265support.h"   // ⭐ H265 专属逻辑（元素工厂/关键帧判断/独立日志），与本文件 H264 链路解耦
 #include <QDebug>
 #include <QVideoFrameFormat>
 #include <QDir>
@@ -15,6 +17,9 @@
 #include <QTimer>
 #include <QUrl>
 #include <QtConcurrent>
+#include <QThreadPool>
+#include <QHash>
+#include <QList>
 #include <climits>
 #include <cmath>
 
@@ -32,6 +37,19 @@
 static QMutex g_diagLogMutex;
 static QFile* g_diagLogFile = nullptr;
 static QTextStream* g_diagLogStream = nullptr;
+
+// §23.19：全部诊断 txt（gst_diag/nack/srt/srs/p2p/sh）写盘统一挪单线程后台池（FIFO 保序）。
+//   原来在调用线程同步 write+flush——调用方遍布主线程（connect 入口/信令处理）与 GST 流水线线程
+//   （每秒统计/appsink 回调），磁盘忙时单次 flush 可挂调用线程数百 ms~1s：挂主线程=UI 冻结，
+//   挂 GST 线程=收帧/解码停摆=实时流卡（用户「点截图偶尔卡实时流」的同款机理）。
+static QThreadPool* gstDiagWritePool() {
+    static QThreadPool* pool = []() {
+        auto* p = new QThreadPool();
+        p->setMaxThreadCount(1);
+        return p;
+    }();
+    return pool;
+}
 
 // ========== GStreamer 属性安全设置 ==========
 static bool setBoolIfExists(GstElement* elem, const char* prop, gboolean value) {
@@ -138,13 +156,14 @@ static void initDiagLog() {
 }
 
 static void diagLog(const QString& msg) {
-    initDiagLog();
-    if (!g_diagLogStream) return;
-    
-    QMutexLocker locker(&g_diagLogMutex);
-    QString timestamp = QDateTime::currentDateTime().toString("HH:mm:ss.zzz");
-    *g_diagLogStream << "[" << timestamp << "] " << msg << Qt::endl;
-    g_diagLogStream->flush();
+    const QString timestamp = QDateTime::currentDateTime().toString("HH:mm:ss.zzz");
+    gstDiagWritePool()->start([timestamp, msg]() {
+        initDiagLog();
+        if (!g_diagLogStream) return;
+        QMutexLocker locker(&g_diagLogMutex);
+        *g_diagLogStream << "[" << timestamp << "] " << msg << Qt::endl;
+        g_diagLogStream->flush();
+    });
 }
 
 // ========== NACK 专项诊断日志（独立 txt，便于发出来快速判断 NACK/重传是否生效）==========
@@ -152,7 +171,7 @@ static QMutex g_nackLogMutex;
 static QFile* g_nackLogFile = nullptr;
 static QTextStream* g_nackLogStream = nullptr;
 
-static void nackLog(const QString& msg) {
+static void nackLogWrite(const QString& timestamp, const QString& msg) {
     QMutexLocker locker(&g_nackLogMutex);
     if (!g_nackLogFile) {
         QString logPath = QCoreApplication::applicationDirPath() + "/nack_diag.txt";
@@ -172,9 +191,13 @@ static void nackLog(const QString& msg) {
         }
     }
     if (!g_nackLogStream) return;
-    QString timestamp = QDateTime::currentDateTime().toString("HH:mm:ss.zzz");
     *g_nackLogStream << "[" << timestamp << "] " << msg << Qt::endl;
     g_nackLogStream->flush();
+}
+
+static void nackLog(const QString& msg) {
+    const QString timestamp = QDateTime::currentDateTime().toString("HH:mm:ss.zzz");
+    gstDiagWritePool()->start([timestamp, msg]() { nackLogWrite(timestamp, msg); });
 }
 
 // ========== SRT 专项诊断日志（独立 txt，便于发出来快速定位 SRT 拉流问题）==========
@@ -189,7 +212,7 @@ static std::atomic<int> g_srtDepayUnderrun{0};
 static std::atomic<int> g_srtDecodeUnderrun{0};
 static std::atomic<int> g_srtDepayOverrun{0};
 
-static void srtLog(const QString& msg) {
+static void srtLogWrite(const QString& timestamp, const QString& msg) {
     QMutexLocker locker(&g_srtLogMutex);
     if (!g_srtLogFile) {
         QString logPath = QCoreApplication::applicationDirPath() + "/srt_diag.txt";
@@ -210,9 +233,13 @@ static void srtLog(const QString& msg) {
         }
     }
     if (!g_srtLogStream) return;
-    QString timestamp = QDateTime::currentDateTime().toString("HH:mm:ss.zzz");
     *g_srtLogStream << "[" << timestamp << "] " << msg << Qt::endl;
     g_srtLogStream->flush();
+}
+
+static void srtLog(const QString& msg) {
+    const QString timestamp = QDateTime::currentDateTime().toString("HH:mm:ss.zzz");
+    gstDiagWritePool()->start([timestamp, msg]() { srtLogWrite(timestamp, msg); });
 }
 
 // ========== SRS(WebRTC) 专项诊断日志（独立 txt，定位「SRS 偶尔第一次画面出不来」）==========
@@ -223,7 +250,7 @@ static QMutex g_srsLogMutex;
 static QFile* g_srsLogFile = nullptr;
 static QTextStream* g_srsLogStream = nullptr;
 
-static void srsLog(const QString& msg) {
+static void srsLogWrite(const QString& timestamp, const QString& msg) {
     QMutexLocker locker(&g_srsLogMutex);
     if (!g_srsLogFile) {
         QString logPath = QCoreApplication::applicationDirPath() + "/srs_diag.txt";
@@ -244,9 +271,13 @@ static void srsLog(const QString& msg) {
         }
     }
     if (!g_srsLogStream) return;
-    QString timestamp = QDateTime::currentDateTime().toString("HH:mm:ss.zzz");
     *g_srsLogStream << "[" << timestamp << "] " << msg << Qt::endl;
     g_srsLogStream->flush();
+}
+
+static void srsLog(const QString& msg) {
+    const QString timestamp = QDateTime::currentDateTime().toString("HH:mm:ss.zzz");
+    gstDiagWritePool()->start([timestamp, msg]() { srsLogWrite(timestamp, msg); });
 }
 
 // ========== P2P 直连专项诊断日志（独立 txt，定位「P2P 出不来画面，尤其手机连手机热点」）==========
@@ -258,7 +289,7 @@ static QMutex g_p2pLogMutex;
 static QFile* g_p2pLogFile = nullptr;
 static QTextStream* g_p2pLogStream = nullptr;
 
-static void p2pLog(const QString& msg) {
+static void p2pLogWrite(const QString& timestamp, const QString& msg) {
     QMutexLocker locker(&g_p2pLogMutex);
     if (!g_p2pLogFile) {
         QString logPath = QCoreApplication::applicationDirPath() + "/p2p_diag.txt";
@@ -280,9 +311,25 @@ static void p2pLog(const QString& msg) {
         }
     }
     if (!g_p2pLogStream) return;
-    QString timestamp = QDateTime::currentDateTime().toString("HH:mm:ss.zzz");
     *g_p2pLogStream << "[" << timestamp << "] " << msg << Qt::endl;
     g_p2pLogStream->flush();
+}
+
+static void p2pLog(const QString& msg) {
+    // ⭐ H265 会话：整条 P2P 事件日志改道 h265 独立通道（本地 h265_diag.txt +
+    //   上报前缀 pc-gstream-p2p-h265），与 H264 的 p2p_diag.txt 完全分开，便于分开下载分析卡顿。
+    if (H265Support::isActive()) {
+        H265Support::log(msg);
+        return;
+    }
+
+    const QString timestamp = QDateTime::currentDateTime().toString("HH:mm:ss.zzz");
+    gstDiagWritePool()->start([timestamp, msg]() { p2pLogWrite(timestamp, msg); });
+
+    // ⭐ 第二十二章：总后台「P2P日志」开关打开时同步上报服务器（按推流ID分流，前缀 pc-gstream-p2p）。
+    //   append 只进内存缓冲（线程安全、无磁盘操作），留在调用线程即可。
+    P2PLogUploader::instance()->append(QStringLiteral("pc-gstream-p2p"),
+                                       "[" + timestamp + "] " + msg);
 }
 
 // 从一条 ICE candidate 文本里提取类型（host/srflx/prflx/relay/unknown）。
@@ -459,13 +506,17 @@ QString GstPlayer::detectGpuType()
         return s_cachedGpuType;
     }
 
-    // Windows: 通过 WMIC 命令获取显卡信息
+    // Windows: 用 EnumDisplayDevices 纯 API 取显卡名（微秒级，无子进程）。
+    // ⚠️ 原实现起 wmic 子进程 + waitForFinished(3000)——新版 Windows 上 wmic 启动极慢，
+    // freeze_diag 栈捕获实锤首次调用挂主线程 2.8s（QProcess::waitForFinished，§23.15），故弃用。
 #ifdef Q_OS_WIN
-    QProcess process;
-    process.start("cmd.exe", QStringList() << "/c" << "wmic path win32_VideoController get name");
-    process.waitForFinished(3000);
-    
-    QString output = QString::fromLocal8Bit(process.readAllStandardOutput()).toLower();
+    QString output;
+    DISPLAY_DEVICEW dd;
+    dd.cb = sizeof(dd);
+    for (DWORD i = 0; EnumDisplayDevicesW(nullptr, i, &dd, 0); ++i) {
+        output += QString::fromWCharArray(dd.DeviceString).toLower() + QLatin1Char('\n');
+        dd.cb = sizeof(dd);
+    }
     g_lastGpuRawInfo = output;
     qDebug() << "🖥️ 检测到 GPU:" << output.trimmed();
     
@@ -530,9 +581,10 @@ bool GstPlayer::createPipeline()
             return false;
         }
     } else if (m_useWebRTC) {
-        // WebRTC 模式：使用 webrtcbin + rtph264depay
+        // WebRTC 模式：使用 webrtcbin + rtph264depay（H265 会话换 rtph265depay，逻辑在 h265support.cpp）
         m_webrtcbin = gst_element_factory_make("webrtcbin", "webrtcbin");
-        m_rtph264depay = gst_element_factory_make("rtph264depay", "depay");
+        m_rtph264depay = m_useH265 ? H265Support::createDepay()
+                                   : gst_element_factory_make("rtph264depay", "depay");
         
         if (!m_webrtcbin) {
             qCritical() << "❌ webrtcbin 不可用，请检查 GStreamer 插件安装";
@@ -555,24 +607,37 @@ bool GstPlayer::createPipeline()
         int cpuCores = getCore();
         bool isLowEndCPU = cpuCores <= 6;
         
-        // ⭐ P2P 与 SRS 统一使用同一套 jitterbuffer 参数（都按 SRS 来，不再区分连接模式）
-        int jitterLatencyMs = 600;
-        int retryTimeoutMs = 25;
+        // ⭐ §25.5-3（2026-07-03）虚假 NACK 风暴治理：25→120ms。
+        //   25ms 是同 WiFi（零抖动）调出来的值；跨 WiFi 实测到达抖动 51~79ms，大量正常包
+        //   「迟到」>25ms 被当丢包狂发 NACK（实测每秒 +100~345，真丢仅个位数），
+        //   无效重传占上行且污染 RTCP 反馈（iOS 读 RR-RTT 恒 450ms → 自适应误杀码率）。
+        //   120ms > 最大正常抖动，真丢包补回慢 ~100ms 由 jitterbuffer 300ms 缓冲吸收。
+        int retryTimeoutMs = 120;
         int dropoutMs = 1200;
         int misorderMs = 800;
         QString machineType;
-        
+        int p2pJitterMs;   // §23.18（用户定）：P2P 缓冲按机型分档，机型越好越低（300ms 最低、800ms 封顶）
+
         if (memoryGB <= 8 || isLowEndCPU) {
             machineType = (memoryGB <= 8 && isLowEndCPU) ? "极低端机(≤8GB+≤6核)" :
                           (memoryGB <= 8 ? "低端机(≤8GB)" : "低端CPU(≤6核)");
+            p2pJitterMs = 800;
         } else if (memoryGB < 16) {
             machineType = "中端机(8-16GB)";
+            p2pJitterMs = 550;
         } else if (memoryGB < 32) {
             machineType = "高端机(16-32GB)";
+            p2pJitterMs = 400;
         } else {
             machineType = "超高端机(≥32GB)";
+            p2pJitterMs = 300;
         }
-        // 所有机型使用相同的抖动缓冲参数
+
+        // ⭐ P2P 低延迟特化（2026-07-02）+ §23.18 机型分档（2026-07-03 用户定）：
+        //    P2P 直连网络抖动小（netJitter 实测 ~30ms），大缓冲纯属浪费延迟——但低配机主线程/解码
+        //    更易卡，缓冲小了小冻结直接见底前跳，故按机型取 300(超高端)/400(高端)/550(中端)/800(低端)。
+        //    SRS/中继链路保持 600ms 不变。createPipeline 在 connectP2P 里于 m_useP2P=true 之后调用，此处可靠。
+        int jitterLatencyMs = m_useP2P ? p2pJitterMs : 600;
         
         diagLog(QString("🎯 机型自适应配置 [%1, %2GB内存, %3核]:").arg(machineType).arg(memoryGB).arg(cpuCores));
         diagLog(QString("   - jitter=%1ms, retry=15×%2ms, dropout=%3ms, misorder=%4ms")
@@ -584,12 +649,14 @@ bool GstPlayer::createPipeline()
             "latency", jitterLatencyMs,
             nullptr);
         
-        // ⭐ 配置 rtph264depay（防马赛克关键！）
-        bool setWait = setBoolIfExists(m_rtph264depay, "wait-for-keyframe", TRUE);           // ⭐ 必须！等待关键帧才开始解包
-        bool setReq = setBoolIfExists(m_rtph264depay, "request-keyframe", TRUE);             // 启用关键帧请求
-        bool setDiscont = setBoolIfExists(m_rtph264depay, "request-keyframe-on-discont", TRUE); // ⚡ 发现不连续时立即请求关键帧
-        diagLog(QString("✅ rtph264depay: wait=%1, request=%2, on-discont=%3")
-            .arg(setWait).arg(setReq).arg(setDiscont));
+        // ⭐ 配置 rtph264depay（防马赛克关键！）——H265 会话的 depay 配置已在 H265Support::createDepay 内完成
+        if (!m_useH265) {
+            bool setWait = setBoolIfExists(m_rtph264depay, "wait-for-keyframe", TRUE);           // ⭐ 必须！等待关键帧才开始解包
+            bool setReq = setBoolIfExists(m_rtph264depay, "request-keyframe", TRUE);             // 启用关键帧请求
+            bool setDiscont = setBoolIfExists(m_rtph264depay, "request-keyframe-on-discont", TRUE); // ⚡ 发现不连续时立即请求关键帧
+            diagLog(QString("✅ rtph264depay: wait=%1, request=%2, on-discont=%3")
+                .arg(setWait).arg(setReq).arg(setDiscont));
+        }
         
         // ⭐⭐⭐ 关键：监听 webrtcbin 内部元素添加，配置 jitterbuffer（防马赛克核心！）
         // 使用结构体传递参数给回调
@@ -624,7 +691,7 @@ bool GstPlayer::createPipeline()
                 //      jitterbuffer 才会真正按序等待重传包（重传调度依赖非 none 模式）。
                 // drop-on-latency=FALSE 保留：不丢 I 帧，延迟控制仍在应用层做 P 帧追帧。
                 g_object_set(element,
-                    "latency", jitterConfig.latency,   // 600ms（足够容纳一次重传往返）
+                    "latency", jitterConfig.latency,   // P2P=300ms / SRS=600ms（均容纳一次重传往返）
                     "drop-on-latency", FALSE,          // 不丢包，防止丢 I 帧花屏
                     "max-dropout-time", jitterConfig.dropout,
                     "max-misorder-time", jitterConfig.misorder,
@@ -633,6 +700,29 @@ bool GstPlayer::createPipeline()
                     "mode", 1,                         // 🔥 v11: slave 模式（none 不重传调度），启用重排序+重传等待
                     "max-rtcp-rtp-time-diff", -1,      // 禁用 RTCP 检查
                     nullptr);
+                
+                // 🔥 2026-07-02 修复：retryTimeoutMs(25ms) 一直只进了 jitterConfig 没写进元素，
+                //    NACK 重传节奏一直是 GStreamer 默认。属性名是 rtx-retry-timeout（不是 retry-timeout），
+                //    带存在性保护（老版本插件无此属性时跳过，不产生 GObject 警告）。
+                if (g_object_class_find_property(G_OBJECT_GET_CLASS(element), "rtx-retry-timeout")) {
+                    g_object_set(element, "rtx-retry-timeout", jitterConfig.retryTimeout, nullptr);
+                    diagLog(QString("✅ jitterbuffer rtx-retry-timeout=%1ms 已写入").arg(jitterConfig.retryTimeout));
+                }
+
+                // ⭐ §25.5-3（2026-07-03）虚假 NACK 风暴治理（配合 retryTimeoutMs 25→120）：
+                //   rtx-delay=80ms：首次发 NACK 前先等 80ms（默认自动值被激进 retry 架空），
+                //     容忍跨网正常抖动（实测 51~79ms），包只是晚到就不催重传。
+                //   rtx-delay-reorder=15：默认 3 个包乱序即触发 NACK，公网多跳路径乱序是常态，
+                //     放宽到 15 个包，真丢包仍由 rtx-delay 超时兜底。
+                //   均带属性存在性保护（老版本插件无此属性时静默跳过）。
+                if (g_object_class_find_property(G_OBJECT_GET_CLASS(element), "rtx-delay")) {
+                    g_object_set(element, "rtx-delay", 80, nullptr);
+                    diagLog("✅ jitterbuffer rtx-delay=80ms 已写入（跨网抖动容忍）");
+                }
+                if (g_object_class_find_property(G_OBJECT_GET_CLASS(element), "rtx-delay-reorder")) {
+                    g_object_set(element, "rtx-delay-reorder", 15, nullptr);
+                    diagLog("✅ jitterbuffer rtx-delay-reorder=15包 已写入（乱序不触发 NACK）");
+                }
                 
                 diagLog(QString("✅ v11 jitterbuffer: latency=%1ms, do-retransmission=TRUE(NACK重传), mode=1(slave), drop-on-latency=FALSE")
                     .arg(jitterConfig.latency));
@@ -653,10 +743,12 @@ bool GstPlayer::createPipeline()
         m_appsrc = gst_element_factory_make("appsrc", "src");
     }
     
-    m_h264parse = gst_element_factory_make("h264parse", "parse");
+    // ⭐ H265 会话：parse 元素换 h265parse（配置在 h265support.cpp，参数策略与 h264parse 对齐）
+    m_h264parse = m_useH265 ? H265Support::createParse()
+                            : gst_element_factory_make("h264parse", "parse");
     
     // ⭐ 配置 h264parse（与 Java 完全一致）
-    if (m_h264parse) {
+    if (m_h264parse && !m_useH265) {
         g_object_set(m_h264parse,
             "config-interval", 1,     // 1 = 每个关键帧前插入SPS/PPS（与Java一致）
             "update-timecode", FALSE, // 不更新时间码，避免时间戳问题
@@ -703,7 +795,8 @@ bool GstPlayer::createPipeline()
             "drop", TRUE,
             nullptr);
         GstCaps *naluCaps = gst_caps_from_string(
-            "video/x-h264, stream-format=(string)byte-stream, alignment=(string)au");
+            m_useH265 ? H265Support::naluCapsString()
+                      : "video/x-h264, stream-format=(string)byte-stream, alignment=(string)au");
         gst_app_sink_set_caps(GST_APP_SINK(m_naluAppsink), naluCaps);
         gst_caps_unref(naluCaps);
         g_signal_connect(m_naluAppsink, "new-sample", G_CALLBACK(onNaluStoreSample), this);
@@ -751,7 +844,13 @@ bool GstPlayer::createPipeline()
     
     // 根据 GPU 类型确定解码器优先级（与 Java 一致）
     QStringList decoderPriority;
-    if (gpuType == "NVIDIA") {
+    if (m_useH265) {
+        // ⭐ H265 解码器优先级表在 h265support.cpp（nvh265dec/d3d11h265dec，软解 avdec_h265）
+        decoderPriority = H265Support::decoderPriority(gpuType);
+        qDebug() << "📋 H265 会话 - 解码器优先级:" << decoderPriority.join(" > ");
+        H265Support::log(QString("解码器优先级 [%1 GPU]: %2 → 软解 %3")
+            .arg(gpuType, decoderPriority.join(" > "), H265Support::softwareDecoderName()));
+    } else if (gpuType == "NVIDIA") {
         decoderPriority << "nvh264dec" << "d3d11h264dec";
         qDebug() << "📋 NVIDIA GPU - 解码器优先级: nvh264dec > d3d11h264dec";
     } else if (gpuType == "AMD") {
@@ -855,14 +954,15 @@ bool GstPlayer::createPipeline()
         }
     }
     
-    // 所有硬解都失败，回退到软解
+    // 所有硬解都失败，回退到软解（H265 会话回退 avdec_h265）
     if (!m_decoder) {
-        qDebug() << "⚠️ 所有硬件解码器不可用，回退到软件解码 avdec_h264...";
-        m_decoder = gst_element_factory_make("avdec_h264", "decoder");
+        const char *swDec = m_useH265 ? H265Support::softwareDecoderName() : "avdec_h264";
+        qDebug() << "⚠️ 所有硬件解码器不可用，回退到软件解码" << swDec << "...";
+        m_decoder = gst_element_factory_make(swDec, "decoder");
         if (m_decoder) {
-            m_decoderName = "avdec_h264 (FFmpeg 软解)";
+            m_decoderName = QString("%1 (FFmpeg 软解)").arg(swDec);
             m_useHardwareDecoder = false;
-            qDebug() << "✅ 使用 avdec_h264 软件解码";
+            qDebug() << "✅ 使用" << swDec << "软件解码";
             
             // 软解配置（按属性存在性设置）
             bool setSkip = setIntIfExists(m_decoder, "skip-frame", 0);      // 不跳帧
@@ -884,13 +984,16 @@ bool GstPlayer::createPipeline()
     if (!m_decoder) {
         qCritical() << "❌ 所有解码器都不可用！";
         diagLog("❌ 所有解码器都不可用！检查 GST_PLUGIN_PATH 和插件 DLL 依赖");
-        emit error("无可用的 H264 解码器");
+        emit error(m_useH265 ? "无可用的 H265 解码器" : "无可用的 H264 解码器");
         gst_object_unref(m_pipeline);
         m_pipeline = nullptr;
         return false;
     }
     
     qDebug() << "🎯 最终解码器:" << m_decoderName;
+    if (m_useH265) {
+        H265Support::log(QString("最终解码器: %1").arg(m_decoderName));
+    }
     
     // ⭐⭐⭐ 关键防马赛克队列 2：解码后缓冲（与 Java 一致）
     m_queueDecode = gst_element_factory_make("queue", "queue_decode");
@@ -923,19 +1026,20 @@ bool GstPlayer::createPipeline()
         m_download = gst_element_factory_make("d3d11download", "download");
         if (!m_download) {
             qWarning() << "⚠️ d3d11download 不可用，回退到软解...";
-            // 释放硬解解码器，重新尝试软解
+            // 释放硬解解码器，重新尝试软解（H265 会话回退 avdec_h265）
+            const char *swDec2 = m_useH265 ? H265Support::softwareDecoderName() : "avdec_h264";
             gst_object_unref(m_decoder);
-            m_decoder = gst_element_factory_make("avdec_h264", "decoder");
+            m_decoder = gst_element_factory_make(swDec2, "decoder");
             if (!m_decoder) {
-                qCritical() << "❌ avdec_h264 也不可用";
-                emit error("无可用的 H264 解码器");
+                qCritical() << "❌" << swDec2 << "也不可用";
+                emit error(m_useH265 ? "无可用的 H265 解码器" : "无可用的 H264 解码器");
                 gst_object_unref(m_pipeline);
                 m_pipeline = nullptr;
                 return false;
             }
-            m_decoderName = "avdec_h264 (FFmpeg 软解)";
+            m_decoderName = QString("%1 (FFmpeg 软解)").arg(swDec2);
             m_useHardwareDecoder = false;
-            qDebug() << "✅ 回退到 avdec_h264 软件解码";
+            qDebug() << "✅ 回退到" << swDec2 << "软件解码";
         } else {
             qDebug() << "✅ d3d11download 创建成功（硬解 GPU→CPU）";
         }
@@ -1254,10 +1358,37 @@ bool GstPlayer::createPipeline()
                     self->m_totalFrameCount.fetch_add(1);
                     self->m_currentSecondFrames++;  // 帧到达计数
                     
-                    // 检测 IDR 帧（仅用于统计）
-                    bool isIdr = hasIdrInBuffer(buffer);
+                    // 检测 IDR 帧（仅用于统计；H265 会话用 IRAP 判断，见 h265support.cpp）
+                    bool isIdr = self->m_useH265 ? H265Support::hasKeyframeInBuffer(buffer)
+                                                 : hasIdrInBuffer(buffer);
                     if (isIdr) {
                         self->m_preDecodeIdr.store(true);
+                    }
+
+                    // ⭐ H265 收流诊断：确认 RTP 是否到达 rtph265depay src、是否收到关键帧(IRAP)。
+                    //   若「已收 N 帧」一直涨但从没「关键帧(IRAP)」→ iOS 没发 IDR / PC PLI 没生效
+                    //     → rtph265depay(wait-for-keyframe=TRUE) 会一直等、不往下解码 = 无首帧。
+                    //   若连「已收 N 帧」都不出现 → H265 RTP 根本没到 depay（协商/收流问题）。
+                    if (self->m_useH265) {
+                        H265Support::noteDepayOutput();  // 喂收流入口探针的“零输出”兜底判断
+                        // ⭐ 兜底放行后仍未见 IRAP：每秒催一次 PLI。
+                        //   否则只能干等 Android 的周期关键帧（实测 pad-added→首帧要 12s，
+                        //   其中 9s 是放行后没人催帧在空等），催帧后应缩到 2~3s。
+                        if (!self->m_preDecodeIdr.load()) {
+                            const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+                            if (nowMs - self->m_h265NoIrapPliMs >= 1000) {
+                                self->m_h265NoIrapPliMs = nowMs;
+                                QMetaObject::invokeMethod(self, "requestKeyFrame", Qt::QueuedConnection);
+                                H265Support::log("[催帧] depay 已放行但尚未解出 IRAP → 发 PLI 催发送端出关键帧");
+                            }
+                        }
+                        const int total = self->m_totalFrameCount.load();
+                        const gsize sz = gst_buffer_get_size(buffer);
+                        if (isIdr) {
+                            H265Support::log(QString("[收流] rtph265depay 收到关键帧(IRAP)! 累计=%1帧 本帧=%2字节 → 应可开始解码").arg(total).arg(sz));
+                        } else if (total <= 3 || (total % 120) == 0) {
+                            H265Support::log(QString("[收流] rtph265depay 已收 %1 帧(本帧%2字节)，尚未见IRAP → 若持续无IRAP=iOS未发IDR/PLI未生效，depay 一直等关键帧不解码").arg(total).arg(sz));
+                        }
                     }
                     
                     // 🔥 v9.3: 所有帧都通过，不丢弃任何帧
@@ -1266,6 +1397,12 @@ bool GstPlayer::createPipeline()
                 }, this, nullptr);
             gst_object_unref(depaySrcPad);
             qDebug() << "✅ v9.3 简化probe（只统计不丢帧）";
+        }
+
+        // ⭐ H265 收流入口探针（depay sink）：逐包解析 RTP 载荷 NAL 类型 + 零输出兜底
+        //   （2026-07-08 Android H265 黑屏定位：pad-added 有流但 depay 零输出，看它到底收到了什么）
+        if (m_useH265 && m_rtph264depay) {
+            H265Support::attachRtpInputProbe(m_rtph264depay);
         }
 
         captureDebugLog("GST", "WebRTC pipeline linked with NALU tee branch (no sync probe on live path)");
@@ -1414,6 +1551,7 @@ void GstPlayer::destroyPipeline()
     m_webrtcbin = nullptr;     // ⭐ WebRTC 元素
     m_rtpJitterBuffer = nullptr; // ⭐ 随管线销毁置空，避免悬空（不持有所有权）
     m_rtph264depay = nullptr;  // ⭐ WebRTC 元素
+    m_currentRemoteIceUfrag.clear();  // ⭐ 重建后首个 fresh offer 不被误判为切网重协商
     m_h264parse = nullptr;
     m_naluTee = nullptr;
     m_naluQueue = nullptr;
@@ -1774,11 +1912,14 @@ bool GstPlayer::createH264FrameBranch()
         return false;
     }
 
+    // §23.17b（用户定）：leaky 一律 downstream，不区分分辨率——落盘支路（mfh264enc 每帧 IDR + 写盘）
+    //   磁盘忙跟不上时丢最旧落盘帧腾位置，永不反压 tee/解码线程/实时显示支路。
+    //   代价=磁盘忙的那几秒慢放/截图帧序可能出现空洞（跳一帧），换实时流永不被落盘拖卡。
     g_object_set(m_h264FrameQueue,
         "max-size-buffers", 30,
         "max-size-bytes", 0,
         "max-size-time", 0,
-        "leaky", 0,
+        "leaky", 2,
         "silent", TRUE,
         nullptr);
     setIntIfExists(m_h264FrameParse, "config-interval", -1);
@@ -1799,20 +1940,28 @@ bool GstPlayer::createH264FrameBranch()
 
     m_h264FrameDirectory = QCoreApplication::applicationDirPath() + "/captures/frames";
     QDir().mkpath(m_h264FrameDirectory);
+    m_h264SessionPrefix = QString("s_%1").arg(QDateTime::currentMSecsSinceEpoch());
     // ⭐ 清理上一会话残留的 .h264 帧：文件名带 session 前缀(s_<时间戳>_)，重连/重建管线后
     //    旧前缀文件无人引用，原清理只遍历内存集合够不到它们 → 会无限累积(无盘网吧网络目录越来越大越来越卡)。
-    //    本会话此刻尚未写入任何帧，删除全部 *.h264 即只删旧会话孤儿，不影响本次截图/慢放。
+    // §23.16：清理整体移到后台线程——原来在主线程枚举+逐个删除上百文件，freeze_diag 实锤单次挂主线程
+    //    1.4~2.0s（createH264FrameBranch 在主线程被调用）。先定好本会话前缀，后台只删「非本前缀」的
+    //    孤儿文件，与本会话并发写入的新帧天然无冲突。
     {
-        QDir frameDir(m_h264FrameDirectory);
-        const QStringList staleFrames = frameDir.entryList(QStringList() << "*.h264", QDir::Files);
-        for (const QString &f : staleFrames) {
-            frameDir.remove(f);
-        }
-        if (!staleFrames.isEmpty()) {
-            qDebug() << "🗑️ H.264 帧支路: 清理上一会话残留" << staleFrames.size() << "个 .h264 文件";
-        }
+        const QString dir = m_h264FrameDirectory;
+        const QString keepPrefix = m_h264SessionPrefix;
+        QThreadPool::globalInstance()->start([dir, keepPrefix]() {
+            QDir frameDir(dir);
+            const QStringList staleFrames = frameDir.entryList(QStringList() << "*.h264", QDir::Files);
+            int removed = 0;
+            for (const QString &f : staleFrames) {
+                if (f.startsWith(keepPrefix)) continue;
+                if (frameDir.remove(f)) removed++;
+            }
+            if (removed > 0) {
+                qDebug() << "🗑️ H.264 帧支路: 后台清理上一会话残留" << removed << "个 .h264 文件";
+            }
+        });
     }
-    m_h264SessionPrefix = QString("s_%1").arg(QDateTime::currentMSecsSinceEpoch());
     resetH264FrameState();
     qDebug() << "✅ H.264 独立帧保存支路:" << m_h264FrameEncoderName << "目录:" << m_h264FrameDirectory << "前缀:" << m_h264SessionPrefix;
     return true;
@@ -1900,18 +2049,26 @@ int GstPlayer::registerH264ValidRange(qint64 start, qint64 end)
 
 void GstPlayer::updateH264ValidRange(int id, qint64 start, qint64 end)
 {
-    QMutexLocker lock(&m_h264FrameMutex);
-    if (m_h264ValidRanges.contains(id)) {
-        m_h264ValidRanges[id] = qMakePair(start, end);
-        cleanupH264FramesLocked();
+    QStringList doomed;
+    {
+        QMutexLocker lock(&m_h264FrameMutex);
+        if (m_h264ValidRanges.contains(id)) {
+            m_h264ValidRanges[id] = qMakePair(start, end);
+            doomed = cleanupH264FramesLocked();
+        }
     }
+    removeH264FilesAsync(doomed);  // 本函数常被主线程调用，删除必须离主线程
 }
 
 void GstPlayer::unregisterH264ValidRange(int id)
 {
-    QMutexLocker lock(&m_h264FrameMutex);
-    m_h264ValidRanges.remove(id);
-    cleanupH264FramesLocked();
+    QStringList doomed;
+    {
+        QMutexLocker lock(&m_h264FrameMutex);
+        m_h264ValidRanges.remove(id);
+        doomed = cleanupH264FramesLocked();
+    }
+    removeH264FilesAsync(doomed);  // 本函数常被主线程调用，删除必须离主线程
 }
 
 void GstPlayer::resetH264FrameState()
@@ -1939,15 +2096,19 @@ qint64 GstPlayer::takePendingH264FrameIndex()
     return m_pendingH264FrameIndexes.takeFirst();
 }
 
-void GstPlayer::cleanupH264FramesLocked()
+// §23.11 P0-1：持锁期间不再做磁盘删除（原来每 600 帧/24s 一次、一批可达上百个文件，
+//   持锁删除会把同抢 m_h264FrameMutex 的主线程调用方挂住）。锁内只摘索引，
+//   返回待删文件路径，调用方在锁外经 removeH264FilesAsync 丢后台线程删除。
+QStringList GstPlayer::cleanupH264FramesLocked()
 {
+    QStringList doomedPaths;
     const qint64 newest = m_newestH264Frame.load(std::memory_order_acquire);
-    if (newest < 0) return;
+    if (newest < 0) return doomedPaths;
 
     const qint64 cleanupBelow = newest - H264_FRAME_KEEP_COUNT;
     const qint64 safeBelow = newest - H264_SAFETY_MARGIN;
     const qint64 cutoff = qMin(cleanupBelow, safeBelow);
-    if (cutoff < 0) return;
+    if (cutoff < 0) return doomedPaths;
 
     QList<qint64> toRemove;
     for (qint64 frameIndex : m_h264AvailableFrames) {
@@ -1957,8 +2118,8 @@ void GstPlayer::cleanupH264FramesLocked()
     }
 
     for (qint64 frameIndex : toRemove) {
-        QFile::remove(h264FramePath(frameIndex));
-        QFile::remove(h264FramePath(frameIndex) + ".tmp");
+        doomedPaths.append(h264FramePath(frameIndex));
+        doomedPaths.append(h264FramePath(frameIndex) + ".tmp");
         m_h264AvailableFrames.remove(frameIndex);
     }
 
@@ -1970,6 +2131,18 @@ void GstPlayer::cleanupH264FramesLocked()
             .arg(newest)
             .arg(m_h264ValidRanges.size()));
     }
+    return doomedPaths;
+}
+
+// §23.11 P0-1：批量文件删除统一走全局线程池（低频、无顺序要求，删不掉的下轮清理再收）
+void GstPlayer::removeH264FilesAsync(const QStringList &paths)
+{
+    if (paths.isEmpty()) return;
+    QThreadPool::globalInstance()->start([paths]() {
+        for (const QString &p : paths) {
+            QFile::remove(p);
+        }
+    });
 }
 
 bool GstPlayer::isH264FrameProtectedLocked(qint64 frameIndex) const
@@ -1998,12 +2171,15 @@ void GstPlayer::recomputeOldestH264FrameLocked()
 bool GstPlayer::writeH264Frame(qint64 frameIndex, const QByteArray &data)
 {
     if (frameIndex < 0 || data.isEmpty()) return false;
-    QDir().mkpath(m_h264FrameDirectory);
     const QString path = h264FramePath(frameIndex);
     const QString tmpPath = path + ".tmp";
     QFile::remove(tmpPath);
     QFile file(tmpPath);
-    if (!file.open(QIODevice::WriteOnly)) return false;
+    if (!file.open(QIODevice::WriteOnly)) {
+        // §23.11 P0-1：mkpath 从每帧必调改为仅 open 失败时兜底（目录不存在是唯一常见失败因）
+        QDir().mkpath(m_h264FrameDirectory);
+        if (!file.open(QIODevice::WriteOnly)) return false;
+    }
     if (file.write(data) != data.size()) {
         file.close();
         QFile::remove(tmpPath);
@@ -2016,6 +2192,7 @@ bool GstPlayer::writeH264Frame(qint64 frameIndex, const QByteArray &data)
         return false;
     }
 
+    QStringList doomed;
     {
         QMutexLocker lock(&m_h264FrameMutex);
         m_h264AvailableFrames.insert(frameIndex);
@@ -2026,9 +2203,10 @@ bool GstPlayer::writeH264Frame(qint64 frameIndex, const QByteArray &data)
             m_newestH264Frame.store(frameIndex, std::memory_order_release);
         }
         if ((frameIndex % H264_CLEANUP_INTERVAL) == 0) {
-            cleanupH264FramesLocked();
+            doomed = cleanupH264FramesLocked();
         }
     }
+    removeH264FilesAsync(doomed);
     return true;
 }
 
@@ -2108,6 +2286,11 @@ bool GstPlayer::linkNaluTeeBranch()
 
 void GstPlayer::extractSpsPpsFromCaps()
 {
+    // ⭐ H265：codec_data 是 hvcC 格式（非 avcC），且 h265parse config-interval=1 已内联
+    //   VPS/SPS/PPS 到码流，无需单独提取——直接跳过（storeNaluFromBuffer 有 H265 分支）。
+    if (m_useH265) {
+        return;
+    }
     if (!m_h264parse || !m_spsPpsAnnexB.isEmpty()) {
         return;
     }
@@ -2199,11 +2382,16 @@ void GstPlayer::storeNaluFromBuffer(GstBuffer *buffer)
 
     bool isKeyFrame = !GST_BUFFER_FLAG_IS_SET(buffer, GST_BUFFER_FLAG_DELTA_UNIT);
     if (!isKeyFrame) {
-        isKeyFrame = hasIdrInBuffer(buffer);
+        isKeyFrame = m_useH265 ? H265Support::hasKeyframeInBuffer(buffer)
+                               : hasIdrInBuffer(buffer);
     }
 
     QByteArray naluData;
-    if (isAnnexB) {
+    if (m_useH265 && isAnnexB) {
+        // ⭐ H265：h265parse(config-interval=1) 已保证关键帧前带 VPS/SPS/PPS，
+        //   直接原样存储；关键帧判断用 IRAP（上面已判），不做 H264 的 NAL type 5/7 细化。
+        naluData.append(reinterpret_cast<const char*>(raw), rawSize);
+    } else if (isAnnexB) {
         naluData.reserve(rawSize + m_spsPpsAnnexB.size() + 16);
         if (isKeyFrame && !m_spsPpsAnnexB.isEmpty()
             && !hasAnnexBNalType(raw, rawSize, 7)) {
@@ -2261,8 +2449,13 @@ GstFlowReturn GstPlayer::onNaluStoreSample(GstAppSink *sink, gpointer userData)
         return GST_FLOW_OK;
     }
 
-    if (hasIdrInBuffer(gst_sample_get_buffer(sample))) {
-        self->m_preDecodeIdr.store(true);
+    {
+        GstBuffer *kfBuf = gst_sample_get_buffer(sample);
+        const bool kf = self->m_useH265 ? H265Support::hasKeyframeInBuffer(kfBuf)
+                                        : hasIdrInBuffer(kfBuf);
+        if (kf) {
+            self->m_preDecodeIdr.store(true);
+        }
     }
 
     GstBuffer *buffer = gst_sample_get_buffer(sample);
@@ -2310,6 +2503,7 @@ GstFlowReturn GstPlayer::onNewSample(GstAppSink *sink, gpointer userData)
             if (self->m_useSRT) srtLog(QString("[分辨率] %1x%2").arg(width).arg(height));
             emit self->videoSizeChanged();
 
+
             // ⭐ 兜底「切超高清条纹 / 切挡位短暂花屏」（2026-06-24）：
             //   分辨率中途变化(oldW/oldH 已非 0)= iOS 切挡位/超高清后新的 SPS/PPS 序列开始，
             //   首批新分辨率帧若不完整会出条纹。主动请求一次关键帧(PLI)逼 iOS 尽快补一个干净 IDR，
@@ -2328,6 +2522,8 @@ GstFlowReturn GstPlayer::onNewSample(GstAppSink *sink, gpointer userData)
             qDebug() << "🎬 首帧已接收";
             if (self->m_useSRT) srtLog(QString("[首帧] ✅ SRT 已解码出首帧 %1x%2").arg(width).arg(height));
             if (self->m_useP2P) p2pLog(QString("[首帧] ✅ P2P 已解码出首帧 %1x%2 → 真正出画面，全链路打通").arg(width).arg(height));
+            // ⭐ H265：首帧解码成功 = 全链路(收流→解码→显示)打通，H265 真出画面
+            if (self->m_useH265) H265Support::log(QString("[首帧] ✅ H265 已解码出首帧 %1x%2 → 解码器(nvh265dec)正常，全链路打通").arg(width).arg(height));
             emit self->firstFrameReceived();
         }
     }
@@ -2470,6 +2666,13 @@ GstFlowReturn GstPlayer::onNewSample(GstAppSink *sink, gpointer userData)
         // ⭐ x4 得到真实接收帧率，四舍五入
         int newFps = qRound(self->m_fpsEma * 4);
 
+        // ⭐ 真实 ICE 线路（relay/直连）：异步 get-stats，回调里解析选中候选对的 local/remote candidate-type。
+        if (self->m_useWebRTC && self->m_webrtcbin) {
+            GstPromise *statsPromise = gst_promise_new_with_change_func(
+                GstPlayer::onWebRtcStatsReady, self, nullptr);
+            g_signal_emit_by_name(self->m_webrtcbin, "get-stats", nullptr, statsPromise);
+        }
+
         // ⭐ NACK / 重传 专项统计（每秒读 jitterbuffer stats，证明 NACK 是否真在工作）
         if (self->m_rtpJitterBuffer) {
             GstStructure *jbStats = nullptr;
@@ -2486,11 +2689,22 @@ GstFlowReturn GstPlayer::onNewSample(GstAppSink *sink, gpointer userData)
                 gst_structure_get_uint64(jbStats, "rtx-rtt", &rtxRtt);               // 重传平均往返时间（GStreamer 单位为纳秒）
 
                 // 增量（相比上一秒），更直观看“这一秒发了多少 NACK / 补回多少”
-                static guint64 s_lastRtxCount = 0, s_lastRtxSuccess = 0, s_lastLost = 0;
+                static guint64 s_lastRtxCount = 0, s_lastRtxSuccess = 0, s_lastLost = 0, s_lastPushed = 0;
                 guint64 dRtx = rtxCount >= s_lastRtxCount ? rtxCount - s_lastRtxCount : 0;
                 guint64 dSucc = rtxSuccess >= s_lastRtxSuccess ? rtxSuccess - s_lastRtxSuccess : 0;
                 guint64 dLost = numLost >= s_lastLost ? numLost - s_lastLost : 0;
-                s_lastRtxCount = rtxCount; s_lastRtxSuccess = rtxSuccess; s_lastLost = numLost;
+                guint64 dPushed = numPushed >= s_lastPushed ? numPushed - s_lastPushed : 0;
+                s_lastRtxCount = rtxCount; s_lastRtxSuccess = rtxSuccess; s_lastLost = numLost; s_lastPushed = numPushed;
+
+                // ⭐ B 档面板快照：本秒 NACK/重传补回/丢包 + 丢包率%
+                self->m_statNackPerSec.store((int)dRtx);
+                self->m_statRtxOkPerSec.store((int)dSucc);
+                self->m_statLostPerSec.store((int)dLost);
+                {
+                    const guint64 denom = dPushed + dLost;
+                    const int lossPctX100 = denom > 0 ? (int)((dLost * 10000ULL) / denom) : 0;
+                    self->m_statLossPctX100.store(lossPctX100);
+                }
 
                 // rtx-rtt 是纳秒，转毫秒打印（之前误标为 ms，导致 126000000ns 被读成天文数字）
                 double rtxRttMs = rtxRtt / 1000000.0;
@@ -2512,10 +2726,17 @@ GstFlowReturn GstPlayer::onNewSample(GstAppSink *sink, gpointer userData)
                     if (dLost > 0) {
                         s_weakNetSeconds++;
                         s_goodNetSeconds = 0;
-                        // 丢包即请求关键帧（节流由 sendPLIRequest 内部 PLI_INTERVAL_WEAK_MS 控制）
-                        self->sendPLIRequest();
-                        nackLog(QString("[自适应] 本秒丢包=%1(连续弱网%2s) → 主动请求关键帧冲刷撕裂")
-                                .arg(dLost).arg(s_weakNetSeconds));
+                        // 🔥 2026-07-02 收敛：持续丢包时不再每秒逼一个大 IDR（IDR 是 P 帧 5~10 倍大，
+                        //    每秒强刷会进一步压垮弱网上行——与发送端周期 IDR 攒帧问题同机理）。
+                        //    首个丢包秒立即请求（冲刷撕裂），之后每 3 秒一次。
+                        if (s_weakNetSeconds == 1 || s_weakNetSeconds % 3 == 0) {
+                            self->sendPLIRequest();
+                            nackLog(QString("[自适应] 本秒丢包=%1(连续弱网%2s) → 主动请求关键帧冲刷撕裂")
+                                    .arg(dLost).arg(s_weakNetSeconds));
+                        } else {
+                            nackLog(QString("[自适应] 本秒丢包=%1(连续弱网%2s) → PLI 收敛期跳过(每3s一次)")
+                                    .arg(dLost).arg(s_weakNetSeconds));
+                        }
                     } else {
                         s_goodNetSeconds++;
                         if (s_weakNetSeconds > 0 && s_goodNetSeconds >= 3) {
@@ -2542,6 +2763,10 @@ GstFlowReturn GstPlayer::onNewSample(GstAppSink *sink, gpointer userData)
                 QMutexLocker lock(&self->m_queueMutex);
                 appQueueDepth = self->m_frameQueue.size();
             }
+            // ⭐ B 档面板快照：抖动(ms)/PLI 累计/队列深度（每秒刷新供 QML 轮询）
+            self->m_statJitterMs.store((int)(self->m_jitterEma + 0.5));
+            self->m_statPli.store(self->m_pliRequestCount);
+            self->m_statQueueDepth.store(appQueueDepth);
             int currentInterval = self->m_renderTimer ? self->m_renderTimer->interval() : 0;
             
             // 计算总延迟（GStreamer固定100ms + 实际队列深度 × 配置帧间隔）
@@ -2628,24 +2853,9 @@ GstFlowReturn GstPlayer::onNewSample(GstAppSink *sink, gpointer userData)
             qDebug().noquote() << "📊" << statsMsg << extraMsg << queueMsg;
             
             // ⭐⭐⭐ v12.1 每秒写入 sh.txt（包含完整状态）
-            QFile shFile("sh.txt");
-            if (shFile.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
-                QTextStream ts(&shFile);
-                
-                // 首次写入添加会话头
-                if (!yhHeaderWritten) {
-                    ts << "\n";
-                    ts << "╔══════════════════════════════════════════════════════════════════════════════╗\n";
-                    ts << "║  v12.1 自适应播放日志 - " << QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss") << "  ║\n";
-                    ts << "╠══════════════════════════════════════════════════════════════════════════════╣\n";
-                    ts << "║ 字段说明:                                                                     ║\n";
-                    ts << "║   收=每秒接收帧数  渲=每秒渲染帧数  速度=播放速度(100%=正常,>100追帧,<100慢放) ║\n";
-                    ts << "║   队列=当前帧数/目标帧数  损坏=损坏帧比例(网络质量指标,iOS自适应)             ║\n";
-                    ts << "║   抖动=帧间隔抖动(ms)  到达EMA=平滑后的到达帧率                               ║\n";
-                    ts << "╚══════════════════════════════════════════════════════════════════════════════╝\n\n";
-                    yhHeaderWritten = true;
-                }
-                
+            // §23.19：写盘挪后台——本块跑在 GST 流水线线程，磁盘忙时同步 open/flush/close
+            //   会把收帧/解码整条流水线挂住（=实时流卡）。调用线程只拼行，写盘入队后台单线程。
+            {
                 // 🔥 v12.1 简化格式：关键指标一目了然
                 QString shLog = QString("[%1] 收=%2 渲=%3 速度=%4% | 队列=%5/%6 损坏=%7% 抖动=%8ms | 到达EMA=%9fps 配置=%10fps")
                     .arg(timestamp)
@@ -2668,12 +2878,62 @@ GstFlowReturn GstPlayer::onNewSample(GstAppSink *sink, gpointer userData)
                 if (self->m_corruptRatioEma >= CORRUPT_RATIO_WEAK) {
                     statusStr += " [弱网]";
                 }
-                
-                ts << shLog << statusStr << "\n";
-                ts.flush();
-                shFile.close();
+
+                const QString shLine = shLog + statusStr;
+                // ⭐ H265 会话每秒统计写 sh_h265.txt（与 H264 的 sh.txt 分开，便于分开下载分析卡顿）
+                const bool shH265 = self->m_useH265;
+                gstDiagWritePool()->start([shLine, shH265]() {
+                    QFile shFile(shH265 ? "sh_h265.txt" : "sh.txt");
+                    if (!shFile.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) return;
+                    QTextStream ts(&shFile);
+                    // 首次写入添加会话头（只有后台单线程写，无竞争）
+                    if (!yhHeaderWritten) {
+                        ts << "\n";
+                        ts << "╔══════════════════════════════════════════════════════════════════════════════╗\n";
+                        ts << "║  v12.1 自适应播放日志 - " << QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss") << "  ║\n";
+                        ts << "╠══════════════════════════════════════════════════════════════════════════════╣\n";
+                        ts << "║ 字段说明:                                                                     ║\n";
+                        ts << "║   收=每秒接收帧数  渲=每秒渲染帧数  速度=播放速度(100%=正常,>100追帧,<100慢放) ║\n";
+                        ts << "║   队列=当前帧数/目标帧数  损坏=损坏帧比例(网络质量指标,iOS自适应)             ║\n";
+                        ts << "║   抖动=帧间隔抖动(ms)  到达EMA=平滑后的到达帧率                               ║\n";
+                        ts << "╚══════════════════════════════════════════════════════════════════════════════╝\n\n";
+                        yhHeaderWritten = true;
+                    }
+                    ts << shLine << "\n";
+                    ts.flush();
+                    shFile.close();
+                });
             }
-            
+
+            // ⭐ 第二十二章补强：每秒统计行同步上报服务器（前缀 pc-gstream-p2p）。
+            //   此前只上报事件行（候选/首帧等），后台日志里没有 PC 的每秒时间轴，
+            //   「队列突增 30+ 帧」这类问题定不到精确时刻。仅 WebRTC(P2P/SRS) 路径上报；
+            //   开关关闭时 append 零成本丢弃，不影响本地 sh.txt。
+            if (self->m_useWebRTC) {
+                const QString routeStr = iceCodeStr(self->m_routeLocalCode.load())
+                    + QStringLiteral("/") + iceCodeStr(self->m_routeRemoteCode.load());
+                const QString speedStr = QString::number((int)(playbackRate * 100)) + QStringLiteral("%");
+                const QString corruptPct = QString::number((int)(self->m_corruptRatioEma * 100)) + QStringLiteral("%");
+                QString statLine = QString("[%1] [stat] 收=%2 渲=%3 速度=%4 队列=%5/%6 | nack+%7 rtx回+%8 丢+%9 损坏=%10 抖动=%11ms | 线路=%12 到达EMA=%13fps 应延=%14ms")
+                    .arg(timestamp)
+                    .arg(currentSecondFps)
+                    .arg(renderFps)
+                    .arg(speedStr)
+                    .arg(appQueueDepth)
+                    .arg(self->m_queueTarget)
+                    .arg(self->m_statNackPerSec.load())
+                    .arg(self->m_statRtxOkPerSec.load())
+                    .arg(self->m_statLostPerSec.load())
+                    .arg(corruptPct)
+                    .arg((int)intervalEma)
+                    .arg(routeStr)
+                    .arg((int)arrivalEma)
+                    .arg(appDelayMs);
+                // ⭐ H265 会话上报前缀带 -h265 后缀（总后台分文件落盘，与 H264 分开下载）
+                P2PLogUploader::instance()->append(
+                    H265Support::uploadPrefix(QStringLiteral("pc-gstream-p2p")), statLine);
+            }
+
             // 🔥 v14: 同步更新 QML 显示的队列状态（和 sh.txt 日志保持一致）
             if (self->m_bufferSize.load() != appQueueDepth) {
                 self->m_bufferSize.store(appQueueDepth);
@@ -2727,6 +2987,10 @@ GstBusSyncReply GstPlayer::onBusSyncMessage(GstBus *bus, GstMessage *message, gp
         if (self && self->m_useSRT) {
             srtLog(QString("[ERROR] src=%1: %2 | debug: %3").arg(srcName).arg(err->message).arg(debug));
         }
+        // ⭐ H265：解码器/管线报错记到 h265 日志（nvh265dec not-negotiated / 解码失败等是无首帧的常见根因）
+        if (self && self->m_useH265) {
+            H265Support::log(QString("[ERROR] src=%1: %2 | debug: %3").arg(srcName, err->message, debug ? debug : ""));
+        }
         qCritical() << "❌ GStreamer 错误:" << err->message << "src=" << srcName;
         g_error_free(err);
         g_free(debug);
@@ -2739,6 +3003,10 @@ GstBusSyncReply GstPlayer::onBusSyncMessage(GstBus *bus, GstMessage *message, gp
         diagLog(QString("⚠️ WARNING: %1 | debug: %2").arg(err->message).arg(debug));
         if (self && self->m_useSRT) {
             srtLog(QString("[WARNING] %1 | debug: %2").arg(err->message).arg(debug));
+        }
+        // ⭐ H265：管线告警也记 h265 日志（解码器 caps/协商告警常在此）
+        if (self && self->m_useH265) {
+            H265Support::log(QString("[WARNING] %1 | debug: %2").arg(err->message, debug ? debug : ""));
         }
         g_error_free(err);
         g_free(debug);
@@ -2861,6 +3129,28 @@ void GstPlayer::setAllImageParams(double brightness, double contrast, double sat
     */
 }
 
+void GstPlayer::applyColorFilter(double brightness, double contrast, double saturation, double gamma)
+{
+    // Android 本地滤镜落地：videobalance(亮度/对比度/饱和度) + gamma。
+    //   与被禁用的 setAllImageParams（"对比 iOS 原画"开关）互不影响——这是独立的 Android 滤镜链路。
+    //   仅 g_object_set 属性（轻量）；实际像素处理在 GStreamer 管线线程，不卡 Qt 主线程。
+    setBrightness(brightness);
+    setContrast(contrast);
+    setSaturation(saturation);
+    if (gamma > 0.0) setGamma(gamma);
+    qDebug() << "🎨 [Android本地滤镜] videobalance b=" << brightness
+             << "c=" << contrast << "s=" << saturation << "gamma=" << gamma;
+}
+
+void GstPlayer::clearColorFilter()
+{
+    setBrightness(0.0);
+    setContrast(1.0);
+    setSaturation(1.0);
+    setGamma(1.0);
+    qDebug() << "🎨 [Android本地滤镜] videobalance 复位中性";
+}
+
 void GstPlayer::setConfigFps(double fps)
 {
     // 🔥🔥🔥 v11 防抖动：限制 FPS 设置频率，避免 UI 卡顿
@@ -2961,6 +3251,10 @@ void GstPlayer::connectWebRTC(const QString &host, const QString &app, const QSt
 {
     qDebug() << "🌐 WebRTC 连接:" << host << "/" << app << "/" << stream;
 
+    // ⭐ H265 仅 P2P 支持：SRS/WHEP 链路永远 H264 管线（iOS 端同样约束）
+    m_useH265 = false;
+    H265Support::setActive(false);
+
     // [SRS诊断] 记录连接入口 + 进入时的熔断标志（用于定位「偶尔第一次画面出不来」）。
     srsLog(QString("==== connectWebRTC 入口 ===="));
     srsLog(QString("[connect] host=%1 app=%2 stream=%3").arg(host, app, stream));
@@ -2973,6 +3267,7 @@ void GstPlayer::connectWebRTC(const QString &host, const QString &app, const QSt
     m_webrtcApp = app;
     m_webrtcStream = stream;
     m_useWebRTC = true;
+    m_useP2P = false;  // 🔥 2026-07-02: SRS 路径明确清 P2P 标志（disconnectWebRTC 不清），保证 jitter 参数按 SRS(600ms) 走
     
     // 🔥 重置错误标志和无帧计数
     m_srsError.store(false);
@@ -3206,6 +3501,24 @@ void GstPlayer::disconnectSRT()
 
 // ★★★ P2P 直连模式 BEGIN ★★★
 
+// ⭐ H265：QML 收到 CONFIG_STATE.videoCodec 后、playP2P 前调用。
+//   仅记录标志；真正的元素切换在 createPipeline 各分叉点（见 h265support.h 说明）。
+void GstPlayer::setVideoCodec(const QString &codec)
+{
+    const bool useH265 = H265Support::isH265CodecName(codec);
+    if (useH265 == m_useH265) {
+        return;
+    }
+    m_useH265 = useH265;
+    // ⭐ 立即同步全局会话标志：网页内核模式不走 connectP2P，
+    //   kernelbridge 的日志分流（nh_h265.txt / pc-web-p2p-h265）依赖此标志。
+    H265Support::setActive(useH265);
+    qDebug() << "[H265] 视频编码切换 →" << (useH265 ? "H265" : "H264");
+    if (useH265) {
+        H265Support::log("PC 端进入 H265 模式（下次 connectP2P 建 rtph265depay/h265parse/h265 解码器管线）");
+    }
+}
+
 void GstPlayer::connectP2P(const QString &pairedIosDeviceId, const QJsonArray &iceServers)
 {
     // ⭐ 内核测试模式下，GStreamer 必须让出 P2P：拦截任何（含自动重连触发的）P2P 启动，
@@ -3217,6 +3530,13 @@ void GstPlayer::connectP2P(const QString &pairedIosDeviceId, const QJsonArray &i
 
     qDebug() << "[P2P] 启动 P2P 直连模式，配对设备:" << pairedIosDeviceId;
 
+    // ⭐ H265：会话开关（p2pLog/stat 上报前缀按此路由到 -h265 通道，与 H264 日志分开）
+    H265Support::setActive(m_useH265);
+    if (m_useH265) {
+        H265Support::log(QString("[connect] H265 P2P 会话启动 配对设备=%1 iceServers=%2")
+                         .arg(pairedIosDeviceId).arg(iceServers.size()));
+    }
+
     // ⭐ P2P 独立诊断日志：记录入口（含 ICE 服务器数量，0 个 = 热点必失败的早期信号）
     p2pLog(QString("[connect] 启动 P2P 直连 配对设备=%1 iceServers数量=%2 %3")
            .arg(pairedIosDeviceId)
@@ -3227,6 +3547,7 @@ void GstPlayer::connectP2P(const QString &pairedIosDeviceId, const QJsonArray &i
     m_p2pRemoteCand[0] = m_p2pRemoteCand[1] = m_p2pRemoteCand[2] = m_p2pRemoteCand[3] = 0;
 
     m_pairedIosDeviceId = pairedIosDeviceId;
+    m_p2pIceServers = iceServers;   // §25.7e：留存，切中继重建 pipeline 时复用
     m_useP2P = true;
     m_useWebRTC = true;
     
@@ -3403,6 +3724,20 @@ void GstPlayer::handleP2POffer(const QString &sdp)
     
     GstWebRTCSessionDescription *offer = gst_webrtc_session_description_new(GST_WEBRTC_SDP_TYPE_OFFER, sdpMsg);
 
+    // ⭐ H265 会话：把 iOS 完整 Offer SDP dump 到 h265_diag.txt，定位「无 BUNDLE / 编码协商」问题。
+    //   重点看：① a=group:BUNDLE 是否存在；② m=video 行；③ 有哪些 a=rtpmap（H265? H264 还在吗?）。
+    if (m_useH265) {
+        H265Support::log("========== 收到 iOS Offer（H265 会话）完整 SDP ↓↓↓ ==========");
+        H265Support::log(sdp);
+        H265Support::log("========== iOS Offer SDP ↑↑↑ ==========");
+        bool offerBundle = sdp.contains("a=group:BUNDLE", Qt::CaseInsensitive);
+        bool offerH265 = sdp.contains("H265", Qt::CaseInsensitive) || sdp.contains("HEVC", Qt::CaseInsensitive);
+        bool offerH264 = sdp.contains("H264", Qt::CaseInsensitive);
+        H265Support::log(QString("[Offer分析] 含BUNDLE=%1 含H265=%2 含H264(兜底)=%3 %4")
+            .arg(offerBundle ? "是" : "否❌").arg(offerH265 ? "是" : "否").arg(offerH264 ? "是" : "否❌")
+            .arg(!offerH264 ? "→ Offer 无 H264 兜底，PC 若不支持 H265 接收就会拒绝 m-line 导致无 BUNDLE" : ""));
+    }
+
     // ⭐ 诊断：Offer 里是否已内联 relay 候选者（iOS 可能把候选者写进 Offer 而非单独发）
     {
         int offerRelay = sdp.count("typ relay", Qt::CaseInsensitive);
@@ -3415,13 +3750,58 @@ void GstPlayer::handleP2POffer(const QString &sdp)
                     : (offerRelay > 0 ? "✅ Offer 含 relay" : "")));
     }
 
+    // ⭐⭐⭐ 切网重协商防卡死（2026-07-09 修「切网后必须手动重登才出画面」根因）：
+    //   手机切网时若其 PeerConnection 尚未 FAILED，会发 ICE Restart re-offer（新 ice-ufrag）。
+    //   GStreamer webrtcbin 不会在旧实例上重启 libnice/重新收集候选 → 新 ICE 永远配不通、卡死。
+    //   检测「已建立会话 + ufrag 变化」= 重协商 → 先整体重建 pipeline，再把本 offer apply 到全新
+    //   webrtcbin（等价一次干净重连，与手动重登的效果一致，但全自动）。
+    {
+        QString newUfrag;
+        for (const QString &line : sdp.split('\n')) {
+            const QString t = line.trimmed();
+            if (t.startsWith("a=ice-ufrag:")) { newUfrag = t.mid(12).trimmed(); break; }
+        }
+        const bool isRenegotiation = (m_p2pConnected || !m_currentRemoteIceUfrag.isEmpty())
+                                     && !newUfrag.isEmpty() && newUfrag != m_currentRemoteIceUfrag;
+        if (isRenegotiation) {
+            p2pLog(QString("[reoffer] 检测到重协商 Offer(ufrag %1→%2, 已连接=%3) → 重建 pipeline 再应用"
+                           "（GStreamer 无法在旧 webrtcbin 上 ICE Restart，复用必卡死）")
+                   .arg(m_currentRemoteIceUfrag.isEmpty() ? "-" : m_currentRemoteIceUfrag, newUfrag)
+                   .arg(m_p2pConnected));
+            m_p2pConnected = false;
+            m_webrtcStatus = "P2P: 切网重连中...";
+            emit webrtcStatusChanged(m_webrtcStatus);
+            stop();
+            destroyPipeline();   // 内部会清空 m_currentRemoteIceUfrag
+            m_offerSentForSession.store(false);
+            m_offerInProgress.store(false);
+            m_noFpsSeconds.store(0);
+            if (!createPipeline()) {
+                qWarning() << "[P2P] 重协商重建 pipeline 失败";
+                gst_webrtc_session_description_free(offer);
+                return;
+            }
+            addP2PIceServers(m_p2pIceServers);
+            start();
+        }
+        m_currentRemoteIceUfrag = newUfrag;
+    }
+
     GstPromise *setPromise = gst_promise_new();
     g_signal_emit_by_name(m_webrtcbin, "set-remote-description", offer, setPromise);
-    gst_promise_interrupt(setPromise);
+    // ⭐⭐⭐ 2026-07-19 修「H265 十次约三次黑屏」：必须等 set-remote-description 真正执行完。
+    //   原来 gst_promise_interrupt 不等待——SRD 是 webrtcbin 内部线程的异步操作，transceiver
+    //   由它创建；下面紧接着的 get-transceivers 是同步取值，赶在 SRD 完成前调用就拿到 0 个
+    //   → codec-preferences=H265 / do-nack 全都没设上 → webrtcbin 默认偏好回 H264 Answer
+    //   → H264 流喂进 rtph265depay = not-negotiated → 黑屏。是否黑屏取决于线程调度先后，
+    //   与实测「10 次约 7 次能出画面」吻合（nack_diag 里失败场次应有「transceiver 数量=0」）。
+    //   SRD 为进程内 CPU 操作（解析 SDP/建 transceiver），等待通常几 ms，可接受。
+    //   H264 P2P 同样受益：do-nack 不再有概率漏设（漏设=弱网无重传，花屏概率高）。
+    gst_promise_wait(setPromise);
     gst_promise_unref(setPromise);
     gst_webrtc_session_description_free(offer);
     
-    qDebug() << "[P2P] 已设置远端 Offer SDP";
+    qDebug() << "[P2P] 已设置远端 Offer SDP（SRD 已确认完成）";
 
     // ⭐⭐⭐ P2P 对标 Chrome：在 Answerer 侧的 transceiver 上启用 NACK 重传（核心！）
     //   P2P 模式 PC 是 Answerer，不走 createWebRTCOffer()，transceiver 是 set-remote-description
@@ -3449,6 +3829,19 @@ void GstPlayer::handleP2POffer(const QString &sdp)
                 GstWebRTCRTPTransceiver *trans = g_array_index(transceivers, GstWebRTCRTPTransceiver*, i);
                 if (!trans) continue;
                 GObjectClass *tcls = G_OBJECT_GET_CLASS(trans);
+                // ⭐⭐⭐ H265 关键修复：强制该 transceiver 只用 H265 应答。
+                //   根因：iOS Offer 同时含 H265+H264，webrtcbin 默认偏好 H264 → Answer 回 H264，
+                //   但 PC 管线是 rtph265depay(只解H265) → H264 流喂进 rtph265depay = not-negotiated。
+                //   设 codec-preferences=H265 后 webrtcbin 必回 H265 Answer，与 rtph265depay 对上。
+                if (m_useH265 && g_object_class_find_property(tcls, "codec-preferences")) {
+                    GstCaps *h265Caps = gst_caps_from_string(
+                        "application/x-rtp, media=(string)video, encoding-name=(string)H265, clock-rate=(int)90000");
+                    g_object_set(trans, "codec-preferences", h265Caps, nullptr);
+                    gst_caps_unref(h265Caps);
+                    H265Support::log(QString("[协商] transceiver[%1] codec-preferences=H265 → 强制 Answer 用 H265(匹配 rtph265depay)").arg(i));
+                } else if (m_useH265) {
+                    H265Support::log(QString("⚠️ transceiver[%1] 无 codec-preferences 属性，无法强制 H265").arg(i));
+                }
                 if (g_object_class_find_property(tcls, "do-nack")) {
                     g_object_set(trans, "do-nack", TRUE, nullptr);
                     gboolean nackOn = FALSE;
@@ -3511,6 +3904,20 @@ void GstPlayer::onP2PAnswerCreated(GstWebRTCSessionDescription *answer)
                    "信令至此双向打通，接下来看 [本地候选]/[远端候选] 和 [ice] 状态")
            .arg(sdpStr.size()));
 
+    // ⭐ H265 会话：dump PC 生成的完整 Answer SDP + 关键分析（iOS 报「no BUNDLE group」时看这里）。
+    if (m_useH265) {
+        H265Support::log("========== PC 生成的 Answer（H265 会话）完整 SDP ↓↓↓ ==========");
+        H265Support::log(sdpStr);
+        H265Support::log("========== PC Answer SDP ↑↑↑ ==========");
+        bool ansBundle = sdpStr.contains("a=group:BUNDLE", Qt::CaseInsensitive);
+        bool ansH265 = sdpStr.contains("H265", Qt::CaseInsensitive) || sdpStr.contains("HEVC", Qt::CaseInsensitive);
+        bool ansH264 = sdpStr.contains("H264", Qt::CaseInsensitive);
+        bool videoRejected = sdpStr.contains("m=video 0 ", Qt::CaseInsensitive);
+        H265Support::log(QString("[Answer分析] 含BUNDLE=%1 协商到H265=%2 协商到H264=%3 视频m-line被拒(端口0)=%4 %5")
+            .arg(ansBundle ? "是" : "否❌").arg(ansH265 ? "是" : "否").arg(ansH264 ? "是" : "否").arg(videoRejected ? "是❌" : "否")
+            .arg(!ansBundle ? "→ 这就是 iOS 报 no BUNDLE group 的原因：webrtcbin 拒绝了视频 m-line（对 iOS Offer 里的编码不支持接收）" : ""));
+    }
+
     QMetaObject::invokeMethod(this, [this, sdpStr]() {
         qDebug() << "[P2P] 发送 Answer SDP 给 iOS";
         emit sendSdpAnswer(sdpStr, m_pairedIosDeviceId);
@@ -3537,6 +3944,66 @@ void GstPlayer::handleP2PIce(const QString &candidate, const QString &sdpMid, in
     qDebug() << "[P2P] 添加远端 ICE:" << candidate.left(50) << "...";
     g_signal_emit_by_name(m_webrtcbin, "add-ice-candidate", (guint)sdpMLineIndex,
                           candidate.toUtf8().constData());
+}
+
+// ⭐ webrtcbin get-stats 异步回调：解析「选中候选对」的 local/remote candidate-type，
+//   缓存到 m_routeLocalCode/m_routeRemoteCode，供面板显示真实 relay/直连。
+//   选对策略：优先 nominated；否则取收发字节数最大的活跃对。candidate-type 为 webrtc-stats
+//   标准字符串 host/srflx/prflx/relay。回调在 webrtcbin 线程触发，只写 atomic，线程安全。
+void GstPlayer::onWebRtcStatsReady(GstPromise *promise, gpointer userData)
+{
+    GstPlayer *self = static_cast<GstPlayer*>(userData);
+    if (!promise) return;
+    const GstStructure *reply = gst_promise_get_reply(promise);
+    if (!self || !reply) { gst_promise_unref(promise); return; }
+
+    QHash<QString, int> idToType;   // 候选 id → 类型码
+    struct PairInfo { QString lid, rid; quint64 bytes; bool nominated; };
+    QList<PairInfo> pairs;
+
+    const int n = gst_structure_n_fields(reply);
+    for (int i = 0; i < n; ++i) {
+        const char *fname = gst_structure_nth_field_name(reply, i);
+        const GValue *v = gst_structure_get_value(reply, fname);
+        if (!v || !GST_VALUE_HOLDS_STRUCTURE(v)) continue;
+        const GstStructure *sub = gst_value_get_structure(v);
+        if (!sub) continue;
+
+        const gchar *ctype = gst_structure_get_string(sub, "candidate-type");
+        if (ctype) {
+            idToType.insert(QString::fromUtf8(fname), GstPlayer::iceCandTypeCode(ctype));
+            continue;
+        }
+        if (gst_structure_has_field(sub, "local-candidate-id") &&
+            gst_structure_has_field(sub, "remote-candidate-id")) {
+            PairInfo p;
+            const gchar *lid = gst_structure_get_string(sub, "local-candidate-id");
+            const gchar *rid = gst_structure_get_string(sub, "remote-candidate-id");
+            p.lid = lid ? QString::fromUtf8(lid) : QString();
+            p.rid = rid ? QString::fromUtf8(rid) : QString();
+            guint64 br = 0, bs = 0;
+            gst_structure_get_uint64(sub, "bytes-received", &br);
+            gst_structure_get_uint64(sub, "bytes-sent", &bs);
+            p.bytes = br + bs;
+            gboolean nom = FALSE;
+            gst_structure_get_boolean(sub, "nominated", &nom);
+            p.nominated = nom;
+            pairs.append(p);
+        }
+    }
+
+    int best = -1; quint64 bestBytes = 0;
+    for (int i = 0; i < pairs.size(); ++i) { if (pairs[i].nominated) { best = i; break; } }
+    if (best < 0) {
+        for (int i = 0; i < pairs.size(); ++i) {
+            if (best < 0 || pairs[i].bytes > bestBytes) { best = i; bestBytes = pairs[i].bytes; }
+        }
+    }
+    if (best >= 0) {
+        self->m_routeLocalCode.store(idToType.value(pairs[best].lid, 0));
+        self->m_routeRemoteCode.store(idToType.value(pairs[best].rid, 0));
+    }
+    gst_promise_unref(promise);
 }
 
 void GstPlayer::handleP2PHangup()
@@ -3590,9 +4057,13 @@ void GstPlayer::stopP2PViewRequestRetry(const QString &reason)
     }
 }
 
-// ICE 断线/失败（典型场景：iOS 切换网络换 WiFi）后的主动重连。
-// PC 是 Answerer，最干净的恢复方式是重发 WEBRTC_REQUEST，让 iOS 重新发起 Offer（带新 ICE 候选）；
-// PC 在 handleP2POffer() 里 set-remote-description + create-answer 即可在现有 webrtcbin 上重新打通 ICE。
+// ICE 断线/失败（典型场景：iOS 切换网络换 WiFi / iOS 硬切中继拆会话）后的主动重连。
+// PC 是 Answerer，恢复方式是重发 WEBRTC_REQUEST，让 iOS 重新发起 Offer。
+// ⭐ §25.7e 修复（2026-07-04 日志实锤）：旧实现在【现有 webrtcbin】上收新 ufrag 的 Offer，
+//   但 GStreamer webrtcbin 不会重启 libnice、不重新收集候选（回 Answer 却零新增 [本地候选]），
+//   新会话的连通性检查永远配不成 → 25s 后 ICE FAILED 白等一轮。
+//   改为重连前【整体重建 pipeline】（销毁旧 webrtcbin → 新建 → 重配 ICE 服务器），
+//   新 webrtcbin 对新 Offer 全量收集候选，一次配通。
 void GstPlayer::attemptP2PIceReconnect(const QString &reason)
 {
     if (!m_useP2P || m_pairedIosDeviceId.isEmpty()) return;
@@ -3626,11 +4097,30 @@ void GstPlayer::attemptP2PIceReconnect(const QString &reason)
     QTimer::singleShot(delayMs, this, [this, reason]() {
         if (!m_useP2P || m_pairedIosDeviceId.isEmpty()) { m_iceReconnecting = false; return; }
         if (m_p2pConnected) { m_iceReconnecting = false; return; }
+
+        // ⭐ §25.7e：重建 pipeline（旧 webrtcbin 不认新 ufrag Offer / 不重新收集候选，必须换新）
+        p2pLog("[reconnect] 重建 pipeline（旧 webrtcbin 不重启 libnice，复用必配不成 → 整体换新）");
+        if (m_pipeline) {
+            stop();
+            destroyPipeline();
+        }
+        m_offerSentForSession.store(false);
+        m_offerInProgress.store(false);
+        m_noFpsSeconds.store(0);
+        if (!createPipeline()) {
+            qWarning() << "[P2P] 重连时重建 pipeline 失败";
+            p2pLog("[reconnect] ❌ 重建 pipeline 失败，放弃本次重连");
+            m_iceReconnecting = false;
+            return;
+        }
+        addP2PIceServers(m_p2pIceServers);
+        start();
+
         // 重置等待状态并重发观看请求；scheduleP2PViewRequestRetry 提供兜底重试
         m_waitingForP2POffer.store(true);
         m_p2pViewRequestRetryCount.store(0);
         emit sendViewRequest(m_pairedIosDeviceId);
-        qWarning() << "[P2P] 已重发 WEBRTC_REQUEST 触发 iOS 重新协商:" << reason;
+        qWarning() << "[P2P] 已重建 pipeline 并重发 WEBRTC_REQUEST 触发 iOS 重新协商:" << reason;
         scheduleP2PViewRequestRetry();
         m_iceReconnecting = false;  // 允许后续 ICE 事件再次触发（次数仍受 m_iceRetryCount 限制）
     });
@@ -3882,11 +4372,21 @@ void GstPlayer::onWebRTCPadAdded(GstElement *webrtcbin, GstPad *pad, gpointer us
         qDebug() << "   媒体类型:" << (mediaType ? mediaType : "unknown")
                  << "编码:" << (encoding ? encoding : "unknown");
         
-        // 只处理视频 H264
+        // 只处理视频 H264 / H265
         bool isVideo = mediaType && g_strcmp0(mediaType, "video") == 0;
         bool isH264 = encoding && g_strcmp0(encoding, "H264") == 0;
+        bool isH265 = H265Support::isH265EncodingName(encoding);
+        if (isH265) {
+            H265Support::log(QString("pad-added: 收到 H265 RTP pad（encoding=%1）").arg(encoding));
+        }
+        // ⭐ 防错接：H265 会话收到 H264 pad（或反过来）说明两端 codec 没对齐，打日志便于定位
+        if (self->m_useH265 && isH264) {
+            H265Support::log("⚠️ H265 会话收到 H264 pad！iOS 实际推的是 H264（SDK 不支持/回落），下游 h265 管线将解不出");
+        } else if (!self->m_useH265 && isH265) {
+            qWarning() << "⚠️ H264 会话收到 H265 pad！PC 未按 videoCodec 预建 H265 管线，画面将出不来";
+        }
         
-        if (isVideo || isH264 || g_str_has_prefix(padName, "recv_rtp_src_")) {
+        if (isVideo || isH264 || isH265 || g_str_has_prefix(padName, "recv_rtp_src_")) {
             qDebug() << "✅ 发现视频 RTP pad，连接到解码器...";
             
             // 获取 rtph264depay 的 sink pad
@@ -3897,16 +4397,11 @@ void GstPlayer::onWebRTCPadAdded(GstElement *webrtcbin, GstPad *pad, gpointer us
                     if (ret == GST_PAD_LINK_OK) {
                         qDebug() << "✅ 视频 pad 连接成功";
                         
-                        // ⭐⭐⭐ 关键：与 Java 一致，pad 连接后立即请求关键帧（防止黑屏/绿幕）
+                        // ⭐ pad 连接后请求首个关键帧（防止黑屏/绿幕）
+                        // 🔥 2026-07-02 收敛：原 0/100/300ms 3 连改为立即 1 次 + 300ms 兜底 1 次，
+                        //    避免与 onConnectionStateChanged 的 PLI 叠成初始 IDR 风暴。
                         qDebug() << "🔥 视频流已连接，立即请求首个关键帧...";
                         QMetaObject::invokeMethod(self, "requestKeyFrame", Qt::QueuedConnection);
-                        // 100ms 后再发送一次
-                        QTimer::singleShot(100, self, [self]() {
-                            if (self->m_pipeline) {
-                                self->sendPLIRequest();
-                            }
-                        });
-                        // 300ms 后再发送一次
                         QTimer::singleShot(300, self, [self]() {
                             if (self->m_pipeline) {
                                 self->sendPLIRequest();
@@ -3947,24 +4442,17 @@ void GstPlayer::onConnectionStateChanged(GstElement *webrtcbin, GParamSpec *pspe
             stateStr = "Connected";
             self->m_webrtcConnected = true;
             QMetaObject::invokeMethod(self, "webrtcConnected", Qt::QueuedConnection);
-            // ⭐⭐⭐ 关键：与 Java 一致，连接成功后多次请求关键帧（防止绿幕）
-            // 立即发送第一次 PLI
+            // ⭐ 连接成功后请求关键帧（防止绿幕）。
+            // 🔥 2026-07-02 收敛：原 0/100/300ms 3 连 PLI 逼发送端连出 3 个大 IDR，初始协商期就挤占上行。
+            //    改为立即 1 次 + 300ms 兜底 1 次（RTCP PLI 在已建立连接上很可靠）。
             QMetaObject::invokeMethod(self, "requestKeyFrame", Qt::QueuedConnection);
-            // 100ms 后发送第二次 PLI
-            QTimer::singleShot(100, self, [self]() {
-                if (self->m_webrtcConnected) {
-                    self->sendPLIRequest();
-                    qDebug() << "📨 PLI 请求 (100ms)";
-                }
-            });
-            // 300ms 后发送第三次 PLI
             QTimer::singleShot(300, self, [self]() {
                 if (self->m_webrtcConnected) {
                     self->sendPLIRequest();
-                    qDebug() << "📨 PLI 请求 (300ms)";
+                    qDebug() << "📨 PLI 兜底请求 (300ms)";
                 }
             });
-            qDebug() << "✅ WebRTC 连接已建立，已发送 3 次 PLI 请求";
+            qDebug() << "✅ WebRTC 连接已建立，已发送 PLI 请求（1+1 兜底）";
             break;
         case GST_WEBRTC_PEER_CONNECTION_STATE_DISCONNECTED:
             stateStr = "Disconnected";
@@ -4357,6 +4845,7 @@ void GstPlayer::sendPLIRequest()
         return;
     }
     m_lastKeyframeRequestMs = nowMs;
+    m_pliRequestCount++;  // 🔥 2026-07-02 修复：此前从未递增，统计面板 PLI 恒 0（诊断误导）
     
     // 🔥🔥🔥 P0-1 修复：upstream force-key-unit 必须送到「最靠近 webrtcbin 的元素的 sinkpad」，
     //     事件沿 sinkpad → peer(webrtcbin 的 recv srcpad) 向【上游】传递，webrtcbin 收到后才会生成 RTCP PLI/FIR。
@@ -5024,17 +5513,23 @@ void GstPlayer::onRenderTick()
                         .arg((int)oldEma).arg((int)m_arrivalRateEma);
                 }
                 
-                // 🔥 5秒无帧自动断开
+                // 🔥 2026-07-02 无帧分级兜底（原 5 秒直接 destroy 整条管线，代价极大且不给自愈机会）：
+                //    最常见的无帧原因是丢参考帧后解码器在等 IDR（数据仍在收），PLI 即可自愈——
+                //    2s 起每 2s 请求一次关键帧；连续 15s 仍无帧（真断网/对端消失）才断开。
                 int noFpsCount = m_noFpsSeconds.fetch_add(1) + 1;
-                qDebug().noquote() << QString("⚠️ 连续无帧 %1/5 秒").arg(noFpsCount);
-                if (noFpsCount >= 5 && m_webrtcConnected.load()) {
-                    qWarning() << "❌ 连续5秒无帧，自动断开连接";
+                qDebug().noquote() << QString("⚠️ 连续无帧 %1/15 秒").arg(noFpsCount);
+                if (noFpsCount >= 2 && noFpsCount < 15 && (noFpsCount % 2) == 0 && m_webrtcConnected.load()) {
+                    qDebug().noquote() << QString("🔑 无帧 %1s → 请求关键帧自愈").arg(noFpsCount);
+                    QMetaObject::invokeMethod(this, "requestKeyFrame", Qt::QueuedConnection);
+                }
+                if (noFpsCount >= 15 && m_webrtcConnected.load()) {
+                    qWarning() << "❌ 连续15秒无帧（关键帧自愈无效），自动断开连接";
                     m_srsError.store(true);  // 防止自动重连
                     QMetaObject::invokeMethod(this, "disconnectWebRTC", Qt::QueuedConnection);
                     // 通知QML层
                     QMetaObject::invokeMethod(this, [this]() {
                         emit webrtcStatusChanged("No Frames");
-                        emit error("连续5秒无帧，已自动断开");
+                        emit error("连续15秒无帧，已自动断开");
                     }, Qt::QueuedConnection);
                 }
             } else if (m_lastSecondFps > 0 && m_arrivalRateEma > 0) {
@@ -5157,6 +5652,8 @@ void GstPlayer::onRenderTick()
     
     // ========== 取帧逻辑 ==========
     bool lowWaterHold = false;
+    int burstDropCount = 0;      // §23.11 P0-4：突发积压快排空统计（锁外记日志用）
+    int burstDropOptimal = 0;
     {
         QMutexLocker lock(&m_queueMutex);
         queueDepth = m_frameQueue.size();
@@ -5201,6 +5698,26 @@ void GstPlayer::onRenderTick()
                     .arg(dropCount).arg(dropCount + queueDepth).arg(queueDepth).arg(m_queueTarget);
                 srtLog(QString("[裁帧] 首次裁掉历史积压 %1 帧 | 队列 %2→%3（目标%4）")
                     .arg(dropCount).arg(dropCount + queueDepth).arg(queueDepth).arg(m_queueTarget));
+            }
+        }
+        
+        // ⭐ §23.11 P0-4：突发积压快排空。主线程冻结 ~1s 解除后队列瞬时 30+ 帧，
+        //   1.07x 追帧上限要 ~10s 才排空（全程慢动作+高延迟）。此处队列存的是
+        //   解码后 BGRA 帧、帧间无 H.264 依赖（同 SRT 首帧裁帧的论证），一次性丢
+        //   最旧帧回到最佳水位只会画面前跳、不花屏。阈值=动态 queueMax×2（30fps
+        //   时约 28 帧），正常网络波动到不了，只有冻结/突发才触发；不与 onNewSample
+        //   的 60 帧极端保护、SRT 首帧裁帧冲突（先于两者的语义：温和一档的兜底）。
+        if (m_bufferingStarted.load() && !m_useSRT) {
+            int bMin = 0, bOpt = 0, bMax = 0;
+            getQueueSizeByFps(qMax(10.0, m_arrivalRateEma), bMin, bOpt, bMax, m_corruptRatioEma, m_useP2P);
+            if (queueDepth > bMax * 2 && bOpt > 0) {
+                while (m_frameQueue.size() > bOpt) {
+                    GstSample *oldest = m_frameQueue.takeFirst();
+                    gst_sample_unref(oldest);
+                    burstDropCount++;
+                }
+                queueDepth = m_frameQueue.size();
+                burstDropOptimal = bOpt;
             }
         }
         
@@ -5253,6 +5770,16 @@ void GstPlayer::onRenderTick()
                     QMetaObject::invokeMethod(this, "requestKeyFrame", Qt::QueuedConnection);
             }
             lowWaterHold = true;  // 标记使用最后有效帧
+        }
+    }
+    
+    // §23.11 P0-4：突发裁帧日志（放锁外，p2pLog 的文件 flush 不能在持锁时做）
+    if (burstDropCount > 0) {
+        qWarning().noquote() << QString("⚡ [burst-drop] 突发积压快排空：丢 %1 帧 | 队列 %2→%3（回到最佳水位%4）")
+            .arg(burstDropCount).arg(queueDepth + burstDropCount).arg(queueDepth).arg(burstDropOptimal);
+        if (m_useP2P) {
+            p2pLog(QString("[burst-drop] 冻结/突发后快排空 丢=%1 队列→%2（最佳%3）")
+                .arg(burstDropCount).arg(queueDepth).arg(burstDropOptimal));
         }
     }
     

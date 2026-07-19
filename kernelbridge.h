@@ -65,6 +65,9 @@ public:
     // JS 打日志到 C++（便于在 phoenix_log.txt 里看）
     Q_INVOKABLE void log(const QString &msg);
 
+    // ⭐ JS 写一行 webview 内核「实时流/卡顿」诊断日志到 exe 同级 nh.txt（独立文件，便于离线定位莫名卡顿）
+    Q_INVOKABLE void kernelStat(const QString &line);
+
 signals:
     // 转发 iOS 收到的 P2P 信令给 JS（原始 JSON 字符串，JS 自行解析）
     void signalReceived(const QString &jsonStr);

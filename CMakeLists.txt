@@ -86,6 +86,8 @@ qt_add_executable(Phoenix
     capturedebuglog.h
     gstplayer.cpp        # GStreamer 实时流 + NALU 存储
     gstplayer.h
+    h265support.cpp      # ⭐ H265(HEVC) P2P 支持（元素工厂/IRAP判断/独立日志，与 H264 主链路解耦）
+    h265support.h
     iframesource.h       # ⭐ 帧源抽象接口（截图/慢放数据源解耦：GStreamer / 网页内核）
     webframesource.cpp   # ⭐ 网页内核帧源（JS 回传 JPEG → 落盘，供截图/慢放复用）
     webframesource.h
@@ -93,6 +95,10 @@ qt_add_executable(Phoenix
     gstsrtsource.h
     httpclient.cpp
     httpclient.h
+    p2ploguploader.cpp   # ⭐ P2P诊断日志上报器（总后台开关控制，按推流ID分流上传）
+    p2ploguploader.h
+    zjcinstaller.cpp     # ⭐ zjc_worker 分离后：查版本→按需从服务器下载安装服务→上报状态
+    zjcinstaller.h
     websocketclient.cpp
     websocketclient.h
     shortcutstore.cpp
@@ -168,6 +174,7 @@ target_link_libraries(Phoenix PRIVATE
     gstvideo-1.0
     gstsdp-1.0         # ⭐ SDP 解析（WebRTC 需要）
     gstwebrtc-1.0      # ⭐ WebRTCBin
+    gstrtp-1.0         # ⭐ RTP 载荷解析（H265 收流 NAL 类型诊断，h265support.cpp）
     gobject-2.0
     glib-2.0
     # Windows 网络库
@@ -226,14 +233,24 @@ set_target_properties(Phoenix PROPERTIES
     WIN32_EXECUTABLE TRUE
 )
 
+# §23.14 冻结取证：Release 也产出 Phoenix.pdb（放 exe 同级），
+# 让 freeze_diag.txt 的主线程栈能把 Phoenix.exe 帧解析成 函数名+源文件:行号。
+# /Zi 不改代码生成（仍 /O2 优化），仅多写调试信息；/DEBUG 默认会关掉
+# /OPT:REF|ICF，显式加回避免 exe 变大/布局变化。
+if(MSVC)
+    target_compile_options(Phoenix PRIVATE $<$<CONFIG:Release>:/Zi>)
+    target_link_options(Phoenix PRIVATE
+        $<$<CONFIG:Release>:/DEBUG /OPT:REF /OPT:ICF>
+    )
+endif()
+
+# ⭐ FFmpeg DLL：通配所有 av*/sw*，不写死版本号（升级 61→62→… 不会漏拷/缺 DLL，与 pack.bat 一致）
+file(GLOB FFMPEG_RUNTIME_DLLS "${FFMPEG_BIN_DIR}/av*.dll" "${FFMPEG_BIN_DIR}/sw*.dll")
+
 # 复制 DLL 到输出目录
 add_custom_command(TARGET Phoenix POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${FFMPEG_BIN_DIR}/avformat-62.dll"
-        "${FFMPEG_BIN_DIR}/avcodec-62.dll"
-        "${FFMPEG_BIN_DIR}/avutil-60.dll"
-        "${FFMPEG_BIN_DIR}/swscale-9.dll"
-        "${FFMPEG_BIN_DIR}/swresample-6.dll"
+        ${FFMPEG_RUNTIME_DLLS}
         # libdatachannel（已废弃，改用 GStreamer WebRTCBin）
         # "${VCPKG_BIN_DIR}/datachannel.dll"
         # "${VCPKG_BIN_DIR}/juice.dll"
@@ -303,83 +320,12 @@ add_custom_command(TARGET Phoenix POST_BUILD
         "$<TARGET_FILE_DIR:Phoenix>/models/cardYolov8.onnx"
 )
 
-# ⭐ 子进程守护程序（主程序关闭时运行，打开时终止）
-add_executable(zjc_worker WIN32 zjc_worker.cpp)
-
-# 若存在 WinDivert SDK，则把 winshaper 链进 zjc_worker，打包只需一个 exe（子进程用 --zjc-shaper 自启）
-set(ZJC_WINDIVERT_DIR "${CMAKE_SOURCE_DIR}/winshaper/third_party/WinDivert")
-if(EXISTS "${ZJC_WINDIVERT_DIR}/include/windivert.h")
-    option(ZJC_EMBED_WINSHAPER "Embed WinDivert shaper into zjc_worker.exe" ON)
-else()
-    option(ZJC_EMBED_WINSHAPER "Embed WinDivert shaper into zjc_worker.exe" OFF)
-endif()
-
-if(ZJC_EMBED_WINSHAPER)
-    if(NOT EXISTS "${ZJC_WINDIVERT_DIR}/include/windivert.h")
-        message(FATAL_ERROR "ZJC_EMBED_WINSHAPER=ON but missing ${ZJC_WINDIVERT_DIR}/include/windivert.h — see winshaper/third_party/README.txt")
-    endif()
-    target_sources(zjc_worker PRIVATE
-        winshaper/winshaper_runner.c
-        winshaper/flowmap.c
-        winshaper/rules.c
-        winshaper/shape.c
-        winshaper/procutil.c
-    )
-    set_source_files_properties(
-        winshaper/winshaper_runner.c
-        winshaper/flowmap.c
-        winshaper/rules.c
-        winshaper/shape.c
-        winshaper/procutil.c
-        PROPERTIES LANGUAGE C
-    )
-    target_include_directories(zjc_worker PRIVATE "${ZJC_WINDIVERT_DIR}/include")
-    if(CMAKE_SIZEOF_VOID_P EQUAL 8)
-        target_link_directories(zjc_worker PRIVATE "${ZJC_WINDIVERT_DIR}/x64")
-    else()
-        target_link_directories(zjc_worker PRIVATE "${ZJC_WINDIVERT_DIR}/x86")
-    endif()
-    target_link_libraries(zjc_worker PRIVATE WinDivert Shell32)
-    target_compile_definitions(zjc_worker PRIVATE ZJC_EMBED_WINSHAPER=1)
-else()
-    target_compile_definitions(zjc_worker PRIVATE ZJC_EMBED_WINSHAPER=0)
-endif()
-
-# 链接 Winsock2 + WinHTTP + BCrypt(SHA256) + IpHlpApi(MAC地址)
-target_link_libraries(zjc_worker PRIVATE ws2_32 winhttp bcrypt iphlpapi)
-# 禁用 AUTOMOC（不依赖 Qt）
-set_target_properties(zjc_worker PROPERTIES AUTOMOC OFF)
-# 确保 zjc_worker.exe 输出到与 Phoenix.exe 同一目录
-set_target_properties(zjc_worker PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
-    RUNTIME_OUTPUT_DIRECTORY_DEBUG ${CMAKE_BINARY_DIR}
-    RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_BINARY_DIR}
-)
-
-# 复制 zjc_worker.exe 到 Phoenix.exe 所在目录（多配置构建器如 MSVC）
-add_custom_command(TARGET zjc_worker POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        $<TARGET_FILE:zjc_worker>
-        $<TARGET_FILE_DIR:Phoenix>
-)
-
-# 复制 WinDivert 运行时文件到构建输出目录
-if(ZJC_EMBED_WINSHAPER)
-    if(CMAKE_SIZEOF_VOID_P EQUAL 8)
-        set(_WDRT "${ZJC_WINDIVERT_DIR}/x64")
-    else()
-        set(_WDRT "${ZJC_WINDIVERT_DIR}/x86")
-    endif()
-    add_custom_command(TARGET zjc_worker POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${_WDRT}/WinDivert.dll"   $<TARGET_FILE_DIR:zjc_worker>
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${_WDRT}/WinDivert64.sys" $<TARGET_FILE_DIR:zjc_worker>
-    )
-endif()
+# ⭐ zjc_worker 已分离为独立工程（见 zjc_worker/CMakeLists.txt）：
+#   不再随 Phoenix 编译/打包，改由服务器下发、Phoenix 启动时按需下载安装
+#   （ZjcInstaller）。打包 Phoenix 时不含 zjc_worker.exe / WinDivert.*。
 
 include(GNUInstallDirs)
-install(TARGETS Phoenix zjc_worker
+install(TARGETS Phoenix
     BUNDLE DESTINATION .
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}

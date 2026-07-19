@@ -1,4 +1,5 @@
 #include "httpclient.h"
+#include "zjcinstaller.h"
 #include <QNetworkRequest>
 #include <QUrlQuery>
 #include <QDebug>
@@ -8,11 +9,18 @@
 #include <QStandardPaths>
 #include <QGuiApplication>
 #include <QClipboard>
+#include <QTimer>
 #ifdef Q_OS_WIN
 #include <windows.h>
 #endif
 
 HttpClient* HttpClient::s_instance = nullptr;
+
+// ⭐ 2026-07-11：本机是否装了主流 AI 编程工具（结果由 ZjcInstaller 内部缓存，多次调用不重复扫描）
+bool HttpClient::aiCodingToolsDetected() const
+{
+    return ZjcInstaller::detectAiCodingTools(nullptr);
+}
 
 HttpClient* HttpClient::instance()
 {
@@ -38,6 +46,26 @@ HttpClient::~HttpClient()
 
 void HttpClient::copyToClipboard(const QString &text)
 {
+    copyToClipboardWithRetry(text, 0);
+}
+
+// §23.16：剪贴板被其它进程占用（远控/剪贴板同步类软件 OpenClipboard 未释放）时，
+// OleSetClipboard 会同步等待，freeze_diag 实锤单次挂主线程 ~1s。占用中则延迟重试，
+// 不阻塞；重试超限放弃（复制流名非关键路径）。
+void HttpClient::copyToClipboardWithRetry(const QString &text, int attempt)
+{
+#ifdef Q_OS_WIN
+    if (GetOpenClipboardWindow() != nullptr) {
+        if (attempt < 5) {
+            QTimer::singleShot(300, this, [this, text, attempt]() {
+                copyToClipboardWithRetry(text, attempt + 1);
+            });
+        } else {
+            qWarning() << "[Clipboard] 剪贴板被其它进程持续占用，放弃复制:" << text;
+        }
+        return;
+    }
+#endif
     QClipboard *clipboard = QGuiApplication::clipboard();
     if (clipboard) {
         clipboard->setText(text);
@@ -152,7 +180,10 @@ void HttpClient::login(const QString &username, const QString &password, int pcL
         int httpCode = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         QByteArray responseData = reply->readAll();
         
-        qDebug() << "[HTTP] Response <-" << httpCode << responseData;
+        // ⭐ 2026-07-03（§24 登录卡顿优化）：登录响应可达几十 KB（bindingList 全量），
+        //   全文日志 + 逐行同步 flush 在主线程耗 ~0.3s，截断到 512 字节。
+        qDebug() << "[HTTP] Response <-" << httpCode << responseData.left(512)
+                 << (responseData.size() > 512 ? QString("...(共%1字节,已截断)").arg(responseData.size()) : QString());
         
         if (reply->error() != QNetworkReply::NoError) {
             // 网络错误
@@ -186,9 +217,8 @@ void HttpClient::login(const QString &username, const QString &password, int pcL
         
         QJsonObject obj = doc.object();
         
-        // ⭐ pcfps: 打印完整登录返回结果，检查帧率和超级帧率字段
-        qDebug().noquote() << "[pcfps] ===== 登录返回完整JSON =====" 
-                           << QJsonDocument(obj).toJson(QJsonDocument::Indented);
+        // ⭐ pcfps: 只打印关键帧率字段（2026-07-03 §24：完整 JSON 二次序列化 dump 已删，
+        //   73 个绑定的响应重复落盘一次要 ~0.26s，拖慢登录进主页）
         qDebug() << "[pcfps] levelFps字段:" << obj["levelFps"];
         qDebug() << "[pcfps] levelExposureFps字段:" << obj["levelExposureFps"];
         qDebug() << "[pcfps] pcLevel:" << obj["pcLevel"] << "deviceLevel:" << obj["deviceLevel"];
@@ -260,6 +290,7 @@ void HttpClient::login(const QString &username, const QString &password, int pcL
         setAuthToken(token);
         m_loggedInUsername = obj["username"].toString();
         m_currentDeviceId = deviceId;
+        m_currentDeviceUsername = deviceUser;  // ⭐ 本次登录实际绑定的设备账号（未指定时=后端默认第一个绑定）
         m_pcActivationLevel = pcLevelResp;
         m_pcLevelName = pcLevelName;
         m_pcExpireAt = pcExpireAt;
@@ -271,6 +302,10 @@ void HttpClient::login(const QString &username, const QString &password, int pcL
         // P2: 解析240fps高速模式开关（从系统配置中获取）
         m_highSpeed240Allowed = obj["highSpeed240Enabled"].toBool(false);
         qDebug() << "[Login] highSpeed240Allowed:" << m_highSpeed240Allowed;
+
+        // ⭐ 2026-07-11：AI 白名单（该 PC 设备号在总后台 AI 白名单 → 走原来 fps 逻辑，不因装了 AI 编程工具锁 30）
+        m_aiWhitelisted = obj["aiWhitelisted"].toBool(false);
+        qDebug() << "[Login] aiWhitelisted:" << m_aiWhitelisted;
         
         qDebug() << "[Login] Success! Username:" << m_loggedInUsername 
                  << "DeviceId:" << deviceId << "DeviceUsername:" << deviceUser 

@@ -39,6 +39,16 @@ Item {
         if (pageReady) webView.runJavaScript("if (window.stopPlay) window.stopPlay();")
     }
 
+    // ⭐ Android 本地滤镜（网页内核 sink）：把亮度/对比度/饱和度 CSS 乘数注入页面 <video>。
+    //   iOS 不调用此函数（iOS 走设备端 STOMP 滤镜）。runJavaScript 异步，CSS filter 由
+    //   Chromium 合成器处理，不卡 Qt/JS 主线程。参数 1.0=中性。
+    function applyColorFilter(brightness, contrast, saturate) {
+        if (!pageReady) return
+        var js = "if (window.applyColorFilter) window.applyColorFilter(" +
+                 (brightness || 1.0) + ", " + (contrast || 1.0) + ", " + (saturate || 1.0) + ");"
+        webView.runJavaScript(js)
+    }
+
     // ⭐ 本地画面变换（缩放/镜像/旋转/偏移）转发给页面 JS（CSS transform）。
     //   网页内核作主播放器时，MainPage 的 videoZoom/videoMirrorMode/videoRotation/offset 变化调用。
     function applyTransform(zoom, mirror, rotation, offsetX, offsetY) {
@@ -47,6 +57,17 @@ Item {
                  (zoom || 1.0) + ", '" + (mirror || "none") + "', " +
                  (rotation || 0) + ", " + (offsetX || 0) + ", " + (offsetY || 0) + ");"
         webView.runJavaScript(js)
+    }
+
+    // ⭐ 2026-07-15：鼠标进入/移出实时流画面 → 转发给页面，控制右上角「信息」开关按钮的显隐
+    //   （按钮本身只是入口，点击按钮才真正展开统计面板，逻辑在页面 JS 里，这里只管按钮显隐）。
+    //   根因：MainPage 里 livePanelHover（z:1000，铺满整个实时流面板，用于驱动底部控制栏的 hover
+    //   显隐）盖在 WebEngineView 之上，会拦掉真正的鼠标移动(hover)事件，导致页面收不到
+    //   mousemove/mouseenter，只有点击才能透传下来。QML 端 livePanelHover 本身能可靠拿到 hover
+    //   状态，这里直接把它转发给页面即可，不用等页面自己收事件。
+    function setStatsHover(visible) {
+        if (!pageReady) return
+        webView.runJavaScript("if (window.setStatsHoverFromQml) window.setStatsHoverFromQml(" + (visible ? "true" : "false") + ");")
     }
 
     function _injectAndPlay() {
@@ -64,6 +85,8 @@ Item {
                  "', stream:'" + pendingStream + "', vhost:'" + pendingVhost + "'});"
         }
         webView.runJavaScript(js)
+        // 🔥 2026-07-02: 卡顿根因已定位（发送端周期 IDR 攒帧，见手册第二十一章），
+        //    删除第二十章的临时"播放即自动 A/B 诊断" Timer；需要时仍可手动 window.setAbDiag(true)。
     }
 
     // ⭐ QWebChannel：把 C++ 的 kernelBridge 暴露给页面 JS（P2P 信令）。

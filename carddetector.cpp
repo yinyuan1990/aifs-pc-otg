@@ -2,6 +2,7 @@
 
 #include <QFile>
 #include <QDebug>
+#include <QElapsedTimer>
 #include <algorithm>
 #include <cmath>
 
@@ -135,6 +136,8 @@ void CardDetector::run()
         const int origW = task.frame.width();
         const int origH = task.frame.height();
 
+        QElapsedTimer timer;
+        timer.start();
         CardBox box;
         try {
             std::vector<float> input;
@@ -144,6 +147,7 @@ void CardDetector::run()
             qWarning() << "[CardDetector] 推理异常:" << e.what();
             box = CardBox{};
         }
+        box.inferMs = static_cast<int>(timer.elapsed());
 
         emit detected(task.itemIndex, task.frameOffset, box, origW, origH);
     }
@@ -209,8 +213,11 @@ CardBox CardDetector::infer(const std::vector<float> &input)
     struct Raw { float cx, cy, w, h, conf; };
     std::vector<Raw> raw;
     raw.reserve(64);
+    float maxConfSeen = 0.0f;  // 全体候选最高分（含低于阈值的），用于区分"差一点"vs"完全无牌"
     for (int i = 0; i < numPreds; ++i) {
         const float conf = data[4 * numPreds + i];
+        if (conf > maxConfSeen)
+            maxConfSeen = conf;
         if (conf < CONF_THRESHOLD)
             continue;
         raw.push_back({
@@ -221,8 +228,14 @@ CardBox CardDetector::infer(const std::vector<float> &input)
             conf
         });
     }
-    if (raw.empty())
-        return CardBox{};
+    if (raw.empty()) {
+        // 未检出：valid=false，但带回最高分——conf 接近阈值(如 0.45)=模型临界抖动；
+        // conf 极低(如 0.05)=画面里确实没识别到牌。供 ai_zoom.txt 定性用。
+        CardBox miss;
+        miss.confidence = maxConfSeen;
+        return miss;
+    }
+    const int numCandidates = static_cast<int>(raw.size());
 
     std::sort(raw.begin(), raw.end(), [](const Raw &a, const Raw &b) {
         return a.conf > b.conf;
@@ -255,5 +268,6 @@ CardBox CardDetector::infer(const std::vector<float> &input)
     out.h = roundi(best.h);
     out.confidence = best.conf;
     out.valid = (out.w > 0 && out.h > 0);
+    out.candidates = numCandidates;
     return out;
 }

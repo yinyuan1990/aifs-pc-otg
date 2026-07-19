@@ -69,7 +69,9 @@ void SlowMotionPlayer::saveSettings()
     m_settings.setValue("slowmo/multiplier", m_playbackMultiplier);
     m_settings.setValue("slowmo/maxFrameRate", m_maxFrameRate);
     m_settings.setValue("slowmo/maxFrames", m_maxFrames);
-    m_settings.sync();
+    // ⚠️ 不要调 m_settings.sync()：Windows 注册表后端的 sync() 会 RegFlushKey 强制刷盘，
+    // 磁盘忙时（H264 落盘支路持续写入）单次可挂主线程 700ms+（freeze_diag 实锤，§23.15）。
+    // setValue 已实时写入注册表内存，由系统 lazy writer 落盘；进程退出时 QSettings 析构自会 sync。
 }
 
 void SlowMotionPlayer::setGpuPipeline(GpuPipeline* pipeline)

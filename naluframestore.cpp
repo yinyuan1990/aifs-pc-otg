@@ -2,6 +2,7 @@
 #include <QDebug>
 #include <QDir>
 #include <QStandardPaths>
+#include <QThreadPool>
 #include <algorithm>
 #include <cstring>
 
@@ -65,7 +66,11 @@ void NaluFrameStore::cleanupMmap()
     if (m_dataFile.isOpen()) {
         QString path = m_dataFile.fileName();
         m_dataFile.close();
-        QFile::remove(path);
+        // §23.16：150MB 级 mmap 数据文件的删除移到后台线程——析构多发生在主线程
+        //（deleteChildren），freeze_diag 实锤 DeleteFileW 单次挂主线程 ~2s。
+        QThreadPool::globalInstance()->start([path]() {
+            QFile::remove(path);
+        });
     }
 }
 

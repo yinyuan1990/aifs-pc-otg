@@ -5,6 +5,7 @@
 #include <QJsonDocument>
 #include <QJsonParseError>
 #include <QDateTime>
+#include <QNetworkInterface>
 
 WebSocketClient* WebSocketClient::instance()
 {
@@ -213,6 +214,25 @@ void WebSocketClient::sendWebRTCSignaling(const QString &type, const QString &to
         payload["sdpMLineIndex"] = sdpMLineIndex;
     } else if (type == "WEBRTC_HANGUP") {
         payload["reason"] = reason;
+    } else if (type == "WEBRTC_REQUEST") {
+        // ⭐ §25.7e 线路预判定：把 PC 全部局域网 IPv4 带给手机端（逗号分隔）。
+        //   手机端拿自己的 WiFi IP 与之比网段：同网段=同 WiFi → 建会话就走直连；
+        //   否则建会话就 relay-only——一次 ICE 定终身，避免「直连先通后换车再切中继」的 40s 折腾。
+        QStringList localIps;
+        const auto ifaces = QNetworkInterface::allInterfaces();
+        for (const auto &iface : ifaces) {
+            if (!(iface.flags() & QNetworkInterface::IsUp) ||
+                (iface.flags() & QNetworkInterface::IsLoopBack)) continue;
+            for (const auto &entry : iface.addressEntries()) {
+                const QHostAddress addr = entry.ip();
+                if (addr.protocol() != QAbstractSocket::IPv4Protocol) continue;
+                if (addr.isLoopback() || addr.isLinkLocal()) continue;
+                localIps << addr.toString();
+            }
+        }
+        payload["networkType"] = "wifi";   // PC 桌面端视为非蜂窝宽带
+        payload["localIps"] = localIps.join(",");
+        qDebug() << "[WebRTC信令] REQUEST 附带本机IP:" << payload["localIps"].toString();
     }
     
     sendMessage("/app/webrtc/signal", payload);

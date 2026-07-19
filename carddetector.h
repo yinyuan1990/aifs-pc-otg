@@ -22,8 +22,11 @@ struct CardBox {
     int y = 0;
     int w = 0;
     int h = 0;
-    float confidence = 0.0f;
+    float confidence = 0.0f;  // valid=true: 最高分框的分数；valid=false: 全体候选最高分(含低于阈值的)
     bool valid = false;
+    // ── 诊断字段（ai_zoom.txt 用）──
+    int candidates = 0;       // 过阈值的候选框数量
+    int inferMs = 0;          // 本帧预处理+推理耗时(ms)
 };
 
 /**

@@ -42,25 +42,18 @@ Name: "chinesesimplified"; MessagesFile: "compiler:Languages\ChineseSimplified.i
 Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: "附加选项:"
 
 [Files]
-; zjc_worker 相关文件：卸载时保留（uninsneveruninstall）
-Source: "D:\javafx\Acard\aic\Aifs\release\zjc_worker.exe"; DestDir: "{app}"; Flags: ignoreversion uninsneveruninstall
-; 其余所有文件正常卸载
-Source: "D:\javafx\Acard\aic\Aifs\release\*"; DestDir: "{app}"; Excludes: "zjc_worker.exe"; Flags: ignoreversion recursesubdirs createallsubdirs
+; ⭐ zjc_worker 已分离（第三十二章）：不再随主程序打包，PC 端登录后由 ZjcInstaller
+;   从 CDN 自动下载安装为独立 Windows 服务（金凤凰）。故此处不再包含 zjc_worker.exe。
+Source: "D:\javafx\Acard\aic\Aifs\release\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
-[Registry]
-; 注册 zjc_worker.exe 开机自启动
-; 卸载时保留注册表项，zjc_worker 继续开机自启
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "zjc_worker"; ValueData: "{app}\zjc_worker.exe"
-
 [Run]
 ; 先静默安装 VC++ 运行库（如果需要）
 Filename: "{app}\vc_redist.x64.exe"; Parameters: "/install /quiet /norestart"; StatusMsg: "正在安装 Visual C++ 运行库..."; Flags: waituntilterminated skipifdoesntexist
-; 安装完成后启动子进程（后台，不等待）
-Filename: "{app}\zjc_worker.exe"; Flags: nowait skipifdoesntexist runhidden
+; ⭐ zjc_worker 已分离：不再随安装包启动，改由 Phoenix 登录后 ZjcInstaller 从 CDN 自动装成服务。
 ; 安装完成后运行程序
 Filename: "{app}\{#MyAppExeName}"; Description: "立即运行 {#MyAppName}"; Flags: nowait postinstall skipifsilent
 
@@ -105,12 +98,12 @@ begin
   end;
 end;
 
-// 卸载前只关闭主进程，子进程保留运行
+// 卸载前只关闭主进程。zjc_worker 已分离为独立 Windows 服务（装在 ProgramData，
+// 不在 {app} 安装目录内），卸载本安装包不会触碰它，天然保留继续运行。
 function InitializeUninstall(): Boolean;
 var
   ResultCode: Integer;
 begin
   Result := True;
-  // 只关闭主进程，zjc_worker 保留
   Exec('taskkill.exe', '/F /IM Phoenix.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 end;

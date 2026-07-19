@@ -39,10 +39,18 @@ Rectangle {
     property string srsServer: ""
     property string currentStream: "VID_59C9232BFF5576718C575E19EDE7"
     
+    // ⭐ 测试开关（§21.11 iOS 自适应 fps 单测用，2026-07-02 测试结束已改回 false）：
+    //   true = 屏蔽 PC 端所有【自动】下发 fps 的路径
+    //   （双缓冲第二道防线 onRequestFpsChange / 切档后 fpsLimitPushTimer 补发 / 切档 fps 超限 clamp 下发）。
+    //   手动路径不受影响（帧率滑块/滚轮/相机设定还原照常下发）。
+    property bool fpsAutoPushDisabled: false
+
     // P2P 直连模式属性
     property int connectMode: 0                        // 0=SRS模式, 1=P2P直连模式, 2=SRT模式（来自CONFIG_STATE.state.connectstype）
+    property string videoCodec: "h264"                 // ⭐ H265：P2P 实际编码（来自CONFIG_STATE.state.videoCodec，iOS 登录页二级选项）
     property string pairedIosDeviceId: ""              // 配对的 iOS 设备 ID
     property double _lastKeyframeWsMs: 0                // P0-1: WebSocket 关键帧兜底限流时间戳
+    property double _lastSpaceCaptureMs: 0              // 2026-07-19: 空格连拍节流时间戳（按住=键盘自动重复~30次/s，低端机被顶死）
     property var iceServers: []                        // 从登录接口获取的 ICE 服务器列表
     
     // 行列调节防抖
@@ -71,6 +79,31 @@ Rectangle {
         var maxOffsetY = videoContainer.height * (videoZoom - 1) / 2
         videoOffsetX = Math.max(-maxOffsetX, Math.min(maxOffsetX, videoOffsetX))
         videoOffsetY = Math.max(-maxOffsetY, Math.min(maxOffsetY, videoOffsetY))
+    }
+
+    // ⭐ P2P 连接阶段：把 GstPlayer::m_webrtcStatus（中英混合）归一成简短中文标签，
+    //   只在过渡/异常态返回非空（正常「已连接」返回空 → 顶栏/面板不显示，避免刷屏）。
+    function p2pPhaseText(s) {
+        if (!s) return ""
+        if (s.indexOf("切网重连") >= 0) return "切网重连中…"
+        if (s.indexOf("重连中") >= 0) {
+            var m = s.match(/\((\d+\/\d+)\)/)          // "P2P: 重连中(2/5)..."
+            return "重连中" + (m ? " " + m[1] : "") + "…"
+        }
+        if (s.indexOf("Reconnecting") >= 0) return "重连中…"
+        if (s.indexOf("waiting offer") >= 0 || s.indexOf("waiting") >= 0) return "等待手机响应…"
+        if (s.indexOf("Checking") >= 0) return "连通中…"
+        if (s.indexOf("Connecting") >= 0) return "连接中…"
+        if (s.indexOf("重连失败") >= 0 || s.indexOf("手动重试") >= 0) return "重连失败,请重试"
+        if (s.indexOf("Failed") >= 0 || s.indexOf("failed") >= 0) return "连接失败"
+        if (s.indexOf("Hangup") >= 0 || s.indexOf("Disconnected") >= 0) return "已断开"
+        return ""   // Connected / Playing / Ready 等正常态不显示
+    }
+    function p2pPhaseColor(s) {
+        var t = p2pPhaseText(s)
+        if (t.indexOf("失败") >= 0) return "#F44336"          // 红
+        if (t.indexOf("断开") >= 0) return "#FF9800"          // 橙
+        return "#FFC107"                                       // 过渡态：琥珀
     }
 
     function clampSlowmoOffsets() {
@@ -107,8 +140,40 @@ Rectangle {
     onSlowmoOffsetXChanged: { clampSlowmoOffsets() }
     onSlowmoOffsetYChanged: { clampSlowmoOffsets() }
     
-    // ⭐ 每个抓拍 item 的初始缩放（抓拍时保存当前 videoZoom）
-    property var itemZoomMap: ({})         // { itemIndex: { zoom, offsetX, offsetY } }
+    // ⭐ 每个抓拍 item 的缩放状态。2026-07-11 统一模型：存「缩放 + 归一化平移分量」
+    //   { itemIndex: { zoom, fx, fy } }，fx/fy ∈ [-1,1]（= 像素偏移 / 该缩放下的最大偏移）。
+    //   归一化后与容器尺寸解耦 → item(任意行列大小) / 单个放大 / 列预览 三处共用同一套状态，
+    //   改行列、进/出单个放大都能精确复现同样的取景（"效果一样"）。
+    property var itemZoomMap: ({})
+
+    // ⭐ 通知对应 dataIndex 的 gridCell 从 itemZoomMap 重新套用缩放（外部改了状态，如单个放大同步回来）
+    signal itemZoomRestore(int idx)
+
+    // 直接按归一化分量保存
+    function saveItemZoomNorm(idx, zoom, fx, fy) {
+        if (idx === undefined || idx < 0) return
+        var m = mainPage.itemZoomMap
+        m[idx] = { zoom: zoom, fx: fx, fy: fy }
+        mainPage.itemZoomMap = m
+    }
+
+    // 由「像素偏移 + 容器尺寸」换算归一化后保存（拖动/滚轮缩放调用；contW/contH=所在容器尺寸）
+    function saveItemZoom(idx, zoom, offX, offY, contW, contH) {
+        var fx = 0, fy = 0
+        if (zoom > 1.0 && contW > 0 && contH > 0) {
+            var maxX = contW * (zoom - 1) / 2
+            var maxY = contH * (zoom - 1) / 2
+            fx = maxX > 0 ? Math.max(-1, Math.min(1, offX / maxX)) : 0
+            fy = maxY > 0 ? Math.max(-1, Math.min(1, offY / maxY)) : 0
+        }
+        saveItemZoomNorm(idx, zoom, fx, fy)
+    }
+
+    // 归一化分量 → 指定容器下的像素偏移
+    function itemZoomOffsetPx(zoom, frac, contSize) {
+        if (zoom <= 1.0 || contSize <= 0) return 0
+        return frac * (contSize * (zoom - 1) / 2)
+    }
 
     // ⭐ Ctrl + 滚轮/单击 → 整 grid 所有 item 同步动作（联动模式广播 signal）
     //   gridCell delegate 用 Connections 监听, 收到就对自己执行同样操作.
@@ -117,7 +182,10 @@ Rectangle {
     signal gridSyncZoomDelta(real deltaZoom)                   // 同步缩放增量 (各 item 以自己中心缩放)
     signal gridSyncDrag(real dx, real dy)                      // 同步拖拽偏移
     signal gridSyncResetZoom()                                  // 同步重置缩放到 1.0
-    
+
+    // ⭐ GStreamer 统计面板显隐（默认隐藏，点右上角 ⓘ 切换）
+    property bool gstStatsVisible: false
+
     // ⭐ 本地设置存储（持久化）
     Settings {
         id: appSettings
@@ -129,11 +197,18 @@ Rectangle {
         // ⭐ 播放内核选择（2026-06-24）：与 LoginPage 的 kernelSettings 同 app 域(Acard/Phoenix)、同名 key，
         //   登录页写入、这里读取，天然同步。默认 "gstreamer"。
         property string playbackKernel: "gstreamer"  // "gstreamer" | "webengine"
+        // ⭐ 2026-07-14：iOS 低功率/高功率采集开关（相机设定面板"还原"按钮旁）。
+        //   仅影响 iOS 端"采集"帧率（低功率=钉30fps），不改变本 PC 端既有的"推送fps下发"逻辑；
+        //   iOS 收到 ptype=lowPowerCapture 后自行判断落地。默认 false=高功率（与现网行为一致）。
+        //   Android 暂不处理该 ptype（Android 已是固定30fps采集，本开关对 Android 无意义）。
+        property bool iosLowPowerCapture: false
     }
 
     // ⭐ 主播放内核是否为「网页内核(Chromium WebEngine)」。
     //   第二步会据此决定 livePanel 走 GStreamer VideoOutput 还是全屏 webview。
     property bool useWebEngineKernel: (appSettings.playbackKernel === "webengine")
+    // 切内核后把 Android 本地滤镜重新落到新的活动 sink（GStreamer/网页内核）
+    onUseWebEngineKernelChanged: refreshFilterRouting()
     
     // ⭐ 面板背景色（使用完整 HSV）
     property color panelBgColor: Qt.hsva(appSettings.panelColorH, appSettings.panelColorS, appSettings.panelColorV, 1)
@@ -199,6 +274,9 @@ Rectangle {
     property int deviceBattery: -1          // 电量（-1表示未知）
     property string deviceNetworkQuality: ""  // 网络质量（excellent/good/fair/poor）
     property string deviceNetworkType: ""   // 网络类型（WiFi/5G等）
+    // ⭐ 2026-07-14：iOS 低功率采集回报（此前只下发不回报，PC 端看不到有没有生效）
+    property int deviceCaptureFps: 0            // iOS 当前实际采集fps（0=未知/未上报，多为Android等非iOS设备）
+    property bool deviceLowPowerCapture: false  // iOS 当前是否处于低功率采集模式
     
     // 会员等级控制（来自 CONFIG_STATE 消息）
     property bool memberActivated: false           // 是否已激活
@@ -273,6 +351,16 @@ Rectangle {
     // ⭐ 网页内核作主播放器时 webview 上报的接收帧率（GStreamer receiveFps 此时恒为 0）。
     //   由 kernelBridge.viewerFpsChanged 驱动，供拉流心跳判断画面是否在播。
     property int kernelViewerFps: 0
+
+    // ⭐ §25.7e-附（2026-07-04 内核中途断开 17s 修复）：
+    //   ① lastConfigStateMs：最近一条本设备 CONFIG_STATE 心跳到达时间。服务器对旧 WS 会话的
+    //     离线判定有 ~2min 超时，CONFIG_ERROR(设备断线) 可能在设备已回线、画面正常播放时才迟到——
+    //     若几秒内还在收心跳/画面有帧，这条断线就是陈旧事件，必须忽略，否则会拆掉正常会话。
+    //   ② lastKernelStartMs：kernelStartByMode 去抖。CONFIG_ERROR 善后 + 下一条 CONFIG_STATE
+    //     曾在 600ms 内触发两次重启，第二次 rebuildPC 拆掉第一次刚回完 Answer 的 RTCPeerConnection，
+    //     而 iOS 把第二个 REQUEST 当重复忽略 → 会话对着已消失的对端等 ICE 满 15s 超时。
+    property double lastConfigStateMs: 0
+    property double lastKernelStartMs: 0
 
     // ⭐ 接收 webview 帧率上报（仅内核模式有效）
     Connections {
@@ -476,6 +564,11 @@ Rectangle {
         //
         // 四档阶梯（服务器格式）：240(60fps) → 180(45fps) → 120(30fps) → 60(15fps)
         onRequestFpsChange: function(targetFps, urgency, reason) {
+            // ⭐ 临时屏蔽（§21.11 iOS 自适应 fps 单测）：双缓冲第二道防线不再自动下发 set_fps
+            if (mainPage.fpsAutoPushDisabled) {
+                console.log("🚫 [fps单测] 双缓冲自动下发fps已屏蔽: targetFps=" + targetFps + " urgency=" + urgency + " reason=" + reason)
+                return
+            }
             // ⭐ 获取当前档位和会员等级信息
             var qualityType = iosCameraSettingsPopup.qualityType
             var level = mainPage.memberActivationLevel
@@ -540,24 +633,26 @@ Rectangle {
                 return
             }
             
+            // 更新本地状态（滑块显示自适应算出的值，不受 AI 锁影响）
+            iosCameraSettingsPopup.fpsValue = finalFps
+            fpsSlider.value = finalFps
+            
+            // ⭐ v9.3: 同步帧率给 gstPlayer（用于网络质量检测，按滑块显示值算，不按下发钉死值）
+            gstPlayer.setConfigFps(finalFps / 4)  // 服务器fps转实际fps
+            
+            // ⭐ AI 工具锁 30：只影响实际下发值，不影响上面滑块显示的 finalFps
+            var sendFps = resolveSendFps(finalFps)
             // ⭐⭐⭐ v9.3 发送带 urgency 的 set_fps 命令
             var fpsPayload = {
                 "cmd": "set_fps",
-                "fps": finalFps,  // 服务器 fps 格式
+                "fps": sendFps,  // 服务器 fps 格式
                 "urgency": urgency || "normal",
                 "reason": reason || "manual",
                 "timestamp": Date.now()
             }
             
-            // 更新本地状态
-            iosCameraSettingsPopup.fpsValue = finalFps
-            fpsSlider.value = finalFps
-            
-            // ⭐ v9.3: 同步帧率给 gstPlayer（用于网络质量检测）
-            gstPlayer.setConfigFps(finalFps / 4)  // 服务器fps转实际fps
-            
             // 通过 HTTP 和 WebSocket 发送
-            HttpClient.updateFps(finalFps)
+            HttpClient.updateFps(sendFps)
             sendConfigUpdate("fps", fpsPayload)
             console.log("📤 已发送set_fps到iOS:", JSON.stringify(fpsPayload), 
                        "| 等级" + level + " " + qualityType + "档")
@@ -595,17 +690,20 @@ Rectangle {
             // ⭐ 抓拍时保存当前缩放状态，新 item 将继承这个缩放
             // ⭐ PC等级1(豪华版)：不保存缩放，截图item始终1倍
             var nextIndex = captureManager.count  // 下一个 item 的索引
-            var newMap = mainPage.itemZoomMap
             if (mainPage.pcActivationLevel >= 2) {
-                newMap[nextIndex] = {
-                    zoom: mainPage.videoZoom,
-                    offsetX: mainPage.videoOffsetX,
-                    offsetY: mainPage.videoOffsetY
+                // ⭐ 抓拍继承实时流缩放：按实时流容器尺寸换算成归一化分量存入（与 item/单个放大同一套）
+                var z = mainPage.videoZoom
+                var fx = 0, fy = 0
+                if (z > 1.0 && videoContainer.width > 0 && videoContainer.height > 0) {
+                    var mx = videoContainer.width * (z - 1) / 2
+                    var my = videoContainer.height * (z - 1) / 2
+                    fx = mx > 0 ? Math.max(-1, Math.min(1, mainPage.videoOffsetX / mx)) : 0
+                    fy = my > 0 ? Math.max(-1, Math.min(1, mainPage.videoOffsetY / my)) : 0
                 }
+                mainPage.saveItemZoomNorm(nextIndex, z, fx, fy)
             } else {
-                newMap[nextIndex] = { zoom: 1.0, offsetX: 0, offsetY: 0 }
+                mainPage.saveItemZoomNorm(nextIndex, 1.0, 0, 0)
             }
-            mainPage.itemZoomMap = newMap
             captureManager.zoomLog("📸 抓拍保存: index=" + nextIndex + " zoom=" + mainPage.videoZoom + " offsetX=" + mainPage.videoOffsetX + " offsetY=" + mainPage.videoOffsetY + " pcLevel=" + mainPage.pcActivationLevel)
             captureManager.zoomLog("📸 itemZoomMap: " + JSON.stringify(mainPage.itemZoomMap))
             
@@ -1091,7 +1189,7 @@ Rectangle {
                             anchors.fill: parent
                             hoverEnabled: true
                             ToolTip.visible: containsMouse
-                            ToolTip.text: "AI牌位置放大：截图/切帧后自动识别牌的位置并放大居中（CPU 推理，不影响实时流）"
+                            ToolTip.text: "AI牌位置放大：开启后滚动到哪一帧就识别哪一帧，放大居中到牌位（CPU 推理，不影响实时流；识别不到的帧保持上一帧放大）"
                             ToolTip.delay: 300
                         }
                     }
@@ -1125,6 +1223,9 @@ Rectangle {
                             }
                         }
                     }
+
+                    // 2026-07-06 改为「每帧独立识别」：滚动到哪帧就识别哪帧，
+                    //   去掉了原「前/后 影响帧数」传播张数下拉（不再需要）。
                 }
                 
                 // ⭐ 面板颜色调节（点击打开 PS 风格颜色选择器）
@@ -1346,6 +1447,17 @@ Rectangle {
                         font.pixelSize: 10
                         font.bold: true
                         color: mainPage.connectMode === 1 ? "#4CAF50" : (mainPage.connectMode === 2 ? "#2196F3" : "#FF9800")
+                        anchors.verticalCenter: parent.verticalCenter
+                    }
+                    // ⭐ P2P 连接阶段（切网重连过程常驻可见）：只在非「已连接」的过渡/异常态显示，避免正常播放时刷屏
+                    Text {
+                        id: p2pPhaseLabel
+                        text: mainPage.p2pPhaseText(gstPlayer.webrtcStatus)
+                        visible: mainPage.connectMode === 1 && text.length > 0
+                        font.family: "PingFang HK"
+                        font.pixelSize: 10
+                        font.bold: true
+                        color: mainPage.p2pPhaseColor(gstPlayer.webrtcStatus)
                         anchors.verticalCenter: parent.verticalCenter
                     }
                     Text {
@@ -1795,6 +1907,15 @@ Rectangle {
                         property int currentFrame: hasData ? captureManager.getCurrentOffset(dataIndex) : 0
                         property int totalFrames: hasData ? captureManager.getTotalFrames(dataIndex) : 0
                         property int frameVersion: 0
+                        // ⭐ 2026-07-16：底部切帧进度条的悬停显隐标记，由 itemMouseArea 的 onEntered/onExited
+                        //   管理。⚠ 之前踩过坑：进度条自己的交互 MouseArea 一旦也设了 hoverEnabled，
+                        //   会跟 itemMouseArea 抢 hover（谁盖住谁的问题）导致来回闪烁；后来发现只要进度条
+                        //   自己那个 MouseArea 不设 hoverEnabled（它只需要处理按下/拖动/滚轮，不需要关心
+                        //   hover），就不会跟 itemMouseArea 抢——两者可以在同一块区域"和平共存"，
+                        //   itemMouseArea 的 hover 检测完全不受盖在它上面的进度条影响。
+                        //   （曾经加过一层 z:50 的独立感应层来"解决"闪烁，副作用是itemMouseArea 从此再也
+                        //   收不到 hover，连带"鼠标悬停即选中该item"「A键放大跟随鼠标」都失效了——已撤回。）
+                        property bool frameBarHovered: false
                         
                         function rebindFrameProperties() {
                             gridCell.currentFrame = Qt.binding(function() {
@@ -1845,6 +1966,10 @@ Rectangle {
                                 var W = imageContainer.width
                                 var H = imageContainer.height
                                 if (W <= 0 || H <= 0) return
+                                // ⭐ §26-① 镜像错位修复：识别坐标算在未镜像的解码帧上，显示层 Image.mirror
+                                //   翻转了画面 → 牌实际出现在对称位置，取景前先翻坐标。
+                                if (mainPage.videoMirrorMode === "horizontal") cx = 1 - cx
+                                else if (mainPage.videoMirrorMode === "vertical") cy = 1 - cy
                                 // 放大后把(cx,cy)归一化点平移到容器中心
                                 var offX = (0.5 - cx) * W * zoom
                                 var offY = (0.5 - cy) * H * zoom
@@ -1877,7 +2002,44 @@ Rectangle {
                         onItemZoomChanged: {
                             captureManager.zoomLog("⚡ itemZoom变化: dataIndex=" + dataIndex + " newZoom=" + itemZoom.toFixed(2))
                         }
-                        
+
+                        // ⭐ AI 放大（2026-07-06 每帧识别）：切帧时查该帧已缓存的识别结果。
+                        //   命中→放大到该帧牌位；未命中(未识别/未检出)→保持上一帧放大(keep_prev)。
+                        //   （切帧同时会在 C++ gotoFrame 里对未缓存帧触发一次识别，结果回来经 onCardZoomReady 应用）
+                        function applyAiZoomForCurrentFrame() {
+                            if (!captureManager.aiCardZoomEnabled) return
+                            if (!gridCell.hasData || gridCell.dataIndex < 0) return
+                            var r = captureManager.aiZoomForFrame(gridCell.dataIndex, gridCell.currentFrame)
+                            if (r && r.valid) {
+                                var W = imageContainer.width
+                                var H = imageContainer.height
+                                if (W <= 0 || H <= 0) return
+                                // ⭐ §26-① 镜像错位修复：同 onCardZoomReady——坐标先按当前镜像模式翻转。
+                                //   （旋转换算 §26-② 已在 C++ aiZoomForFrame 内完成，返回的即当前旋转空间坐标）
+                                var cx = r.cx, cy = r.cy
+                                if (mainPage.videoMirrorMode === "horizontal") cx = 1 - cx
+                                else if (mainPage.videoMirrorMode === "vertical") cy = 1 - cy
+                                var offX = (0.5 - cx) * W * r.zoom
+                                var offY = (0.5 - cy) * H * r.zoom
+                                var maxX = W * (r.zoom - 1) / 2
+                                var maxY = H * (r.zoom - 1) / 2
+                                gridCell.itemZoom = r.zoom
+                                gridCell.itemOffsetX = Math.max(-maxX, Math.min(maxX, offX))
+                                gridCell.itemOffsetY = Math.max(-maxY, Math.min(maxY, offY))
+                            }
+                            // else：该帧尚未识别 / 未检出牌 → keep_prev：保持上一帧放大，什么都不做
+                        }
+
+                        onCurrentFrameChanged: applyAiZoomForCurrentFrame()
+
+                        // ⭐ §26-①②：镜像/旋转切换后，已放大格子的取景坐标立即按新变换重算
+                        //   （镜像补偿在本函数内翻坐标；旋转换算在 C++ aiZoomForFrame 内做）
+                        Connections {
+                            target: mainPage
+                            function onVideoMirrorModeChanged() { gridCell.applyAiZoomForCurrentFrame() }
+                            function onVideoRotationChanged() { gridCell.applyAiZoomForCurrentFrame() }
+                        }
+
                         // ⭐ 只在组件首次加载且有数据时初始化缩放
                         Component.onCompleted: {
                             initZoomFromMap()
@@ -1904,20 +2066,28 @@ Rectangle {
                                 var saved = mainPage.itemZoomMap[dataIndex]
                                 itemZoom = saved.zoom
                                 
-                                // ⭐ 边界约束：根据当前容器大小重新计算有效偏移范围
-                                var maxOffsetX = imageContainer.width * (saved.zoom - 1) / 2
-                                var maxOffsetY = imageContainer.height * (saved.zoom - 1) / 2
-                                itemOffsetX = Math.max(-maxOffsetX, Math.min(maxOffsetX, saved.offsetX))
-                                itemOffsetY = Math.max(-maxOffsetY, Math.min(maxOffsetY, saved.offsetY))
+                                // ⭐ 归一化分量 → 当前 item 容器下的像素偏移（改行列后容器变了，取景仍一致）
+                                var fx = (saved.fx !== undefined) ? saved.fx : 0
+                                var fy = (saved.fy !== undefined) ? saved.fy : 0
+                                itemOffsetX = mainPage.itemZoomOffsetPx(saved.zoom, fx, imageContainer.width)
+                                itemOffsetY = mainPage.itemZoomOffsetPx(saved.zoom, fy, imageContainer.height)
                                 
                                 zoomInitialized = true
-                                captureManager.zoomLog("📸 item " + dataIndex + " 初始化: zoom=" + saved.zoom + " offsetX=" + itemOffsetX.toFixed(1) + " (从map, maxOffset=" + maxOffsetX.toFixed(1) + ")")
+                                captureManager.zoomLog("📸 item " + dataIndex + " 初始化: zoom=" + saved.zoom + " fx=" + fx.toFixed(2) + " → offsetX=" + itemOffsetX.toFixed(1))
                             } else if (hasData) {
                                 itemZoom = 1.0
                                 itemOffsetX = 0
                                 itemOffsetY = 0
                                 zoomInitialized = true
                                 captureManager.zoomLog("📸 item " + dataIndex + " 初始化: zoom=1.0 (默认)")
+                            }
+                            // ⭐ 2026-07-11 修复「行列改变后 AI 识别放大被破坏」：
+                            //   AI 放大结果只写在 delegate 的 itemZoom（onCardZoomReady），未存入 itemZoomMap，
+                            //   GridView 行列变化会重建 delegate → 上面只从 map 恢复手动缩放 → AI 放大丢失复位。
+                            //   这里用 C++ 侧按帧缓存的识别结果（aiZoomForFrame，跨 delegate 重建持久）重新套用，
+                            //   命中即覆盖为识别放大区域；未命中则保持刚恢复的手动/默认缩放。
+                            if (hasData && captureManager.aiCardZoomEnabled) {
+                                applyAiZoomForCurrentFrame()
                             }
                         }
                         
@@ -1946,6 +2116,8 @@ Rectangle {
                                     gridCell.itemOffsetY = Math.max(-maxOffsetY, Math.min(maxOffsetY, gridCell.itemOffsetY))
                                 }
                                 gridCell.itemZoom = newZoom
+                                // ⭐ 2026-07-11：集体缩放也要落盘 itemZoomMap，否则改行列后被复位
+                                mainPage.saveItemZoom(gridCell.dataIndex, gridCell.itemZoom, gridCell.itemOffsetX, gridCell.itemOffsetY, imageContainer.width, imageContainer.height)
                             }
                             function onGridSyncDrag(dx, dy) {
                                 if (!gridCell.hasData || gridCell.itemZoom <= 1.0) return
@@ -1953,12 +2125,21 @@ Rectangle {
                                 var maxOffsetY = imageContainer.height * (gridCell.itemZoom - 1) / 2
                                 gridCell.itemOffsetX = Math.max(-maxOffsetX, Math.min(maxOffsetX, gridCell.itemOffsetX + dx))
                                 gridCell.itemOffsetY = Math.max(-maxOffsetY, Math.min(maxOffsetY, gridCell.itemOffsetY + dy))
+                                // ⭐ 集体拖动也落盘
+                                mainPage.saveItemZoom(gridCell.dataIndex, gridCell.itemZoom, gridCell.itemOffsetX, gridCell.itemOffsetY, imageContainer.width, imageContainer.height)
                             }
                             function onGridSyncResetZoom() {
                                 if (!gridCell.hasData) return
                                 gridCell.itemZoom = 1.0
                                 gridCell.itemOffsetX = 0
                                 gridCell.itemOffsetY = 0
+                                // ⭐ 集体重置也落盘（zoom=1 → 存归一化 0）
+                                mainPage.saveItemZoomNorm(gridCell.dataIndex, 1.0, 0, 0)
+                            }
+                            // ⭐ 2026-07-11：外部（单个放大）改了该格缩放状态 → 重新从 itemZoomMap 套用，保持一致
+                            function onItemZoomRestore(idx) {
+                                if (idx !== gridCell.dataIndex || !gridCell.hasData) return
+                                gridCell.initZoomFromMap()
                             }
                         }
 
@@ -1967,6 +2148,45 @@ Rectangle {
                             anchors.fill: parent
                             hoverEnabled: true
                             acceptedButtons: Qt.LeftButton | Qt.RightButton
+
+                            // ⭐ 左键按住拖动放大后的截图（平移，无需 Z 键）
+                            //    纯点击（位移＜阈值）= 切帧；拖动（位移≥阈值）= 平移
+                            property bool panning: false
+                            property bool panMoved: false
+                            property real panLastX: 0
+                            property real panLastY: 0
+                            property real panStartX: 0
+                            property real panStartY: 0
+                            readonly property real panThreshold: 4
+
+                            onPressed: function(mouse) {
+                                ensureFocusAndSelect()
+                                // 左键 + 已放大 → 准备平移（移动超过阈值才算拖动，否则当作点击切帧）
+                                if (mouse.button === Qt.LeftButton && gridCell.hasData && gridCell.itemZoom > 1.0) {
+                                    itemMouseArea.panning = true
+                                    itemMouseArea.panMoved = false
+                                    itemMouseArea.panLastX = mouse.x
+                                    itemMouseArea.panLastY = mouse.y
+                                    itemMouseArea.panStartX = mouse.x
+                                    itemMouseArea.panStartY = mouse.y
+                                    // 不 accept，保留 onClicked 用于纯点击切帧
+                                }
+                            }
+
+                            onReleased: function(mouse) {
+                                if (itemMouseArea.panning) {
+                                    itemMouseArea.panning = false
+                                    if (itemMouseArea.panMoved) {
+                                        mainPage.saveItemZoom(gridCell.dataIndex, gridCell.itemZoom, gridCell.itemOffsetX, gridCell.itemOffsetY, imageContainer.width, imageContainer.height)
+                                        captureManager.zoomLog("🖐️ 拖动结束: dataIndex=" + gridCell.dataIndex + " offsetX=" + gridCell.itemOffsetX.toFixed(1) + " offsetY=" + gridCell.itemOffsetY.toFixed(1))
+                                        // ⭐ 自动放大开启时拖动放大图 = 该格 AI 识别框不对(牌不在框内) → 标记识别失败
+                                        if (captureManager.aiCardZoomEnabled) {
+                                            captureManager.markAiRecognitionFailed(gridCell.dataIndex)
+                                        }
+                                        mouse.accepted = true
+                                    }
+                                }
+                            }
 
                             // ⭐ 统一处理焦点和选中（避免重复代码）
                             function ensureFocusAndSelect() {
@@ -1978,11 +2198,32 @@ Rectangle {
 
                             onEntered: {
                                 ensureFocusAndSelect()
+                                gridCell.frameBarHovered = true
+                            }
+                            onExited: {
+                                gridCell.frameBarHovered = false
                             }
                             
                             // ⭐ 修复：GridView 重建 delegate 时鼠标已在 item 上，onEntered 不触发
                             // onPositionChanged 在鼠标移动时触发，补偿 onEntered 缺失的情况
-                            onPositionChanged: {
+                            onPositionChanged: function(mouse) {
+                                // ⭐ 左键拖动：平移放大后的图片
+                                if (itemMouseArea.panning) {
+                                    if (Math.abs(mouse.x - itemMouseArea.panStartX) > itemMouseArea.panThreshold ||
+                                        Math.abs(mouse.y - itemMouseArea.panStartY) > itemMouseArea.panThreshold) {
+                                        itemMouseArea.panMoved = true
+                                    }
+                                    var dx = mouse.x - itemMouseArea.panLastX
+                                    var dy = mouse.y - itemMouseArea.panLastY
+                                    itemMouseArea.panLastX = mouse.x
+                                    itemMouseArea.panLastY = mouse.y
+                                    var maxOffsetX = imageContainer.width * (gridCell.itemZoom - 1) / 2
+                                    var maxOffsetY = imageContainer.height * (gridCell.itemZoom - 1) / 2
+                                    gridCell.itemOffsetX = Math.max(-maxOffsetX, Math.min(maxOffsetX, gridCell.itemOffsetX + dx))
+                                    gridCell.itemOffsetY = Math.max(-maxOffsetY, Math.min(maxOffsetY, gridCell.itemOffsetY + dy))
+                                    mouse.accepted = true
+                                    return
+                                }
                                 if (!gridCell.isSelected) {
                                     ensureFocusAndSelect()
                                 }
@@ -1990,6 +2231,8 @@ Rectangle {
                             
                             onClicked: function(mouse) {
                                 ensureFocusAndSelect()
+                                // ⭐ 刚发生过拖动平移：不触发切帧（左键用于平移放大图）
+                                if (itemMouseArea.panMoved) { itemMouseArea.panMoved = false; return }
                                 // ⭐ Shift+点击：打开该item所在列的列预览（原 Ctrl+点击, 让位给联动）
                                 if (mouse.modifiers & Qt.ShiftModifier && gridCell.hasData) {
                                     var cols = captureManager.gridCols
@@ -2080,6 +2323,9 @@ Rectangle {
                                             gridCell.itemOffsetY = 0
                                         }
                                         
+                                        // ⭐ 2026-07-11 修复「改行列后 item 缩放丢失」：S+滚轮缩放必须落盘 itemZoomMap
+                                        //   （原来只有拖动落盘，滚轮缩放没存 → GridView 重建 delegate 后被复位）
+                                        mainPage.saveItemZoom(gridCell.dataIndex, gridCell.itemZoom, gridCell.itemOffsetX, gridCell.itemOffsetY, imageContainer.width, imageContainer.height)
                                         captureManager.zoomLog("🔍 item缩放: dataIndex=" + gridCell.dataIndex + " zoom=" + newZoom.toFixed(2) + " offsetX=" + gridCell.itemOffsetX.toFixed(1) + " maxOffset=" + maxOffsetX.toFixed(1))
                                     }
                                 } else {
@@ -2201,7 +2447,96 @@ Rectangle {
                             font.bold: false
                             color: "#B3FFFFFF"  // 白色，透明度70%（0xB3 ≈ 179 ≈ 70%）
                         }
-                        
+
+                        // ⭐ 2026-07-16：截图item——底部切帧进度条（贴底细条，只在鼠标悬停这一格时显示）。
+                        //   拖动=只切这一张；Ctrl+拖动=广播给全 grid 同步切帧（跟 Ctrl+滚轮效果一致）。
+                        Item {
+                            id: gridFrameBar
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            anchors.bottom: parent.bottom
+                            height: 20  // ⭐ 2026-07-16：放大一倍（原 10）
+                            visible: gridCell.hasData && gridCell.totalFrames > 0 && gridCell.frameBarHovered
+                            z: 2
+
+                            property int ctrlLastTarget: gridCell.currentFrame
+
+                            function ratioToFrame(ratio) {
+                                var tf = gridCell.totalFrames
+                                if (tf <= 0) return 0
+                                return Math.round(Math.max(0, Math.min(1, ratio)) * (tf - 1))
+                            }
+                            function applyCtrlBroadcast(target) {
+                                var delta = target - gridFrameBar.ctrlLastTarget
+                                gridFrameBar.ctrlLastTarget = target
+                                for (var i = 0; i < Math.abs(delta); i++) {
+                                    mainPage.gridSyncFrameStep(delta > 0 ? "next" : "prev")
+                                }
+                            }
+
+                            Rectangle {
+                                anchors.fill: parent
+                                color: "#80000000"
+                            }
+                            Rectangle {
+                                anchors.verticalCenter: parent.verticalCenter
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                anchors.margins: 5
+                                height: 6  // ⭐ 放大一倍（原 3）
+                                radius: 999
+                                color: "#C8E6C9"
+                            }
+                            Rectangle {
+                                id: gridFrameHandle
+                                width: 18; height: 18; radius: 9  // ⭐ 放大一倍（原 9/9/4.5）
+                                color: "#A5D6A7"
+                                anchors.verticalCenter: parent.verticalCenter
+                                x: gridCell.totalFrames > 1 ?
+                                   gridCell.currentFrame / (gridCell.totalFrames - 1) * (parent.width - 18) : 0
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                anchors.margins: -3
+                                drag.target: gridFrameHandle
+                                drag.axis: Drag.XAxis
+                                drag.minimumX: 0
+                                drag.maximumX: gridFrameBar.width - 18
+
+                                property bool ctrlDrag: false
+
+                                onWheel: function(wheel) {
+                                    wheel.accepted = true
+                                    if (gridCell.totalFrames <= 0) return
+                                    var target = wheel.angleDelta.y > 0 ? gridCell.currentFrame - 1 : gridCell.currentFrame + 1
+                                    mainPage.jumpCaptureFrame(gridCell.dataIndex, target)
+                                    gridCell.currentFrame = captureManager.getCurrentOffset(gridCell.dataIndex)
+                                }
+                                onPressed: function(mouse) {
+                                    if (gridCell.totalFrames <= 1) return
+                                    ctrlDrag = !!(mouse.modifiers & Qt.ControlModifier)
+                                    if (ctrlDrag) {
+                                        gridFrameBar.ctrlLastTarget = gridCell.currentFrame
+                                    } else {
+                                        var ratio0 = mouse.x / gridFrameBar.width
+                                        mainPage.jumpCaptureFrame(gridCell.dataIndex, gridFrameBar.ratioToFrame(ratio0))
+                                        gridCell.currentFrame = captureManager.getCurrentOffset(gridCell.dataIndex)
+                                    }
+                                }
+                                onPositionChanged: {
+                                    if (!drag.active || gridCell.totalFrames <= 1) return
+                                    var ratio = gridFrameHandle.x / (gridFrameBar.width - 18)
+                                    var frame = gridFrameBar.ratioToFrame(ratio)
+                                    if (ctrlDrag) {
+                                        gridFrameBar.applyCtrlBroadcast(frame)
+                                    } else {
+                                        mainPage.jumpCaptureFrame(gridCell.dataIndex, frame)
+                                        gridCell.currentFrame = captureManager.getCurrentOffset(gridCell.dataIndex)
+                                    }
+                                }
+                            }
+                        }
+
                     }
                 }
     }
@@ -2230,6 +2565,15 @@ Rectangle {
             
             // 用于追踪整个区域的hover状态
             property bool isHovering: livePanelHover.containsMouse
+
+            // ⭐ 2026-07-15：网页内核模式下，livePanelHover（z:1000，铺满整个面板）会挡住
+            //   WebEngineView 的真实 hover 事件，导致页面自己收不到 mousemove——这里改成
+            //   QML 拿到的 hover 状态可靠时，主动转发给页面，页面被动显隐即可，不用自己猜。
+            onIsHoveringChanged: {
+                if (mainPage.useWebEngineKernel && kernelPlayerLoader.item && kernelPlayerLoader.item.setStatsHover) {
+                    kernelPlayerLoader.item.setStatsHover(isHovering)
+                }
+            }
 
                     // 视频容器（用于旋转）
                     Item {
@@ -2278,6 +2622,109 @@ Rectangle {
                             layer.enabled: false  // 不再使用 shader，颜色调整由 GStreamer videobalance 和 gamma 处理
                         }
 
+                        // ⭐ 右上角信息开关（默认隐藏统计面板，点击切换显示）
+                        // ⭐ 2026-07-15：改成两步——鼠标进入实时流画面才显示这个按钮（入口），
+                        //   点击按钮才展开下面的统计面板；不能鼠标一放上去就把一堆统计信息铺出来挡视线。
+                        Rectangle {
+                            id: gstStatsToggle
+                            visible: !mainPage.useWebEngineKernel && gstPlayer.playing && livePanel.isHovering
+                            anchors.top: parent.top
+                            anchors.right: parent.right
+                            anchors.margins: 10
+                            z: 6
+                            width: 26
+                            height: 26
+                            radius: 13
+                            color: gstStatsToggleArea.containsMouse ? "#C8000000" : (mainPage.gstStatsVisible ? "#C81565C0" : "#A0000000")
+                            border.color: "#7FD8FF"
+                            border.width: 1
+                            Text {
+                                anchors.centerIn: parent
+                                text: "ⓘ"
+                                font.pixelSize: 15
+                                color: "#E8F5E9"
+                            }
+                            MouseArea {
+                                id: gstStatsToggleArea
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: mainPage.gstStatsVisible = !mainPage.gstStatsVisible
+                            }
+                        }
+
+                        // ⭐ GStreamer 模式左上角统计面板（对标网页内核统计；数据复用 GstPlayer 现有统计，1s 轮询）
+                        // ⭐ 2026-07-15 改回点击展开：显隐只看 gstStatsVisible（点右上角 ⓘ 切换），
+                        //   跟鼠标是否还在画面内无关——点开后不会因为鼠标移到别处就消失，再点一次收起。
+                        Rectangle {
+                            id: gstStatsPanel
+                            visible: !mainPage.useWebEngineKernel && gstPlayer.playing && mainPage.gstStatsVisible
+                            opacity: mainPage.gstStatsVisible ? 1.0 : 0.0
+                            Behavior on opacity { NumberAnimation { duration: 200 } }
+                            anchors.top: parent.top
+                            anchors.left: parent.left
+                            anchors.margins: 10
+                            z: 5
+                            radius: 6
+                            color: "#A0000000"
+                            width: gstStatsText.implicitWidth + 20
+                            height: gstStatsText.implicitHeight + 16
+
+                            property string infoHtml: ""
+
+                            function refresh() {
+                                if (!gstPlayer.playing) return
+                                var loss = gstPlayer.statLossPct()
+                                var stall = gstPlayer.statStallSeconds()
+                                var lossColor = loss >= 2 ? "#FF6E6E" : "#9CDCAA"
+                                var stallColor = stall >= 1 ? "#FF6E6E" : "#9CDCAA"
+                                var K = function(t){ return '<span style="color:#7FD8FF">' + t + '</span>' }
+                                var route = gstPlayer.statRoute()
+                                var routeColor = (route.indexOf("中继") >= 0) ? "#FFC857" : (route.indexOf("直连") >= 0 ? "#9CDCAA" : "#B0B0B0")
+                                // ⭐ H265：编码显示（H265 橙色醒目，一眼区分会话类型）
+                                var codecTxt = gstPlayer.isH265Mode()
+                                    ? '<span style="color:#FFC857">H265</span>'
+                                    : 'H264'
+                                // ⭐ P2P 连接阶段（切网重连过程）：非「已连接」时置顶醒目显示
+                                var phase = mainPage.p2pPhaseText(gstPlayer.webrtcStatus)
+                                var phaseHtml = phase.length > 0
+                                    ? '<span style="color:' + mainPage.p2pPhaseColor(gstPlayer.webrtcStatus) + '">● ' + phase + '</span><br>'
+                                    : ''
+                                gstStatsPanel.infoHtml =
+                                    phaseHtml +
+                                    K("引擎") + ": GStreamer · " + gstPlayer.statConnMode() + " · " + codecTxt + "<br>" +
+                                    '<span style="color:' + routeColor + '">线路</span>: ' + route + "　(" + gstPlayer.statRouteDetail() + ")<br>" +
+                                    K("分辨率") + ": " + gstPlayer.videoWidth + "x" + gstPlayer.videoHeight + "<br>" +
+                                    K("解码FPS") + ": " + gstPlayer.receiveFps + "<br>" +
+                                    K("解码") + ": " + gstPlayer.decoderName + "<br>" +
+                                    '<span style="color:' + lossColor + '">丢包率</span>: ' + loss.toFixed(2) + "%　(本秒丢 " + gstPlayer.statLostPerSec() + ")<br>" +
+                                    K("NACK") + ": " + gstPlayer.statNackPerSec() + "/s　" + K("重传补回") + ": " + gstPlayer.statRtxOkPerSec() + "/s<br>" +
+                                    K("PLI") + ": " + gstPlayer.statPliCount() + "<br>" +
+                                    K("抖动") + ": " + gstPlayer.statJitterMs() + " ms<br>" +
+                                    K("抖动缓冲") + ": " + gstPlayer.bufferSize + "/" + gstPlayer.bufferTarget + " 帧　队列 " + gstPlayer.statQueueDepth() + "<br>" +
+                                    '<span style="color:' + stallColor + '">卡顿</span>: ' + stall + " s"
+                            }
+
+                            Text {
+                                id: gstStatsText
+                                anchors.centerIn: parent
+                                textFormat: Text.RichText
+                                text: gstStatsPanel.infoHtml
+                                font.family: "Consolas"
+                                font.pixelSize: 12
+                                color: "#E8F5E9"
+                                lineHeight: 1.15
+                            }
+
+                            Timer {
+                                interval: 1000
+                                repeat: true
+                                running: gstStatsPanel.visible
+                                triggeredOnStart: true
+                                onTriggered: gstStatsPanel.refresh()
+                            }
+                        }
+
                         // ⭐ 网页内核（Chromium WebEngine）主播放器（2026-06-24）：
                         //   useWebEngineKernel 时全屏铺满 videoContainer，替代上面的 VideoOutput。
                         //   缩放/镜像/旋转由 applyTransform(CSS transform) 处理；下发 iOS 的按钮在外层
@@ -2288,12 +2735,17 @@ Rectangle {
                             z: 2  // 盖在 VideoOutput 之上（VideoOutput 此时已 visible:false）
                             active: mainPage.useWebEngineKernel
                             source: mainPage.useWebEngineKernel ? "KernelTestView.qml" : ""
+                            // ⭐ 2026-07-03（§24 登录卡顿优化）：异步加载。WebEngineView 首个视图要拉起
+                            //   Chromium 渲染进程，同步实例化会把刚显示的主页整窗冻住（低配机秒级）。
+                            asynchronous: true
                             onLoaded: {
                                 item.topInset = 0  // 主播放器全屏，无标题栏留白
                                 // 加载完成后立即按当前连接模式拉流
                                 mainPage.kernelStartByMode()
                                 // 同步当前本地变换
                                 mainPage.kernelSyncTransform()
+                                // ⭐ 补一次统计面板 hover 状态同步（防止加载完成时鼠标已经在面板内）
+                                if (item.setStatsHover) item.setStatsHover(livePanel.isHovering)
                             }
                         }
                         
@@ -2512,8 +2964,9 @@ Rectangle {
                                     { label: "超低网", type: "low" },
                                     { label: "高清", type: "standard" },
                                     { label: "超清", type: "high" },
-                                    { label: "超高清", type: "p4k" },
-                                    { label: "超高帧", type: "ultra" }
+                                    // ⭐ 2026-07-11：超高帧挪到倒数第二（超高清置于最后）
+                                    { label: "超高帧", type: "ultra" },
+                                    { label: "超高清", type: "p4k" }
                                     // 超快帧：暂不开放，已从档位列表隐藏
                                 ]
                                 
@@ -2967,12 +3420,59 @@ Rectangle {
                         
                         // 滚轮切换帧 + 左键上一帧 + 右键下一帧（覆盖在视频上）
                         MouseArea {
+                            id: slowmoMouseArea
                             anchors.fill: parent
                             acceptedButtons: Qt.LeftButton | Qt.RightButton
                             z: 10  // 确保在视频之上
-                            
+
+                            // ⭐ 左键按住拖动放大后的慢放画面（平移，无需 Z 键）
+                            //    纯点击（位移＜阈值）= 上一帧；拖动（位移≥阈值）= 平移
+                            property bool panning: false
+                            property bool panMoved: false
+                            property real panLastX: 0
+                            property real panLastY: 0
+                            property real panStartX: 0
+                            property real panStartY: 0
+                            readonly property real panThreshold: 4
+
+                            onPressed: function(mouse) {
+                                if (mouse.button === Qt.LeftButton && slowMotionPlayer.hasContent && mainPage.slowmoZoom > 1.0) {
+                                    slowmoMouseArea.panning = true
+                                    slowmoMouseArea.panMoved = false
+                                    slowmoMouseArea.panLastX = mouse.x
+                                    slowmoMouseArea.panLastY = mouse.y
+                                    slowmoMouseArea.panStartX = mouse.x
+                                    slowmoMouseArea.panStartY = mouse.y
+                                }
+                            }
+
+                            onPositionChanged: function(mouse) {
+                                if (slowmoMouseArea.panning) {
+                                    if (Math.abs(mouse.x - slowmoMouseArea.panStartX) > slowmoMouseArea.panThreshold ||
+                                        Math.abs(mouse.y - slowmoMouseArea.panStartY) > slowmoMouseArea.panThreshold) {
+                                        slowmoMouseArea.panMoved = true
+                                    }
+                                    var maxX = slowmoVideoContainer.width  * (mainPage.slowmoZoom - 1) / 2
+                                    var maxY = slowmoVideoContainer.height * (mainPage.slowmoZoom - 1) / 2
+                                    mainPage.slowmoOffsetX = Math.max(-maxX, Math.min(maxX, mainPage.slowmoOffsetX + (mouse.x - slowmoMouseArea.panLastX)))
+                                    mainPage.slowmoOffsetY = Math.max(-maxY, Math.min(maxY, mainPage.slowmoOffsetY + (mouse.y - slowmoMouseArea.panLastY)))
+                                    slowmoMouseArea.panLastX = mouse.x
+                                    slowmoMouseArea.panLastY = mouse.y
+                                    mouse.accepted = true
+                                }
+                            }
+
+                            onReleased: function(mouse) {
+                                if (slowmoMouseArea.panning) {
+                                    slowmoMouseArea.panning = false
+                                    if (slowmoMouseArea.panMoved) mouse.accepted = true
+                                }
+                            }
+
                             onClicked: function(mouse) {
                                 if (!slowMotionPlayer.hasContent) return
+                                // ⭐ 刚发生过拖动平移：不触发切帧
+                                if (slowmoMouseArea.panMoved) { slowmoMouseArea.panMoved = false; return }
                                 // ⭐ 左键=上一帧，右键=下一帧
                                 if (mouse.button === Qt.LeftButton) {
                                     slowMotionPlayer.prevFrame()
@@ -3994,6 +4494,12 @@ Rectangle {
                 clearCaptureConfirmDialog.close()
                 captureManager.clearAll()
             } else {
+                // ⭐ 2026-07-19：按住空格=键盘自动重复(~30次/s)连拍，节流到 ~7次/s——
+                //   在源头拦掉，onCaptureTriggered 里的缩放保存/日志也不用每次重复跑；
+                //   C++ capture() 内另有 120ms 兜底节流（覆盖左键点击等其它触发路径）。
+                var nowMs = Date.now()
+                if (nowMs - mainPage._lastSpaceCaptureMs < 150) return
+                mainPage._lastSpaceCaptureMs = nowMs
                 console.log("空格键抓拍")
                 EventBus.triggerCapture()
             }
@@ -4118,6 +4624,7 @@ Rectangle {
     // Z/X键：列预览时切换上/下列
     Shortcut {
         sequence: "Z"; context: Qt.ApplicationShortcut
+        enabled: columnPreviewVisible  // ⭐ 仅列预览时占用Z；其它场景让位给"Z+左键拖动放大截图"
         onActivated: { if (columnPreviewVisible) columnPreviewPrevCol() }
     }
     Shortcut {
@@ -4284,6 +4791,15 @@ Rectangle {
         if (!useWebEngineKernel) return
         var view = kernelPlayerLoader.item
         if (!view) return
+        // ⭐ §25.7e-附 去抖：2s 内重复重启直接忽略。双重启（CONFIG_ERROR 善后 + CONFIG_STATE
+        //   开始推流）会让第二次 rebuildPC 拆掉第一次刚回完 Answer 的 RTCPeerConnection，
+        //   而 iOS 把第二个 REQUEST 当重复忽略 → 会话空等 ICE 15s 超时才自愈。
+        var nowMs = Date.now()
+        if (nowMs - lastKernelStartMs < 2000) {
+            console.log("🌐 [网页内核] kernelStartByMode 去抖：距上次仅" + (nowMs - lastKernelStartMs) + "ms，忽略重复重启")
+            return
+        }
+        lastKernelStartMs = nowMs
         // ⭐ 进内核模式：截图/慢放切到 WebFrameSource，并清掉上次会话残帧。
         if (typeof webFrameSource !== 'undefined' && webFrameSource && kernelBridge) {
             kernelBridge.resetCaptureFrames()
@@ -4303,6 +4819,9 @@ Rectangle {
         if (!useWebEngineKernel) return
         var view = kernelPlayerLoader.item
         if (view) view.stopTest()
+        // ⭐ §25.7e-附：显式停止后清去抖时间戳——合法的「停→立刻重启」（模式切换等）不受 2s 去抖限制，
+        //   去抖只拦「未经 stop 的连续二次重启」（那才是拆自己会话的竞态源）。
+        lastKernelStartMs = 0
         // ⭐ 立即清零内核帧率，拉流心跳随之停发（不依赖 webview 卸载前是否上报到 0）。
         kernelViewerFps = 0
         // ⭐ 退内核模式：截图/慢放数据源恢复 GStreamer，并清掉 webframes 残帧。
@@ -4315,6 +4834,59 @@ Rectangle {
         if (!useWebEngineKernel) return
         var view = kernelPlayerLoader.item
         if (view) view.applyTransform(videoZoom, videoMirrorMode, videoRotation, videoOffsetX, videoOffsetY)
+    }
+
+    // ============ 滤镜路由（iOS=设备端 STOMP / Android=PC 本地）============
+    // 背景：Android 不支持设备端滤镜（或参数无效）。快门(cjfps)、ISO 增益(gain) 属相机采集参数，
+    //   必须留在设备端；其余颜色类滤镜（亮度/对比度/饱和度/gamma 等）改由 PC 本地落地——
+    //   GStreamer 走 videobalance/gamma（管线线程处理），网页内核走 CSS filter（Chromium 合成器），
+    //   两者都不占 Qt 主线程，规避「主线程逐帧处理卡死」的坑。iOS 一律不走本地、行为不变。
+
+    // 颜色类滤镜 ptype（Android 下改走本地；快门 cjfps / 增益 gain 不在此列，仍下发设备）
+    function isLocalColorPtype(ptype) {
+        return ptype === "brightness" || ptype === "contrast" || ptype === "saturation"
+            || ptype === "gamma" || ptype === "exposure" || ptype === "redBoost"
+            || ptype === "blackPoint" || ptype === "sharpness" || ptype === "highlightLift"
+            || ptype === "chroma"
+    }
+
+    // 把 iOS 滤镜弹框当前的 f* 值映射到「PC 本地能实现的子集」并落到当前活动 sink。
+    //   本地只做亮度/对比度/饱和度(/gamma)，其余 iOS 专有项(redBoost/黑点/锐化/高光/色度)在 PC 无等价能力→忽略。
+    function applyLocalColorFilter() {
+        var p = iosFilterPopup
+        // 滤镜关 → 本地复位中性
+        if (!p.fEnabled) {
+            clearLocalColorFilter()
+            return
+        }
+        // GStreamer videobalance 语义：brightness[-1,1](0中性)、contrast[0,2](1)、saturation[0,2](1)、gamma[0.01,10](1)
+        var b = Math.max(-1.0, Math.min(1.0, p.fBrightness + (p.fExposure - 1.0) * 0.5))  // 曝光折进亮度
+        var c = Math.max(0.0, Math.min(2.0, p.fContrast))
+        var s = Math.max(0.0, Math.min(2.0, p.fSaturation))
+        var g = Math.max(0.01, Math.min(10.0, p.fGamma))
+        if (useWebEngineKernel) {
+            // CSS filter 乘数：brightness 由 videobalance 加性[-1,1] 折算成乘数 1+b；对比/饱和直接用乘数
+            var view = kernelPlayerLoader.item
+            if (view && view.applyColorFilter) view.applyColorFilter(1.0 + b, c, s)
+        } else {
+            gstPlayer.applyColorFilter(b, c, s, g)
+        }
+    }
+
+    // 本地滤镜复位中性（滤镜关 / 切到 iOS 设备时，避免上一次 Android 的 videobalance/CSS 残留）
+    function clearLocalColorFilter() {
+        if (useWebEngineKernel) {
+            var view = kernelPlayerLoader.item
+            if (view && view.applyColorFilter) view.applyColorFilter(1.0, 1.0, 1.0)
+        } else {
+            gstPlayer.clearColorFilter()
+        }
+    }
+
+    // 登录/切设备/切内核后刷新滤镜落点：Android→本地落地当前值；iOS→PC 本地保持中性（滤镜在设备端做）
+    function refreshFilterRouting() {
+        if (HttpClient.currentIsAndroid()) applyLocalColorFilter()
+        else clearLocalColorFilter()
     }
 
     // ⭐ 滚轮聚焦缩放（GStreamer 与网页内核共用同一套数学）。
@@ -4390,8 +4962,11 @@ Rectangle {
         stopAll()
         
         var iceArray = iceServers.length > 0 ? iceServers : HttpClient.iceServers()
-        console.log("🌐 playP2P: 配对设备=" + pairedIosDeviceId + " iceServers=" + iceArray.length + "个")
+        console.log("🌐 playP2P: 配对设备=" + pairedIosDeviceId + " iceServers=" + iceArray.length + "个 编码=" + mainPage.videoCodec)
         statusText.text = "正在建立 P2P 直连..."
+        
+        // ⭐ H265：按 CONFIG_STATE.videoCodec 预建对应解码管线（必须在 connectP2P 之前设置）
+        gstPlayer.setVideoCodec(mainPage.videoCodec)
         
         gstPlayer.reset()
         
@@ -4411,6 +4986,9 @@ Rectangle {
 
     function stopAll() {
         console.log("🛑 stopAll: 停止所有流...")
+
+        // ⭐ P2P诊断日志上报：停流即冲刷+停止（若推流仍在，下一条 CONFIG_STATE 会重新激活）
+        P2PLogUploader.deactivate()
 
         // ⭐ 网页内核模式：停 webview 播放即可，不碰 GStreamer（此时 GStreamer 未启动）
         if (useWebEngineKernel) {
@@ -4730,6 +5308,7 @@ Rectangle {
                     
                     // 还原按钮（重置综合亮度为默认值20）
                     Rectangle {
+                        id: cameraResetBtn
                         anchors.left: parent.left
                         anchors.verticalCenter: parent.verticalCenter
                         width: resetBtnText.width + 20
@@ -4786,14 +5365,89 @@ Rectangle {
                                 sendConfigUpdate("focus", {"focus": 0.6})
                                 HttpClient.updateFlicker(120)
                                 sendConfigUpdate("cjfps", {"cjfps": 120})
-                                HttpClient.updateFps(100)
-                                sendConfigUpdate("fps", {"fps": 100})
+                                var resetSendFps = resolveSendFps(100)
+                                HttpClient.updateFps(resetSendFps)
+                                sendConfigUpdate("fps", {"fps": resetSendFps})
 
                                 console.log("🔄 相机设定已还原（滤镜/LUT/硬件 1s 后统一下发）")
                             }
                         }
                     }
-                    
+
+                    // ⭐ 2026-07-14：低功率/高功率采集切换（还原按钮右侧）。
+                    //   仅 iOS 生效（iOS 收到后自行判断，钉死采集30fps）；Android 已固定低功率，不受此开关影响。
+                    //   两段式胶囊按钮，与本文件"高配电脑/低端电脑"内核选择同款样式。
+                    Row {
+                        id: lowPowerToggle
+                        anchors.left: cameraResetBtn.right
+                        anchors.leftMargin: 10
+                        anchors.verticalCenter: parent.verticalCenter
+                        height: 28
+                        spacing: 0
+
+                        Rectangle {
+                            width: 60; height: 28
+                            radius: 6
+                            color: !appSettings.iosLowPowerCapture ? "#3993D2" : "#E8F5E9"
+                            border.color: !appSettings.iosLowPowerCapture ? "#3993D2" : "#A5D6A7"
+                            border.width: 1
+                            Text {
+                                anchors.centerIn: parent
+                                text: "高功率"
+                                font.family: "PingFang HK"
+                                font.pixelSize: 12
+                                color: !appSettings.iosLowPowerCapture ? "#FFFFFF" : "#263238"
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    if (appSettings.iosLowPowerCapture) {
+                                        appSettings.iosLowPowerCapture = false
+                                        sendConfigUpdate("lowPowerCapture", {"lowPowerCapture": false})
+                                        console.log("🔋 iOS 采集切换 → 高功率(60fps，按档位)")
+                                    }
+                                }
+                            }
+                        }
+                        Rectangle {
+                            width: 60; height: 28
+                            radius: 6
+                            color: appSettings.iosLowPowerCapture ? "#3993D2" : "#E8F5E9"
+                            border.color: appSettings.iosLowPowerCapture ? "#3993D2" : "#A5D6A7"
+                            border.width: 1
+                            Text {
+                                anchors.centerIn: parent
+                                text: "低功率"
+                                font.family: "PingFang HK"
+                                font.pixelSize: 12
+                                color: appSettings.iosLowPowerCapture ? "#FFFFFF" : "#263238"
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    if (!appSettings.iosLowPowerCapture) {
+                                        appSettings.iosLowPowerCapture = true
+                                        sendConfigUpdate("lowPowerCapture", {"lowPowerCapture": true})
+                                        console.log("🔋 iOS 采集切换 → 低功率(钉30fps)")
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // ⭐ 2026-07-19：高低功率按钮右侧红色提示
+                    Text {
+                        anchors.left: lowPowerToggle.right
+                        anchors.leftMargin: 10
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: "高功率画质佳续航短略微发热"
+                        font.family: "PingFang HK"
+                        font.pixelSize: 12
+                        color: "#FF0000"
+                    }
+
                     // 关闭按钮
                     Rectangle {
                         anchors.right: parent.right
@@ -5062,10 +5716,12 @@ Rectangle {
                             // ⭐ fps 直接下发，不再除以2
                             var actualFps = Math.floor(value)
                             if (actualFps < 1) actualFps = 1
-                            console.log("📤 帧率滑块松开: 滑块值=" + value + ", 实际发送=" + actualFps)
-                            HttpClient.updateFps(actualFps)
-                            sendConfigUpdate("fps", {"fps": actualFps})
-                            // ⭐ v9.3: 同步帧率给 gstPlayer（用于网络质量检测）
+                            // ⭐ AI 工具锁 30：滑块本身不受限（想拖多高拖多高），只钉实际下发值
+                            var sendFps = resolveSendFps(actualFps)
+                            console.log("📤 帧率滑块松开: 滑块值=" + value + ", 实际发送=" + sendFps)
+                            HttpClient.updateFps(sendFps)
+                            sendConfigUpdate("fps", {"fps": sendFps})
+                            // ⭐ v9.3: 同步帧率给 gstPlayer（用于网络质量检测，按滑块显示值算）
                             gstPlayer.setConfigFps(actualFps / 4)  // 服务器fps转实际fps
                         }
                         
@@ -5111,8 +5767,10 @@ Rectangle {
                                 iosCameraSettingsPopup.fpsValue = newValue
                                 var actualFps = Math.floor(newValue)
                                 if (actualFps < 1) actualFps = 1
-                                HttpClient.updateFps(actualFps)
-                                sendConfigUpdate("fps", {"fps": actualFps})
+                                // ⭐ AI 工具锁 30：滑块本身不受限，只钉实际下发值
+                                var sendFps = resolveSendFps(actualFps)
+                                HttpClient.updateFps(sendFps)
+                                sendConfigUpdate("fps", {"fps": sendFps})
                             }
                         }
                     }
@@ -5684,36 +6342,7 @@ Rectangle {
                         }
                     }
                     
-                    // 超高清（黄金会员可用）
-                    Rectangle {
-                        property bool accessible: isQualityAccessible("超高清")
-                        width: 60
-                        height: 32
-                        radius: 16
-                        color: !accessible ? "#E8E8E8" : (iosCameraSettingsPopup.qualityType === "p4k" ? "#4DB6AC" : "#E8F5E9")
-                        border.color: !accessible ? "#C0C0C0" : (iosCameraSettingsPopup.qualityType === "p4k" ? "#4DB6AC" : "#A5D6A7")
-                        
-                        Text {
-                            anchors.centerIn: parent
-                            text: "超高清"
-                            font.family: "PingFang HK"
-                            font.pixelSize: 13
-                            color: !parent.accessible ? "#999999" : (iosCameraSettingsPopup.qualityType === "p4k" ? "#FFFFFF" : "#333333")
-                        }
-                        
-                        MouseArea {
-                            anchors.fill: parent
-                            cursorShape: parent.accessible ? Qt.PointingHandCursor : Qt.ForbiddenCursor
-                            onClicked: {
-                                if (parent.accessible) {
-                                    switchQuality("p4k", "超高清")
-                                } else {
-                                    showQualityAccessDeniedTip("超高清")
-                                }
-                            }
-                        }
-                    }
-                    
+                    // ⭐ 2026-07-11：超高帧挪到倒数第二（超高清放最后）
                     // 超高帧（黄金会员可用）
                     Rectangle {
                         property bool accessible: isQualityAccessible("超高帧")
@@ -5739,6 +6368,36 @@ Rectangle {
                                     switchQuality("ultra", "超高帧")
                                 } else {
                                     showQualityAccessDeniedTip("超高帧")
+                                }
+                            }
+                        }
+                    }
+
+                    // 超高清（黄金会员可用）
+                    Rectangle {
+                        property bool accessible: isQualityAccessible("超高清")
+                        width: 60
+                        height: 32
+                        radius: 16
+                        color: !accessible ? "#E8E8E8" : (iosCameraSettingsPopup.qualityType === "p4k" ? "#4DB6AC" : "#E8F5E9")
+                        border.color: !accessible ? "#C0C0C0" : (iosCameraSettingsPopup.qualityType === "p4k" ? "#4DB6AC" : "#A5D6A7")
+                        
+                        Text {
+                            anchors.centerIn: parent
+                            text: "超高清"
+                            font.family: "PingFang HK"
+                            font.pixelSize: 13
+                            color: !parent.accessible ? "#999999" : (iosCameraSettingsPopup.qualityType === "p4k" ? "#FFFFFF" : "#333333")
+                        }
+                        
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: parent.accessible ? Qt.PointingHandCursor : Qt.ForbiddenCursor
+                            onClicked: {
+                                if (parent.accessible) {
+                                    switchQuality("p4k", "超高清")
+                                } else {
+                                    showQualityAccessDeniedTip("超高清")
                                 }
                             }
                         }
@@ -6802,6 +7461,7 @@ Rectangle {
                 ShortcutItem { key: "0-9"; desc: "列预览(2-5张,0=第10列)" }
                 ShortcutItem { key: "Shift+点击"; desc: "列预览(点击item所在列)" }
                 ShortcutItem { key: "Z/X"; desc: "列预览:上/下列切换" }
+                ShortcutItem { key: "Z+左键拖动"; desc: "放大后平移截图(截图grid/全屏查看)" }
                 ShortcutItem { key: "Ctrl+滚轮"; desc: "全grid/列预览同步切帧" }
                 ShortcutItem { key: "Ctrl+S+滚轮"; desc: "全grid/列预览同步缩放" }
                 ShortcutItem { key: "Ctrl+左/右键"; desc: "全grid/列预览同步上/下一帧" }
@@ -7098,15 +7758,22 @@ Rectangle {
         id: fpsLimitPushTimer
         interval: 1000
         onTriggered: {
+            // ⭐ 临时屏蔽（§21.11 iOS 自适应 fps 单测）：切档后不再自动补发 fps
+            if (mainPage.fpsAutoPushDisabled) {
+                console.log("🚫 [fps单测] 切档后自动补发fps已屏蔽: 滑块值=" + iosCameraSettingsPopup.fpsValue)
+                return
+            }
             // ⭐ fps 直接下发，不再除以2
             var actualFps = Math.floor(iosCameraSettingsPopup.fpsValue)
             if (actualFps < 1) actualFps = 1
-            console.log("📤 帧率限制推送: 滑块值=" + iosCameraSettingsPopup.fpsValue + ", 实际发送=" + actualFps)
+            // ⭐ AI 工具锁 30：滑块本身不受限，只钉实际下发值
+            var sendFps = resolveSendFps(actualFps)
+            console.log("📤 帧率限制推送: 滑块值=" + iosCameraSettingsPopup.fpsValue + ", 实际发送=" + sendFps)
             // HTTP 接口
-            HttpClient.updateFps(actualFps)
+            HttpClient.updateFps(sendFps)
             // WebSocket 推送
-            sendConfigUpdate("fps", {"fps": actualFps})
-            // 同步给 PC 播放侧，用于队列/延迟/FPS 基准
+            sendConfigUpdate("fps", {"fps": sendFps})
+            // 同步给 PC 播放侧，用于队列/延迟/FPS 基准（按滑块显示值算）
             gstPlayer.setConfigFps(actualFps / 4)
         }
     }
@@ -7183,9 +7850,28 @@ Rectangle {
         
         // ⭐ PC端等级额外限制：豪华版(1)及以下最大120，至尊版(2)不限制
         var pcMaxFps = (mainPage.pcActivationLevel >= 2) ? 999 : 120
-        
-        // 取两者较小值
-        return Math.min(iosMaxFps, pcMaxFps)
+
+        var result = Math.min(iosMaxFps, pcMaxFps)
+
+        // ⭐ 2026-07-15 修正：AI 工具锁 30 不应限制滑块可拖动范围（滑块该多高就多高，
+        //   会员等级/档位上限照旧），只应限制"实际下发给设备的值"。该逻辑已挪到
+        //   resolveSendFps()，在真正调用 HttpClient.updateFps/sendConfigUpdate("fps",...) 前拦截，
+        //   这里不再对 result 做 AI 相关 clamp。
+
+        return result
+    }
+
+    // ⭐ 2026-07-15：AI 工具锁 7fps 的唯一收口点——只影响"实际下发的值"，不影响滑块/档位上限。
+    //   本机检测到主流 AI 编程工具(Cursor/VSCode/Codex 等)且不在总后台「AI 白名单」时，
+    //   不管滑块/自适应/切档算出来的 rawFps 是多少，实际下发永远钉 28(服务器格式=实际7fps，iOS 端 ÷4)。
+    function resolveSendFps(rawFps) {
+        if (HttpClient.aiCodingToolsDetected() && !HttpClient.aiWhitelisted()) {
+            if (rawFps !== 28) {
+                console.log("🔒 [fps锁7] 本机检测到 AI 编程工具且不在 AI 白名单 → 下发值 " + rawFps + " → 28(=7fps)（滑块本身不受限）")
+            }
+            return 28
+        }
+        return rawFps
     }
     
     // ⭐ 获取超级帧率上限 - 全部从登录接口 levelExposureFps 动态获取
@@ -7363,8 +8049,15 @@ Rectangle {
             console.log("⚠️ 帧率超限，限制到新档位最大值: " + iosCameraSettingsPopup.fpsValue + " → " + maxFps)
             iosCameraSettingsPopup.fpsValue = maxFps
             fpsSlider.value = maxFps
-            HttpClient.updateFps(maxFps)
-            sendConfigUpdate("fps", {"fps": maxFps})
+            if (mainPage.fpsAutoPushDisabled) {
+                // ⭐ 临时屏蔽（§21.11 iOS 自适应 fps 单测）：只更新本地滑块，不自动下发
+                console.log("🚫 [fps单测] 切档fps超限clamp的自动下发已屏蔽: " + maxFps)
+            } else {
+                // ⭐ AI 工具锁 30：滑块显示值仍是 maxFps（不受限），只钉实际下发值
+                var clampSendFps = resolveSendFps(maxFps)
+                HttpClient.updateFps(clampSendFps)
+                sendConfigUpdate("fps", {"fps": clampSendFps})
+            }
         }
         
         if (iosCameraSettingsPopup.flickerValue > maxFlicker) {
@@ -7625,6 +8318,20 @@ Rectangle {
         if (normalizedType === "4k") normalizedType = "p4k"
         iosCameraSettingsPopup.qualityType = normalizedType || "high"
         console.log("⭐ Component.onCompleted: 最终显示='" + qualityButtonText.text + "'")
+
+        // ⭐ 2026-07-15：登录成功后自动核对"当前选中的iOS账号"（上次在切换账号里选定、
+        //   希望使用的设备）跟"本次登录实际绑定的设备"是否一致——不传设备账号登录时，
+        //   后端默认绑定第一个绑定设备，可能不是用户真正想用的那个。
+        //   不一致时自动打开切换账号弹框，弹框加载完在线状态后，若目标设备在线则自动执行一次切换；不在线则不执行（弹框保持打开，可手动选）。
+        var desiredDeviceUsername = HttpClient.getSavedDeviceUsername()
+        var boundDeviceUsername = HttpClient.currentDeviceUsername()
+        if (desiredDeviceUsername && desiredDeviceUsername !== boundDeviceUsername) {
+            console.log("🔄 [自动切换] 选中设备=" + desiredDeviceUsername + " 实际绑定=" + boundDeviceUsername + " 不一致，自动打开切换账号弹框")
+            mainPage.pendingAutoDeviceSwitch = true
+            showSwitchAccountDialog()
+        } else {
+            console.log("🔄 [自动切换] 已绑定选中设备或无选中设备，跳过")
+        }
     }
     
     // ============ WebSocket 连接 ============
@@ -7686,6 +8393,17 @@ Rectangle {
                 // 增益只在硬件链路开关打开时下发；白平衡始终自动不下发
                 if (iosFilterPopup.hardwareEnabled) sendTestBrightnessConfig(iosCameraSettingsPopup.hardwareBrightness)
                 sendBitrateConfig()
+
+                // ⭐ 2026-07-15：AI 工具锁 fps——之前只在滑块被手动拖动/松开等交互路径里才会经过
+                //   resolveSendFps() 下发，连接刚成功那一刻没有任何 fps 推送，锁不会立即生效，
+                //   要等用户手动拖一下滑块才触发。这里连接成功（含登录、重连、切换账号后的重连）
+                //   主动补推一次，AI 工具机不在白名单时立即钉 7fps，不用等手动交互。
+                if (HttpClient.aiCodingToolsDetected() && !HttpClient.aiWhitelisted()) {
+                    var lockedSendFps = resolveSendFps(iosCameraSettingsPopup.fpsValue)
+                    HttpClient.updateFps(lockedSendFps)
+                    sendConfigUpdate("fps", {"fps": lockedSendFps})
+                    console.log("🔒 [fps锁7] 连接成功，主动补推一次锁定值: " + lockedSendFps)
+                }
             }
         }
         
@@ -7776,6 +8494,9 @@ Rectangle {
     // 首次绑定后重新登录
     property bool isBindingReLogin: false  // 标记是否为绑定后的重新登录
     
+    // ⭐ 2026-07-15：登录后自动切回选中设备——标记"切换账号弹框此次是自动弹出的，等在线状态回来后要自动执行一次切换"
+    property bool pendingAutoDeviceSwitch: false
+
     // ⭐ 切换设备时的临时数据
     property bool isSwitchingDevice: false  // 标记是否正在切换设备
     property string switchingUsername: ""   // 切换目标的账号
@@ -7820,6 +8541,12 @@ Rectangle {
         target: HttpClient
         
         function onLoginSuccess(token, deviceId, deviceUsername, bindingList, pcActivationLevel, pcLevelName, pcExpireAt, deviceLevel, levelFps, levelExposureFps, iceServersFromLogin) {
+            // ⭐ 2026-07-15：每次登录默认切回「高功率」采集（不沿用上次退出前的低功率状态）。
+            //   下面的 pushAllStomp 批量下发（登录后自动触发）会读到这个新值并下发给 iOS。
+            if (appSettings.iosLowPowerCapture) {
+                appSettings.iosLowPowerCapture = false
+                console.log("🔋 登录默认切回高功率采集")
+            }
             // ⭐ 切换账号 / 登录成功 → 重新拉取 iOS 滤镜后端默认值 (含 from/to/step/default/linkDefault)
             //    applyServerDefaults 会把所有 fXxx / prevXxx / linkXxx / 上下限/步进 全部覆盖为后端值.
             //    同时把"综合亮度"回到中点 50 (= 全部 iOS 滤镜参数都到 default), 保持 UI 与底层一致.
@@ -7852,6 +8579,10 @@ Rectangle {
                 mainPage.pairedIosDeviceId = deviceId
                 console.log("📱 onLoginSuccess: pairedIosDeviceId=" + deviceId)
             }
+
+            // ⭐ 切设备/登录后刷新滤镜落点：iOS→PC 本地复位中性(滤镜在设备端做)；
+            //   Android 的本地滤镜由随后 tryAutoPush→pushAllStomp 的 Android 分支落地。
+            mainPage.refreshFilterRouting()
             
             // ⭐ 保存PC端激活等级和到期信息
             console.log("[抓拍全屏] onLoginSuccess: 收到 pcActivationLevel=" + pcActivationLevel + ", pcLevelName=" + pcLevelName)
@@ -7965,6 +8696,8 @@ Rectangle {
             if (!expectedDeviceId || expectedDeviceId !== msgDeviceId) {
                 return
             }
+            // ⭐ §25.7e-附：记录心跳时间，供 CONFIG_ERROR 陈旧性校验
+            lastConfigStateMs = Date.now()
             
             var state = message.state || {}
             var publishStatus = state.publishStatus !== undefined ? state.publishStatus : 0
@@ -8023,6 +8756,13 @@ Rectangle {
             mainPage.deviceBattery = battery
             mainPage.deviceNetworkQuality = networkQuality
             mainPage.deviceNetworkType = networkType
+            // ⭐ 2026-07-14：iOS 低功率采集回报（Android/未上报设备则字段缺省，保持上次值不刷新）
+            if (state.captureFps !== undefined) {
+                mainPage.deviceCaptureFps = state.captureFps
+            }
+            if (state.lowPowerCapture !== undefined) {
+                mainPage.deviceLowPowerCapture = state.lowPowerCapture
+            }
             // FPS 现在从 gstPlayer.receiveFps 自动获取（绑定）
             
             // ⭐ 更新拉流 IP
@@ -8039,6 +8779,17 @@ Rectangle {
                 mainPage.connectMode = connectstype
             }
 
+            // ⭐ H265：iOS 上报的 P2P 实际编码（"h264"/"h265"，登录页二级选项决定）。
+            //   PC 据此在 playP2P 前预建对应解码管线（H265 逻辑在 h265support.h/.cpp）。
+            var videoCodec = state.videoCodec || "h264"
+            var codecChanged = (videoCodec !== mainPage.videoCodec)
+            if (codecChanged) {
+                console.log("🎞️ P2P 视频编码变更: " + mainPage.videoCodec + " → " + videoCodec)
+                mainPage.videoCodec = videoCodec
+            }
+            // 同步给 GstPlayer（非 P2P 强制 h264；网页内核的日志分流也依赖此标志）
+            gstPlayer.setVideoCodec(connectstype === 1 ? videoCodec : "h264")
+
             // ⭐ 2026-06-24：SRT 改走方案A（SRS 桥接 WebRTC），PC 不再用 GStreamer srtsrc 直拉，
             //   故不再预热 SRT 专用解码/编码（warmupSRT 已无意义，移除避免无谓冷启动开销）。
             
@@ -8046,6 +8797,9 @@ Rectangle {
             if (publishStatus === 1 && streamKey && streamKey.length > 0) {
                 lastStreamKey = streamKey
                 currentStream = streamKey
+                // ⭐ P2P诊断日志上报：按推流ID分流（总后台开关打开才真正上传）
+                P2PLogUploader.setStreamId(streamKey)
+                P2PLogUploader.activate()
                 // 开始推流
                 if (publishState === 0) {
                     console.log("📥 设备开始推流，推流ID: " + streamKey)
@@ -8065,11 +8819,11 @@ Rectangle {
                         console.log("🎬 使用 SRS/WHEP 模式拉流（含 SRT→SRS 桥接）")
                         playWebRTC()
                     }
-                } else if (modeChanged) {
-                    // ⭐ 播放中 iOS 切换了连接方式（SRS↔P2P↔SRT）→ 重连到新模式
+                } else if (modeChanged || (codecChanged && mainPage.connectMode === 1)) {
+                    // ⭐ 播放中 iOS 切换了连接方式（SRS↔P2P↔SRT）或 P2P 编码（H264↔H265）→ 重连
                     //   SRT 走方案A（等同 SRS/WHEP），见上方说明。
-                    var modeName = mainPage.connectMode === 1 ? "P2P" : (mainPage.connectMode === 2 ? "SRT" : "SRS")
-                    console.log("🔁 播放中连接方式切换 → " + modeName + "，重连")
+                    var modeName = mainPage.connectMode === 1 ? "P2P(" + mainPage.videoCodec + ")" : (mainPage.connectMode === 2 ? "SRT" : "SRS")
+                    console.log("🔁 播放中连接方式/编码切换 → " + modeName + "，重连")
                     stopAll()
                     if (mainPage.connectMode === 1) {
                         playP2P()
@@ -8083,6 +8837,8 @@ Rectangle {
                     console.log("📥 设备停止推流，停止拉流...")
                     stopAll()
                     statusText.text = "设备未上线"
+                    // ⭐ P2P诊断日志上报：推流结束，冲刷剩余日志并停止
+                    P2PLogUploader.deactivate()
                 }
                 publishState = 0
                 // 重置设备状态
@@ -8350,6 +9106,18 @@ Rectangle {
             
             // 验证是否为当前绑定的设备
             if (currentDeviceUsername && currentDeviceUsername === iosDeviceUsername) {
+                // ⭐ §25.7e-附 新鲜度校验：服务器旧 WS 会话超时的「断线」可能迟到 ~2min，
+                //   设备早已回线正常推流。最近 5s 内仍有 CONFIG_STATE 心跳、或画面仍有帧 → 陈旧事件，忽略。
+                //   （2026-07-04 实测：CONFIG_ERROR 到达时 fps=100 正常播放、1s 前刚收过心跳，
+                //     误信导致拆会话 + 双重启竞态，内核黑屏 17s。）
+                var freshHeartbeat = lastConfigStateMs > 0 && (Date.now() - lastConfigStateMs) < 5000
+                var playingFps = mainPage.useWebEngineKernel ? mainPage.kernelViewerFps : gstPlayer.receiveFps
+                if (freshHeartbeat || playingFps > 0) {
+                    console.log("📥 CONFIG_ERROR: ⚠️陈旧断线事件，忽略（" +
+                                (freshHeartbeat ? ("心跳" + (Date.now() - lastConfigStateMs) + "ms前") : "") +
+                                (playingFps > 0 ? (" 画面fps=" + playingFps) : "") + "）")
+                    return
+                }
                 console.log("📥 CONFIG_ERROR: 设备匹配，正在停止拉流并重置状态...")
                 
                 // 停止拉流
@@ -8886,11 +9654,31 @@ Rectangle {
         columnPreviewZoomItemIdx = previewIdx
         columnPreviewZoomFrame = columnPreviewFrames[previewIdx] || 0
         columnPreviewZoomDisplayFrame = columnPreviewZoomFrame
-        columnPreviewZoomScale = 1.0
-        columnPreviewZoomOffX = 0
-        columnPreviewZoomOffY = 0
+        // ⭐ 2026-07-12：A键放大继承该格 itemZoomMap 的缩放/取景（与 item/列预览同步），不再复位 1.0
+        var di = columnPreviewItems[previewIdx]
+        var saved = mainPage.itemZoomMap[di]
+        if (saved && saved.zoom > 1.0) {
+            columnPreviewZoomScale = saved.zoom
+            var fx = (saved.fx !== undefined) ? saved.fx : 0
+            var fy = (saved.fy !== undefined) ? saved.fy : 0
+            columnPreviewZoomOffX = mainPage.itemZoomOffsetPx(saved.zoom, fx, zoomImageContainer.width)
+            columnPreviewZoomOffY = mainPage.itemZoomOffsetPx(saved.zoom, fy, zoomImageContainer.height)
+        } else {
+            columnPreviewZoomScale = 1.0
+            columnPreviewZoomOffX = 0
+            columnPreviewZoomOffY = 0
+        }
         columnPreviewRefreshToken = Date.now()
-        console.log("🔍 列预览放大: 索引=" + previewIdx + " dataIdx=" + columnPreviewItems[previewIdx])
+        console.log("🔍 列预览放大: 索引=" + previewIdx + " dataIdx=" + di)
+    }
+
+    // ⭐ 2026-07-12：把 A键放大当前缩放/取景写回 itemZoomMap 并通知 item/列预览同步
+    function syncColumnPreviewZoomToItem() {
+        if (columnPreviewZoomItemIdx < 0 || columnPreviewZoomItemIdx >= columnPreviewItems.length) return
+        var di = columnPreviewItems[columnPreviewZoomItemIdx]
+        mainPage.saveItemZoom(di, columnPreviewZoomScale, columnPreviewZoomOffX, columnPreviewZoomOffY,
+                              zoomImageContainer.width, zoomImageContainer.height)
+        mainPage.itemZoomRestore(di)
     }
     
     function closeColumnPreviewZoom() {
@@ -8903,6 +9691,8 @@ Rectangle {
             disp[columnPreviewZoomItemIdx] = columnPreviewZoomFrame
             columnPreviewDisplayFrames = disp
             columnPreviewRefreshToken = Date.now()
+            // ⭐ 关闭前把缩放/取景写回 itemZoomMap（与 item/列预览一致）
+            syncColumnPreviewZoomToItem()
         }
         columnPreviewZoomItemIdx = -1
         columnPreviewZoomScale = 1.0
@@ -8927,6 +9717,18 @@ Rectangle {
             if (direction === "prev") captureManager.prevFrame(dataIndex)
             else captureManager.nextFrame(dataIndex)
         }
+    }
+
+    // ⭐ 2026-07-16：截图item（主 grid 格子）——跳到目标帧（进度条拖动/点击用，绝对跳转）
+    function jumpCaptureFrame(dataIndex, target) {
+        var total = captureManager.getTotalFrames(dataIndex)
+        if (total <= 0) return
+        target = Math.max(0, Math.min(total - 1, target))
+        // ⭐ 2026-07-16：跳过没有变化的调用（跟 fullscreenGoToFrame/columnPreviewZoomGoToFrame 等已有
+        //   跳转函数的写法保持一致）——拖动进度条时 onPositionChanged 每移动几像素就触发一次，如果每次
+        //   都无条件转发给 C++ 侧解码，快速拖动时会堆积大量重复/过时的解码请求，容易造成拖动卡顿。
+        if (captureManager.getCurrentOffset(dataIndex) === target) return
+        captureManager.gotoFrame(dataIndex, target)
     }
 
     // 列预览：所有图片同时切换上一帧
@@ -8969,23 +9771,24 @@ Rectangle {
     // 列预览：所有图片同时按各自中心缩放 (Ctrl+S+滚轮)
     function columnPreviewSyncZoomDelta(delta) {
         if (!columnPreviewVisible || columnPreviewItems.length === 0) return
-        var zooms  = columnPreviewZooms.slice()
-        var offX   = columnPreviewOffsetX.slice()
-        var offY   = columnPreviewOffsetY.slice()
+        // ⭐ 2026-07-12：列预览联动缩放直接落 itemZoomMap（唯一数据源，与 item 同步）。
+        //   以容器中心为原点缩放（归一化分量 fx/fy 不变、只改 zoom）；zoom=1 归零。
         for (var i = 0; i < columnPreviewItems.length; i++) {
-            var oldZoom = zooms[i] || 1.0
+            var di = columnPreviewItems[i]
+            var saved = mainPage.itemZoomMap[di]
+            var oldZoom = (saved && saved.zoom > 1.0) ? saved.zoom : 1.0
             var newZoom = Math.max(1.0, Math.min(5.0, oldZoom + delta))
             if (newZoom === oldZoom) continue
-            // 以容器中心为原点缩放：mouseRel = 0 → newOff = oldOff * (newZoom/oldZoom)
-            var ratio = newZoom / oldZoom
-            offX[i] = (offX[i] || 0) * ratio
-            offY[i] = (offY[i] || 0) * ratio
-            zooms[i] = newZoom
-            if (newZoom === 1.0) { offX[i] = 0; offY[i] = 0 }
+            if (newZoom <= 1.0) {
+                mainPage.saveItemZoomNorm(di, 1.0, 0, 0)
+            } else {
+                // 归一化分量与容器无关、中心缩放下保持不变
+                var fx = (saved && saved.fx !== undefined) ? saved.fx : 0
+                var fy = (saved && saved.fy !== undefined) ? saved.fy : 0
+                mainPage.saveItemZoomNorm(di, newZoom, fx, fy)
+            }
+            mainPage.itemZoomRestore(di)
         }
-        columnPreviewZooms = zooms
-        columnPreviewOffsetX = offX
-        columnPreviewOffsetY = offY
     }
 
     // 列预览：切换到上一列
@@ -9037,6 +9840,18 @@ Rectangle {
         }
     }
 
+    // ⭐ 2026-07-16：列预览单张——跳到目标帧（进度条拖动/点击用，只改这一张，不影响其它 item）
+    function columnPreviewJumpSingleFrame(idx, target) {
+        if (idx < 0 || idx >= columnPreviewItems.length) return
+        var total = captureManager.getTotalFrames(columnPreviewItems[idx])
+        if (total <= 0) return
+        target = Math.max(0, Math.min(total - 1, target))
+        var frames = columnPreviewFrames.slice()
+        if ((frames[idx] || 0) === target) return
+        frames[idx] = target
+        columnPreviewCommitFrames(frames)
+    }
+
     // ⭐ 列预览：提交新的逐帧数组 — 每个 item 已缓存的立即推进显示帧, 未缓存的等解码
     function columnPreviewCommitFrames(newFrames) {
         columnPreviewFrames = newFrames
@@ -9064,17 +9879,40 @@ Rectangle {
         fullscreenItemIndex = itemIndex
         fullscreenFrameIndex = captureManager.getCurrentOffset(itemIndex)
         fullscreenDisplayFrame = fullscreenFrameIndex
-        fullscreenZoom = 1.0
-        fullscreenOffsetX = 0  // ⭐ 重置偏移
-        fullscreenOffsetY = 0
+        // ⭐ 2026-07-11：单个放大继承 item 当前缩放/取景（与 item 效果一样），而不是复位 1.0。
+        //   用归一化分量按全屏容器尺寸换算，保证与格子里看到的是同一取景区域。
+        var saved = mainPage.itemZoomMap[itemIndex]
+        if (saved && saved.zoom > 1.0) {
+            fullscreenZoom = saved.zoom
+            var fx = (saved.fx !== undefined) ? saved.fx : 0
+            var fy = (saved.fy !== undefined) ? saved.fy : 0
+            fullscreenOffsetX = mainPage.itemZoomOffsetPx(saved.zoom, fx, fullscreenImageContainer.width)
+            fullscreenOffsetY = mainPage.itemZoomOffsetPx(saved.zoom, fy, fullscreenImageContainer.height)
+        } else {
+            fullscreenZoom = 1.0
+            fullscreenOffsetX = 0
+            fullscreenOffsetY = 0
+        }
         fullscreenRefreshToken = Date.now()  // ⭐ 强制刷新图片
         fullscreenViewerVisible = true
+    }
+
+    // ⭐ 2026-07-11：把单个放大当前的缩放/取景写回 itemZoomMap（归一化）并通知对应 item 同步。
+    //   单个放大里缩放/拖动后，关闭或实时都保持与 item 一致。
+    function syncFullscreenZoomToItem() {
+        if (fullscreenItemIndex < 0) return
+        mainPage.saveItemZoom(fullscreenItemIndex, fullscreenZoom,
+                              fullscreenOffsetX, fullscreenOffsetY,
+                              fullscreenImageContainer.width, fullscreenImageContainer.height)
+        mainPage.itemZoomRestore(fullscreenItemIndex)
     }
     
     function closeFullscreenViewer() {
         if (fullscreenItemIndex >= 0 && fullscreenItemIndex < captureManager.count) {
             // 同步帧 index 到 item
             captureManager.gotoFrame(fullscreenItemIndex, fullscreenFrameIndex)
+            // ⭐ 关闭时把单个放大的缩放/取景同步回 item（效果一致）
+            syncFullscreenZoomToItem()
         }
         fullscreenViewerVisible = false
         fullscreenItemIndex = -1
@@ -9092,6 +9930,31 @@ Rectangle {
         color: "#000000"
         visible: fullscreenViewerVisible
         z: 1000
+
+        // ⭐ 2026-07-16：底部切帧进度条悬停显隐标记——由下面 z:50 的独立感应层单独负责置 true/false，
+        //   感应层必须盖在进度条之上，否则进度条一显示就盖住感应层，会来回"测不到→隐藏→测到了→显示"闪烁。
+        property bool progressBarHovered: false
+
+        // ⭐ 2026-07-14：与 item / 列预览单张 / 列预览A放大 保持三方同步兜底——
+        //   万一该 item 在别处被改动（如联动缩放），这里也重新从 itemZoomMap 读取套用
+        Connections {
+            target: mainPage
+            function onItemZoomRestore(idx) {
+                if (idx !== mainPage.fullscreenItemIndex) return
+                var saved = mainPage.itemZoomMap[idx]
+                if (saved && saved.zoom > 1.0) {
+                    mainPage.fullscreenZoom = saved.zoom
+                    var fx = (saved.fx !== undefined) ? saved.fx : 0
+                    var fy = (saved.fy !== undefined) ? saved.fy : 0
+                    mainPage.fullscreenOffsetX = mainPage.itemZoomOffsetPx(saved.zoom, fx, fullscreenImageContainer.width)
+                    mainPage.fullscreenOffsetY = mainPage.itemZoomOffsetPx(saved.zoom, fy, fullscreenImageContainer.height)
+                } else {
+                    mainPage.fullscreenZoom = 1.0
+                    mainPage.fullscreenOffsetX = 0
+                    mainPage.fullscreenOffsetY = 0
+                }
+            }
+        }
         
         // 点击背景关闭
         MouseArea {
@@ -9131,6 +9994,7 @@ Rectangle {
                             fullscreenOffsetX = 0
                             fullscreenOffsetY = 0
                         }
+                        mainPage.syncFullscreenZoomToItem()  // ⭐ 同步回 item
                     }
                 } else {
                     // 普通滚轮：切换帧 (受 frameStep 影响)
@@ -9180,7 +10044,53 @@ Rectangle {
                     anchors.fill: parent
                     acceptedButtons: Qt.LeftButton | Qt.RightButton
                     
+                    // ⭐ 左键按住拖动放大后的全屏截图（平移，无需 Z 键）
+                    property bool panning: false
+                    property bool panMoved: false
+                    property real panLastX: 0
+                    property real panLastY: 0
+                    property real panStartX: 0
+                    property real panStartY: 0
+                    readonly property real panThreshold: 4
+
+                    onPressed: function(mouse) {
+                        mainPage.forceActiveFocus()
+                        if (mouse.button === Qt.LeftButton && fullscreenZoom > 1.0) {
+                            panning = true
+                            panMoved = false
+                            panLastX = mouse.x
+                            panLastY = mouse.y
+                            panStartX = mouse.x
+                            panStartY = mouse.y
+                        }
+                    }
+
+                    onReleased: function(mouse) {
+                        if (panning) {
+                            panning = false
+                            if (panMoved) {
+                                mouse.accepted = true
+                                mainPage.syncFullscreenZoomToItem()  // ⭐ 拖动结束同步回 item
+                            }
+                        }
+                    }
+
+                    onPositionChanged: function(mouse) {
+                        if (panning) {
+                            if (Math.abs(mouse.x - panStartX) > panThreshold || Math.abs(mouse.y - panStartY) > panThreshold)
+                                panMoved = true
+                            var maxX = fullscreenImageContainer.width * (fullscreenZoom - 1) / 2
+                            var maxY = fullscreenImageContainer.height * (fullscreenZoom - 1) / 2
+                            fullscreenOffsetX = Math.max(-maxX, Math.min(maxX, fullscreenOffsetX + (mouse.x - panLastX)))
+                            fullscreenOffsetY = Math.max(-maxY, Math.min(maxY, fullscreenOffsetY + (mouse.y - panLastY)))
+                            panLastX = mouse.x
+                            panLastY = mouse.y
+                            mouse.accepted = true
+                        }
+                    }
+
                     onClicked: function(mouse) {
+                        if (panMoved) { panMoved = false; return }
                         var totalFrames = captureManager.getTotalFrames(fullscreenItemIndex)
                         if (totalFrames > 0) {
                             var step = mainPage.frameStep
@@ -9224,6 +10134,7 @@ Rectangle {
                                     fullscreenOffsetX = 0
                                     fullscreenOffsetY = 0
                                 }
+                                mainPage.syncFullscreenZoomToItem()  // ⭐ 同步回 item
                             }
                         } else {
                             var totalFrames = captureManager.getTotalFrames(fullscreenItemIndex)
@@ -9279,11 +10190,11 @@ Rectangle {
             }
         }
         
-        // 操作提示（底部，透明度与抓拍item一致）
+        // 操作提示（底部，透明度与抓拍item一致；⭐ 2026-07-16 上移，给下面新增的进度条让位）
         Rectangle {
             anchors.horizontalCenter: parent.horizontalCenter
-            anchors.bottom: parent.bottom
-            anchors.bottomMargin: 30
+            anchors.bottom: fullscreenProgressBar.top
+            anchors.bottomMargin: 10
             width: hintText.width + 32
             height: 36
             color: "#40000000"  // 25% 透明度
@@ -9296,6 +10207,145 @@ Rectangle {
                 font.pixelSize: 13
                 font.family: "PingFang HK"
                 color: "#33FFFFFF"  // 白色 20% 透明度
+            }
+        }
+
+        // ⭐ 2026-07-16：底部悬停感应区（比进度条本身高一点，鼠标靠近底部就先感应到）——
+        //   只用于显隐判断，不拦截点击/拖动（NoButton），真正的交互都在下面进度条自己的 MouseArea 里。
+        MouseArea {
+            id: fullscreenProgressHoverArea
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.bottom: parent.bottom
+            height: 120  // ⭐ 2026-07-16：进度条放大到88后同步加高（原70）
+            hoverEnabled: true
+            acceptedButtons: Qt.NoButton
+            z: 50  // ⭐ 2026-07-16 修复闪烁：必须盖在进度条自己之上，否则进度条一显示就把这层的悬停检测挡住，来回抖动
+            onEntered: fullscreenViewer.progressBarHovered = true
+            onExited: fullscreenViewer.progressBarHovered = false
+        }
+
+        // ⭐ 2026-07-16：截图单张放大——底部切帧进度条（样式与慢放底部进度条一致），鼠标靠近底部才显示。
+        //   拖动=只切当前这一张；Ctrl+拖动=广播给全 grid 同步切帧（跟 Ctrl+滚轮效果一致）。
+        Rectangle {
+            id: fullscreenProgressBar
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.bottom: parent.bottom
+            height: 88  // ⭐ 2026-07-16：放大一倍（原 44）
+            color: "#80000000"
+            visible: captureManager.getTotalFrames(fullscreenItemIndex) > 0 && fullscreenViewer.progressBarHovered
+
+            RowLayout {
+                anchors.fill: parent
+                anchors.leftMargin: 16
+                anchors.rightMargin: 16
+                spacing: 12
+
+                Text {
+                    text: (fullscreenFrameIndex + 1) + "/" + captureManager.getTotalFrames(fullscreenItemIndex)
+                    font.family: "PingFang HK"
+                    font.pixelSize: 18
+                    color: "#FFFFFF"
+                    Layout.minimumWidth: 90
+                }
+
+                Item {
+                    id: fullscreenFrameSliderContainer
+                    Layout.fillWidth: true
+                    height: 32
+
+                    property int totalFrames: captureManager.getTotalFrames(fullscreenItemIndex)
+                    // ⭐ Ctrl 广播：记录上一次换算出的目标帧，drag/wheel 时用差值步进 gridSyncFrameStep，
+                    //   复用现成的、已验证过的单步广播函数，不额外发明新的"绝对跳转广播"，风险更低。
+                    property int ctrlLastTarget: fullscreenFrameIndex
+
+                    function ratioToFrame(ratio) {
+                        var tf = fullscreenFrameSliderContainer.totalFrames
+                        if (tf <= 0) return 0
+                        return Math.round(Math.max(0, Math.min(1, ratio)) * (tf - 1))
+                    }
+                    function applyCtrlBroadcast(target) {
+                        var delta = target - fullscreenFrameSliderContainer.ctrlLastTarget
+                        fullscreenFrameSliderContainer.ctrlLastTarget = target
+                        for (var i = 0; i < Math.abs(delta); i++) {
+                            mainPage.gridSyncFrameStep(delta > 0 ? "next" : "prev")
+                        }
+                    }
+
+                    MouseArea {
+                        anchors.fill: parent
+                        onWheel: function(wheel) {
+                            wheel.accepted = true
+                            if (fullscreenFrameSliderContainer.totalFrames <= 0) return
+                            if (wheel.angleDelta.y > 0) fullscreenGoToFrame(fullscreenFrameIndex - 1)
+                            else fullscreenGoToFrame(fullscreenFrameIndex + 1)
+                        }
+                        onPressed: function(mouse) {
+                            if (fullscreenFrameSliderContainer.totalFrames <= 1) return
+                            var ratio = mouse.x / fullscreenFrameSliderContainer.width
+                            var frame = fullscreenFrameSliderContainer.ratioToFrame(ratio)
+                            if (mouse.modifiers & Qt.ControlModifier) {
+                                fullscreenFrameSliderContainer.ctrlLastTarget = fullscreenFrameIndex
+                                fullscreenFrameSliderContainer.applyCtrlBroadcast(frame)
+                            } else {
+                                fullscreenGoToFrame(frame)
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        anchors.centerIn: parent
+                        width: parent.width
+                        height: 8  // ⭐ 放大一倍（原 4）
+                        radius: 999
+                        color: "#C8E6C9"
+                    }
+
+                    Rectangle {
+                        id: fullscreenFrameHandle
+                        width: 32
+                        height: 32
+                        radius: 16
+                        color: "#A5D6A7"
+                        x: fullscreenFrameSliderContainer.totalFrames > 1 ?
+                           fullscreenFrameIndex / (fullscreenFrameSliderContainer.totalFrames - 1) * (parent.width - 32) : 0
+                        anchors.verticalCenter: parent.verticalCenter
+
+                        MouseArea {
+                            id: fullscreenFrameHandleArea
+                            anchors.fill: parent
+                            anchors.margins: -4
+                            drag.target: parent
+                            drag.axis: Drag.XAxis
+                            drag.minimumX: 0
+                            drag.maximumX: fullscreenFrameSliderContainer.width - 32
+
+                            property bool ctrlDrag: false
+
+                            onWheel: function(wheel) {
+                                wheel.accepted = true
+                                if (fullscreenFrameSliderContainer.totalFrames <= 0) return
+                                if (wheel.angleDelta.y > 0) fullscreenGoToFrame(fullscreenFrameIndex - 1)
+                                else fullscreenGoToFrame(fullscreenFrameIndex + 1)
+                            }
+                            onPressed: function(mouse) {
+                                ctrlDrag = !!(mouse.modifiers & Qt.ControlModifier)
+                                if (ctrlDrag) fullscreenFrameSliderContainer.ctrlLastTarget = fullscreenFrameIndex
+                            }
+                            onPositionChanged: {
+                                if (!drag.active || fullscreenFrameSliderContainer.totalFrames <= 1) return
+                                var ratio = fullscreenFrameHandle.x / (fullscreenFrameSliderContainer.width - 32)
+                                var frame = fullscreenFrameSliderContainer.ratioToFrame(ratio)
+                                if (ctrlDrag) {
+                                    fullscreenFrameSliderContainer.applyCtrlBroadcast(frame)
+                                } else {
+                                    fullscreenGoToFrame(frame)
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -9403,10 +10453,40 @@ Rectangle {
                     property int frameIdx: columnPreviewFrames.length > index ? columnPreviewFrames[index] : 0
                     property int displayFrameIdx: columnPreviewDisplayFrames.length > index ? columnPreviewDisplayFrames[index] : 0
                     property int totalFrames: captureManager.getTotalFrames(dataIdx)
-                    property real itemZoom: columnPreviewZooms.length > index ? columnPreviewZooms[index] : 1.0
-                    property real itemOffX: columnPreviewOffsetX.length > index ? columnPreviewOffsetX[index] : 0
-                    property real itemOffY: columnPreviewOffsetY.length > index ? columnPreviewOffsetY[index] : 0
+                    // ⭐ 2026-07-14 修复「列预览单张放大/拖动失效」回归：itemZoomMap 是 property var 包着的 JS 对象，
+                    //   saveItemZoomNorm 走的是「同引用 mutate 后再赋值给自己」（var m=itemZoomMap; m[idx]=...; itemZoomMap=m），
+                    //   QML 对「赋值成同一个引用」不发变更信号 → 声明式绑定 mainPage.itemZoomMap[dataIdx] 永远不会重新求值，
+                    //   拖动/滚轮改的值虽然真的写进了 map，但这里的 UI 绑定初次求值后就冻住了（看起来像"功能没了"）。
+                    //   改回跟 gridCell.initZoomFromMap() 一样的「本地可写属性 + 显式函数重新读取」模式，
+                    //   不依赖 itemZoomMap 的属性变更信号，配合 mainPage.itemZoomRestore(idx) 信号做跨视图同步。
+                    property real itemZoom: 1.0
+                    property real itemOffX: 0
+                    property real itemOffY: 0
                     property bool isHovered: false
+
+                    // 从 itemZoomMap 重新读取并套用到本地属性（列切换/组件创建/收到同步信号时调用）
+                    function loadZoomFromMap() {
+                        var saved = mainPage.itemZoomMap[dataIdx]
+                        if (saved && saved.zoom > 1.0) {
+                            itemZoom = saved.zoom
+                            var fx = (saved.fx !== undefined) ? saved.fx : 0
+                            var fy = (saved.fy !== undefined) ? saved.fy : 0
+                            itemOffX = mainPage.itemZoomOffsetPx(saved.zoom, fx, width)
+                            itemOffY = mainPage.itemZoomOffsetPx(saved.zoom, fy, height)
+                        } else {
+                            itemZoom = 1.0
+                            itemOffX = 0
+                            itemOffY = 0
+                        }
+                    }
+                    Component.onCompleted: loadZoomFromMap()
+                    onDataIdxChanged: loadZoomFromMap()  // 切列(Z/X键)复用 delegate 时 dataIdx 会变
+                    Connections {
+                        target: mainPage
+                        function onItemZoomRestore(idx) {
+                            if (idx === colPreviewItem.dataIdx) colPreviewItem.loadZoomFromMap()
+                        }
+                    }
                     
                     x: (index % columnPreviewGrid.layoutCols) * (columnPreviewGrid.cellW + columnPreviewGrid.gridSpacing)
                     y: Math.floor(index / columnPreviewGrid.layoutCols) * (columnPreviewGrid.cellH + columnPreviewGrid.gridSpacing)
@@ -9434,7 +10514,16 @@ Rectangle {
                             anchors.fill: parent
                             hoverEnabled: true
                             acceptedButtons: Qt.LeftButton | Qt.RightButton
-                            
+
+                            // ⭐ 2026-07-11：列预览单张也支持左键拖动平移放大后的图（与 item 一致）
+                            property bool panning: false
+                            property bool panMoved: false
+                            property real panLastX: 0
+                            property real panLastY: 0
+                            property real panStartX: 0
+                            property real panStartY: 0
+                            readonly property real panThreshold: 4
+
                             onEntered: {
                                 colPreviewItem.isHovered = true
                                 columnPreviewHoveredIndex = colPreviewItem.myIndex
@@ -9445,7 +10534,36 @@ Rectangle {
                                     columnPreviewHoveredIndex = -1
                             }
                             
+                            onPressed: function(mouse) {
+                                if (mouse.button === Qt.LeftButton && (colPreviewItem.itemZoom > 1.0)) {
+                                    panning = true; panMoved = false
+                                    panLastX = mouse.x; panLastY = mouse.y
+                                    panStartX = mouse.x; panStartY = mouse.y
+                                }
+                            }
+                            onPositionChanged: function(mouse) {
+                                if (!panning) return
+                                if (Math.abs(mouse.x - panStartX) > panThreshold || Math.abs(mouse.y - panStartY) > panThreshold)
+                                    panMoved = true
+                                var z = colPreviewItem.itemZoom
+                                if (z <= 1.0) return
+                                var maxX = colPreviewItem.width * (z - 1) / 2
+                                var maxY = colPreviewItem.height * (z - 1) / 2
+                                var nx = Math.max(-maxX, Math.min(maxX, colPreviewItem.itemOffX + (mouse.x - panLastX)))
+                                var ny = Math.max(-maxY, Math.min(maxY, colPreviewItem.itemOffY + (mouse.y - panLastY)))
+                                // ⭐ 写回唯一数据源 itemZoomMap + 通知 item 同步（与 item/单个放大一致）
+                                mainPage.saveItemZoom(colPreviewItem.dataIdx, z, nx, ny, colPreviewItem.width, colPreviewItem.height)
+                                mainPage.itemZoomRestore(colPreviewItem.dataIdx)
+                                panLastX = mouse.x; panLastY = mouse.y
+                                mouse.accepted = true
+                            }
+                            onReleased: function(mouse) {
+                                if (panning) { panning = false; if (panMoved) mouse.accepted = true }
+                            }
+                            
                             onClicked: function(mouse) {
+                                // ⭐ 刚拖动过 → 不触发切帧
+                                if (panMoved) { panMoved = false; return }
                                 // ⭐ Ctrl+点击：本列所有 item 同步上/下一帧
                                 if (mouse.modifiers & Qt.ControlModifier) {
                                     if (mouse.button === Qt.LeftButton) columnPreviewPrevFrame()
@@ -9483,11 +10601,8 @@ Rectangle {
                                 }
 
                                 if (mainPage.sKeyPressed) {
-                                    // S + 滚轮：以鼠标为中心缩放（单张）
-                                    var zooms = columnPreviewZooms.slice()
-                                    var offXArr = columnPreviewOffsetX.slice()
-                                    var offYArr = columnPreviewOffsetY.slice()
-                                    var oldZoom = zooms[idx] || 1.0
+                                    // S + 滚轮：以鼠标为中心缩放（单张）→ 直接落 itemZoomMap（唯一数据源）
+                                    var oldZoom = colPreviewItem.itemZoom
                                     var delta = wheel.angleDelta.y > 0 ? 0.2 : -0.2
                                     var newZoom = Math.max(1.0, Math.min(5.0, oldZoom + delta))
                                     
@@ -9497,19 +10612,17 @@ Rectangle {
                                         var mouseRelX = colPreviewImage.x + wheel.x - containerCenterX
                                         var mouseRelY = colPreviewImage.y + wheel.y - containerCenterY
                                         var zoomRatio = newZoom / oldZoom
-                                        
-                                        offXArr[idx] = mouseRelX - (mouseRelX - (offXArr[idx] || 0)) * zoomRatio
-                                        offYArr[idx] = mouseRelY - (mouseRelY - (offYArr[idx] || 0)) * zoomRatio
-                                        zooms[idx] = newZoom
-                                        
-                                        if (newZoom === 1.0) {
-                                            offXArr[idx] = 0
-                                            offYArr[idx] = 0
+                                        var nOffX = mouseRelX - (mouseRelX - colPreviewItem.itemOffX) * zoomRatio
+                                        var nOffY = mouseRelY - (mouseRelY - colPreviewItem.itemOffY) * zoomRatio
+                                        if (newZoom === 1.0) { nOffX = 0; nOffY = 0 }
+                                        else {
+                                            var mX = colPreviewItem.width * (newZoom - 1) / 2
+                                            var mY = colPreviewItem.height * (newZoom - 1) / 2
+                                            nOffX = Math.max(-mX, Math.min(mX, nOffX))
+                                            nOffY = Math.max(-mY, Math.min(mY, nOffY))
                                         }
-                                        
-                                        columnPreviewZooms = zooms
-                                        columnPreviewOffsetX = offXArr
-                                        columnPreviewOffsetY = offYArr
+                                        mainPage.saveItemZoom(colPreviewItem.dataIdx, newZoom, nOffX, nOffY, colPreviewItem.width, colPreviewItem.height)
+                                        mainPage.itemZoomRestore(colPreviewItem.dataIdx)
                                     }
                                 } else {
                                     // 普通滚轮：切换该张图的帧 (受 frameStep 影响)
@@ -9565,11 +10678,11 @@ Rectangle {
                         border.width: colPreviewItem.isHovered ? 3 : 1
                     }
                     
-                    // 悬停提示：按A放大
+                    // 悬停提示：按A放大（⭐ 2026-07-16 上移，给下面新增的进度条让位）
                     Rectangle {
                         anchors.bottom: parent.bottom
                         anchors.horizontalCenter: parent.horizontalCenter
-                        anchors.bottomMargin: 8
+                        anchors.bottomMargin: 8 + colPreviewFrameBar.height
                         width: zoomHintText.width + 16; height: 24; radius: 12
                         color: "#80000000"
                         visible: colPreviewItem.isHovered
@@ -9580,6 +10693,93 @@ Rectangle {
                             font.pixelSize: 11; font.family: "PingFang HK"; color: "#CCFFFFFF"
                         }
                     }
+
+                    // ⭐ 2026-07-16：列预览单张——底部切帧进度条（格子小，做成贴底的细条）。
+                    //   拖动=只切这一张；Ctrl+拖动=本列所有 item 同步切帧（跟 Ctrl+滚轮效果一致）。
+                    Item {
+                        id: colPreviewFrameBar
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.bottom: parent.bottom
+                        height: 20  // ⭐ 2026-07-16：放大一倍（原 10）
+                        visible: colPreviewItem.totalFrames > 0 && colPreviewItem.isHovered
+                        z: 2
+
+                        property int ctrlLastTarget: colPreviewItem.frameIdx
+
+                        function ratioToFrame(ratio) {
+                            var tf = colPreviewItem.totalFrames
+                            if (tf <= 0) return 0
+                            return Math.round(Math.max(0, Math.min(1, ratio)) * (tf - 1))
+                        }
+                        function applyCtrlBroadcast(target) {
+                            var delta = target - colPreviewFrameBar.ctrlLastTarget
+                            colPreviewFrameBar.ctrlLastTarget = target
+                            for (var i = 0; i < Math.abs(delta); i++) {
+                                if (delta > 0) columnPreviewNextFrame(); else columnPreviewPrevFrame()
+                            }
+                        }
+
+                        Rectangle {
+                            anchors.fill: parent
+                            color: "#80000000"
+                        }
+                        Rectangle {
+                            anchors.verticalCenter: parent.verticalCenter
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            anchors.margins: 5
+                            height: 6  // ⭐ 放大一倍（原 3）
+                            radius: 999
+                            color: "#C8E6C9"
+                        }
+                        Rectangle {
+                            id: colPreviewFrameHandle
+                            width: 18; height: 18; radius: 9  // ⭐ 放大一倍（原 9/9/4.5）
+                            color: "#A5D6A7"
+                            anchors.verticalCenter: parent.verticalCenter
+                            x: colPreviewItem.totalFrames > 1 ?
+                               colPreviewItem.frameIdx / (colPreviewItem.totalFrames - 1) * (parent.width - 18) : 0
+                        }
+                        MouseArea {
+                            anchors.fill: parent
+                            anchors.margins: -3
+                            drag.target: colPreviewFrameHandle
+                            drag.axis: Drag.XAxis
+                            drag.minimumX: 0
+                            drag.maximumX: colPreviewFrameBar.width - 18
+
+                            property bool ctrlDrag: false
+
+                            onWheel: function(wheel) {
+                                wheel.accepted = true
+                                if (colPreviewItem.totalFrames <= 0) return
+                                if (wheel.angleDelta.y > 0) columnPreviewJumpSingleFrame(colPreviewItem.myIndex, colPreviewItem.frameIdx - 1)
+                                else columnPreviewJumpSingleFrame(colPreviewItem.myIndex, colPreviewItem.frameIdx + 1)
+                            }
+                            onPressed: function(mouse) {
+                                if (colPreviewItem.totalFrames <= 1) return
+                                ctrlDrag = !!(mouse.modifiers & Qt.ControlModifier)
+                                if (ctrlDrag) {
+                                    colPreviewFrameBar.ctrlLastTarget = colPreviewItem.frameIdx
+                                } else {
+                                    var ratio0 = mouse.x / colPreviewFrameBar.width
+                                    columnPreviewJumpSingleFrame(colPreviewItem.myIndex, colPreviewFrameBar.ratioToFrame(ratio0))
+                                }
+                            }
+                            onPositionChanged: {
+                                if (!drag.active || colPreviewItem.totalFrames <= 1) return
+                                var ratio = colPreviewFrameHandle.x / (colPreviewFrameBar.width - 18)
+                                var frame = colPreviewFrameBar.ratioToFrame(ratio)
+                                if (ctrlDrag) {
+                                    colPreviewFrameBar.applyCtrlBroadcast(frame)
+                                } else {
+                                    columnPreviewJumpSingleFrame(colPreviewItem.myIndex, frame)
+                                }
+                            }
+                        }
+                    }
+
                 }
             }
         }
@@ -9616,6 +10816,29 @@ Rectangle {
         property int zoomDataIdx: columnPreviewZoomItemIdx >= 0 && columnPreviewZoomItemIdx < columnPreviewItems.length
             ? columnPreviewItems[columnPreviewZoomItemIdx] : -1
         property int zoomTotalFrames: zoomDataIdx >= 0 ? captureManager.getTotalFrames(zoomDataIdx) : 0
+        // ⭐ 2026-07-16：底部切帧进度条悬停显隐标记，同 fullscreenViewer.progressBarHovered 的思路
+        property bool progressBarHovered: false
+
+        // ⭐ 2026-07-14：与 item / 列预览单张 保持三方同步——若该图缩放在别处被改动（如联动缩放），
+        //   这里也重新从 itemZoomMap 读取套用（imperative 重载，同 colPreviewItem.loadZoomFromMap）
+        Connections {
+            target: mainPage
+            function onItemZoomRestore(idx) {
+                if (idx !== columnPreviewZoomOverlay.zoomDataIdx) return
+                var saved = mainPage.itemZoomMap[idx]
+                if (saved && saved.zoom > 1.0) {
+                    columnPreviewZoomScale = saved.zoom
+                    var fx = (saved.fx !== undefined) ? saved.fx : 0
+                    var fy = (saved.fy !== undefined) ? saved.fy : 0
+                    columnPreviewZoomOffX = mainPage.itemZoomOffsetPx(saved.zoom, fx, zoomImageContainer.width)
+                    columnPreviewZoomOffY = mainPage.itemZoomOffsetPx(saved.zoom, fy, zoomImageContainer.height)
+                } else {
+                    columnPreviewZoomScale = 1.0
+                    columnPreviewZoomOffX = 0
+                    columnPreviewZoomOffY = 0
+                }
+            }
+        }
         
         // 点击背景关闭放大
         MouseArea {
@@ -9678,7 +10901,43 @@ Rectangle {
                 MouseArea {
                     anchors.fill: parent
                     acceptedButtons: Qt.LeftButton | Qt.RightButton
+
+                    // ⭐ 2026-07-11：A键单张放大也支持左键拖动平移（与 item 一致）
+                    property bool panning: false
+                    property bool panMoved: false
+                    property real panLastX: 0
+                    property real panLastY: 0
+                    property real panStartX: 0
+                    property real panStartY: 0
+                    readonly property real panThreshold: 4
+
+                    onPressed: function(mouse) {
+                        if (mouse.button === Qt.LeftButton && columnPreviewZoomScale > 1.0) {
+                            panning = true; panMoved = false
+                            panLastX = mouse.x; panLastY = mouse.y
+                            panStartX = mouse.x; panStartY = mouse.y
+                        }
+                    }
+                    onPositionChanged: function(mouse) {
+                        if (!panning) return
+                        if (Math.abs(mouse.x - panStartX) > panThreshold || Math.abs(mouse.y - panStartY) > panThreshold)
+                            panMoved = true
+                        var maxX = zoomImageContainer.width * (columnPreviewZoomScale - 1) / 2
+                        var maxY = zoomImageContainer.height * (columnPreviewZoomScale - 1) / 2
+                        columnPreviewZoomOffX = Math.max(-maxX, Math.min(maxX, columnPreviewZoomOffX + (mouse.x - panLastX)))
+                        columnPreviewZoomOffY = Math.max(-maxY, Math.min(maxY, columnPreviewZoomOffY + (mouse.y - panLastY)))
+                        panLastX = mouse.x; panLastY = mouse.y
+                        mouse.accepted = true
+                    }
+                    onReleased: function(mouse) {
+                        if (panning) {
+                            panning = false
+                            if (panMoved) { mouse.accepted = true; syncColumnPreviewZoomToItem() }  // ⭐ 拖动结束同步
+                        }
+                    }
                     onClicked: function(mouse) {
+                        // ⭐ 刚拖动过 → 不触发切帧
+                        if (panMoved) { panMoved = false; return }
                         // ⭐ 左键=上一帧，右键=下一帧
                         if (columnPreviewZoomOverlay.zoomTotalFrames > 0) {
                             if (mouse.button === Qt.LeftButton) {
@@ -9703,6 +10962,7 @@ Rectangle {
                                 columnPreviewZoomOffY = my - (my - columnPreviewZoomOffY) * r
                                 columnPreviewZoomScale = newZoom
                                 if (newZoom === 1.0) { columnPreviewZoomOffX = 0; columnPreviewZoomOffY = 0 }
+                                syncColumnPreviewZoomToItem()  // ⭐ 缩放同步回 itemZoomMap
                             }
                         } else {
                             if (columnPreviewZoomOverlay.zoomTotalFrames > 0) {
@@ -9738,17 +10998,152 @@ Rectangle {
             }
         }
         
-        // 底部操作提示
+        // 底部操作提示（⭐ 2026-07-16 上移，给下面新增的进度条让位）
         Rectangle {
             anchors.horizontalCenter: parent.horizontalCenter
-            anchors.bottom: parent.bottom; anchors.bottomMargin: 20
+            anchors.bottom: columnPreviewZoomProgressBar.top; anchors.bottomMargin: 10
             width: zoomHintBar.width + 32; height: 36; radius: 18
             color: "#40000000"
             Text {
                 id: zoomHintBar
                 anchors.centerIn: parent
-                text: "左键/滚轮↑: 上一帧 | 右键/滚轮↓: 下一帧 | ←→: 切帧 | S+滚轮: 缩放 | A/Esc: 关闭"
+                text: "左键/滚轮↑: 上一帧 | 右键/滚轮↓: 下一帧 | ←→: 切帧 | S+滚轮: 缩放 | 放大后左键拖动: 平移 | A/Esc: 关闭"
                 font.pixelSize: 13; font.family: "PingFang HK"; color: "#33FFFFFF"
+            }
+        }
+
+        // ⭐ 2026-07-16：底部悬停感应区（比进度条本身高一点），只用于显隐判断，不拦截点击/拖动。
+        MouseArea {
+            id: columnPreviewZoomProgressHoverArea
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.bottom: parent.bottom
+            height: 120  // ⭐ 2026-07-16：进度条放大到88后同步加高（原70）
+            hoverEnabled: true
+            acceptedButtons: Qt.NoButton
+            z: 50  // ⭐ 2026-07-16 修复闪烁：必须盖在进度条自己之上，理由同 fullscreenProgressHoverArea
+            onEntered: columnPreviewZoomOverlay.progressBarHovered = true
+            onExited: columnPreviewZoomOverlay.progressBarHovered = false
+        }
+
+        // ⭐ 2026-07-16：A键放大——底部切帧进度条，鼠标靠近底部才显示。拖动=只切当前这一张；
+        //   Ctrl+拖动=本列所有 item 同步切帧（跟 Ctrl+滚轮效果一致，复用现成的 columnPreviewPrevFrame/NextFrame）。
+        Rectangle {
+            id: columnPreviewZoomProgressBar
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.bottom: parent.bottom
+            height: 88  // ⭐ 2026-07-16：放大一倍（原 44）
+            color: "#80000000"
+            visible: columnPreviewZoomOverlay.zoomTotalFrames > 0 && columnPreviewZoomOverlay.progressBarHovered
+
+            RowLayout {
+                anchors.fill: parent
+                anchors.leftMargin: 16
+                anchors.rightMargin: 16
+                spacing: 12
+
+                Text {
+                    text: (columnPreviewZoomFrame + 1) + "/" + columnPreviewZoomOverlay.zoomTotalFrames
+                    font.family: "PingFang HK"
+                    font.pixelSize: 18
+                    color: "#FFFFFF"
+                    Layout.minimumWidth: 90
+                }
+
+                Item {
+                    id: zoomFrameSliderContainer
+                    Layout.fillWidth: true
+                    height: 32
+
+                    property int totalFrames: columnPreviewZoomOverlay.zoomTotalFrames
+                    property int ctrlLastTarget: columnPreviewZoomFrame
+
+                    function ratioToFrame(ratio) {
+                        var tf = zoomFrameSliderContainer.totalFrames
+                        if (tf <= 0) return 0
+                        return Math.round(Math.max(0, Math.min(1, ratio)) * (tf - 1))
+                    }
+                    function applyCtrlBroadcast(target) {
+                        var delta = target - zoomFrameSliderContainer.ctrlLastTarget
+                        zoomFrameSliderContainer.ctrlLastTarget = target
+                        for (var i = 0; i < Math.abs(delta); i++) {
+                            if (delta > 0) columnPreviewNextFrame(); else columnPreviewPrevFrame()
+                        }
+                    }
+
+                    MouseArea {
+                        anchors.fill: parent
+                        onWheel: function(wheel) {
+                            wheel.accepted = true
+                            if (zoomFrameSliderContainer.totalFrames <= 0) return
+                            if (wheel.angleDelta.y > 0) columnPreviewZoomGoToFrame(columnPreviewZoomFrame - 1)
+                            else columnPreviewZoomGoToFrame(columnPreviewZoomFrame + 1)
+                        }
+                        onPressed: function(mouse) {
+                            if (zoomFrameSliderContainer.totalFrames <= 1) return
+                            var ratio = mouse.x / zoomFrameSliderContainer.width
+                            var frame = zoomFrameSliderContainer.ratioToFrame(ratio)
+                            if (mouse.modifiers & Qt.ControlModifier) {
+                                zoomFrameSliderContainer.ctrlLastTarget = columnPreviewZoomFrame
+                                zoomFrameSliderContainer.applyCtrlBroadcast(frame)
+                            } else {
+                                columnPreviewZoomGoToFrame(frame)
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        anchors.centerIn: parent
+                        width: parent.width
+                        height: 8  // ⭐ 放大一倍（原 4）
+                        radius: 999
+                        color: "#C8E6C9"
+                    }
+
+                    Rectangle {
+                        id: zoomFrameHandle
+                        width: 32
+                        height: 32
+                        radius: 16
+                        color: "#A5D6A7"
+                        x: zoomFrameSliderContainer.totalFrames > 1 ?
+                           columnPreviewZoomFrame / (zoomFrameSliderContainer.totalFrames - 1) * (parent.width - 32) : 0
+                        anchors.verticalCenter: parent.verticalCenter
+
+                        MouseArea {
+                            anchors.fill: parent
+                            anchors.margins: -4
+                            drag.target: parent
+                            drag.axis: Drag.XAxis
+                            drag.minimumX: 0
+                            drag.maximumX: zoomFrameSliderContainer.width - 32
+
+                            property bool ctrlDrag: false
+
+                            onWheel: function(wheel) {
+                                wheel.accepted = true
+                                if (zoomFrameSliderContainer.totalFrames <= 0) return
+                                if (wheel.angleDelta.y > 0) columnPreviewZoomGoToFrame(columnPreviewZoomFrame - 1)
+                                else columnPreviewZoomGoToFrame(columnPreviewZoomFrame + 1)
+                            }
+                            onPressed: function(mouse) {
+                                ctrlDrag = !!(mouse.modifiers & Qt.ControlModifier)
+                                if (ctrlDrag) zoomFrameSliderContainer.ctrlLastTarget = columnPreviewZoomFrame
+                            }
+                            onPositionChanged: {
+                                if (!drag.active || zoomFrameSliderContainer.totalFrames <= 1) return
+                                var ratio = zoomFrameHandle.x / (zoomFrameSliderContainer.width - 32)
+                                var frame = zoomFrameSliderContainer.ratioToFrame(ratio)
+                                if (ctrlDrag) {
+                                    zoomFrameSliderContainer.applyCtrlBroadcast(frame)
+                                } else {
+                                    columnPreviewZoomGoToFrame(frame)
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -10246,9 +11641,10 @@ Rectangle {
                             var baseName = modelData.deviceNickname || modelData.deviceUsername || "未知设备"
                             // ⭐ 备注放在昵称后面
                             if (modelData.remark) {
-                                return baseName + " (" + modelData.remark + ")"
+                                baseName = baseName + " (" + modelData.remark + ")"
                             }
-                            return baseName
+                            // ⭐ 设备后面标注平台（iOS / Android）——按 deviceId 的 android 前缀判断
+                            return baseName + " · " + HttpClient.deviceTypeLabel(modelData.deviceId || "")
                         }
                         
                         RowLayout {
@@ -10520,12 +11916,19 @@ Rectangle {
             }
             
             switchAccountDialog.deviceMap = deviceMap
+
+            // ⭐ 2026-07-15：登录后自动打开弹框的这次，在线状态一到就自动执行一次切换（仅当目标设备在线）
+            if (mainPage.pendingAutoDeviceSwitch) {
+                mainPage.pendingAutoDeviceSwitch = false
+                mainPage.tryAutoSwitchToSelectedDevice(list)
+            }
         }
         
         function onOnlineStatusFailed(code, message) {
             console.log("❌ OnlineStatus failed:", code, message)
             switchAccountDialog.isLoading = false
             showToast("获取设备状态失败")
+            mainPage.pendingAutoDeviceSwitch = false
         }
         
         function onSetRemarkSuccess(controlUsername, deviceUsername, remark) {
@@ -11588,6 +12991,30 @@ Rectangle {
         // 自动加载设备状态
         refreshOnlineStatus()
     }
+
+    // ⭐ 2026-07-15：登录后自动切回选中设备——在拿到在线状态列表后，找到"当前选中的iOS账号"，
+    //   仅当它在线才自动执行一次切换；找不到 / 不在线则什么都不做（弹框留给用户手动处理）。
+    function tryAutoSwitchToSelectedDevice(list) {
+        var username = HttpClient.getSavedUsername()
+        var deviceUsername = HttpClient.getSavedDeviceUsername()
+        if (!username || !deviceUsername) {
+            console.log("🔄 [自动切换] 无已选中的iOS账号，跳过")
+            return
+        }
+        for (var i = 0; i < list.length; i++) {
+            var item = list[i]
+            if ((item.controlUsername || "") === username && (item.deviceUsername || "") === deviceUsername) {
+                if (item.online) {
+                    console.log("🔄 [自动切换] 选中设备在线，自动执行一次切换: " + deviceUsername)
+                    switchToAccountWithDevice(item, username)
+                } else {
+                    console.log("🔄 [自动切换] 选中设备不在线，不执行切换: " + deviceUsername)
+                }
+                return
+            }
+        }
+        console.log("🔄 [自动切换] 未在绑定列表中找到选中设备，跳过: " + deviceUsername)
+    }
     
     // 切换到指定账号（无设备时）
     function switchToAccount(username) {
@@ -11632,10 +13059,14 @@ Rectangle {
         var deviceUsername = device.deviceUsername || ""
         
         // 检查是否是同一账号同一设备，如果是则忽略
-        var currentUsername = HttpClient.getSavedUsername()
-        var currentDeviceUsername = HttpClient.getSavedDeviceUsername()
+        // ⭐ 2026-07-15 修正：这里必须比对"本次登录实际绑定的设备"(currentDeviceUsername)，
+        //   不能比对"上次选中保存的设备"(getSavedDeviceUsername)——登录时不传设备账号，
+        //   后端会默认绑到第一个绑定设备，可能跟保存的选中设备不是同一个，
+        //   若仍拿 getSavedDeviceUsername 比较，会永远判定为"同一设备"而误跳过真正需要的切换。
+        var currentUsername = HttpClient.loggedInUsername()
+        var currentDeviceUsername = HttpClient.currentDeviceUsername()
         if (username === currentUsername && deviceUsername === currentDeviceUsername) {
-            console.log("📌 同一账号同一设备，忽略切换")
+            console.log("📌 同一账号同一设备（已实际绑定），忽略切换")
             switchAccountDialog.close()
             return
         }
@@ -12119,6 +13550,14 @@ Rectangle {
 
         // ⭐ v3 STOMP 直推: 单参数 → /topic/device/{id}/config
         function pushParam(ptype, val) {
+            // ⭐ Android：颜色类滤镜不下发设备，改 PC 本地处理（快门 cjfps / 增益 gain 不走此函数，仍下发设备）
+            if (HttpClient.currentIsAndroid()) {
+                if (mainPage.isLocalColorPtype(ptype) || ptype === "filterEnabled") {
+                    mainPage.applyLocalColorFilter()
+                }
+                // lutName / 其它设备端专有项：Android 无对应能力，忽略
+                return
+            }
             var c = {}
             c[ptype] = val
             sendConfigUpdate(ptype, c)
@@ -12126,6 +13565,17 @@ Rectangle {
 
         // ⭐ STOMP 全量推送 — 只下发「开关打开」的链路；白平衡任何时候都不在这里推（只手动纠正）
         function pushAllStomp() {
+            // ⭐ Android：颜色类滤镜走 PC 本地；仅 ISO 增益仍下发设备（快门 cjfps 由超级帧率滑块单独下发，不在此）
+            if (HttpClient.currentIsAndroid()) {
+                mainPage.applyLocalColorFilter()
+                if (iosFilterPopup.hardwareEnabled) sendTestBrightnessConfig(Math.round(iosFilterPopup.fGain))
+                console.log("🎨 Android 滤镜走 PC 本地处理（仅 ISO 增益下发设备）")
+                return
+            }
+            // ⭐ 2026-07-14：低功率/高功率采集状态也在这批统一下发里补发一次
+            //   （登录/重连/还原都会走到这里，避免"PC 重启前设过低功率，iOS 重连后又变回默认高功率"）
+            sendConfigUpdate("lowPowerCapture", {"lowPowerCapture": appSettings.iosLowPowerCapture})
+
             // 滤镜链路：始终告知 iOS 开关状态；仅在打开时下发各滤镜值
             pushParam("filterEnabled", iosFilterPopup.fEnabled)
             if (iosFilterPopup.fEnabled) {
@@ -12472,7 +13922,12 @@ Rectangle {
                                 iosFilterPopup.fChroma     = iosFilterPopup.chromaDefault
                                 iosFilterPopup.fGain       = iosFilterPopup.gainDefault
                                 iosFilterPopup.fRedBoost   = iosFilterPopup.redBoostDefault
-                                iosFilterPopup.fEnabled    = false
+                                iosFilterPopup.fBlackPoint = iosFilterPopup.blackPointDefault   // ⭐ 修复：原逻辑漏还原 blackPoint
+                                // ⭐ 修复：还原必须保持滤镜开启。pushAllStomp 仅在 fEnabled=true 时才下发各滤镜值，
+                                //   原来这里置 false → 还原反而关掉滤镜、且默认值一个都推不到 iOS（与“还原”语义相反，
+                                //   也违反“启用滤镜永远 true”）。改为 true，并同步相机设定弹框的滤镜开关。
+                                iosFilterPopup.fEnabled    = true
+                                iosCameraSettingsPopup.filterModeEnabled = true
                                 iosFilterPopup.prevBrightness = iosFilterPopup.brightnessDefault
                                 iosFilterPopup.prevGamma      = iosFilterPopup.gammaDefault
                                 iosFilterPopup.prevContrast   = iosFilterPopup.contrastDefault

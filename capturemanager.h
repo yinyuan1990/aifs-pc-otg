@@ -13,6 +13,8 @@
 #include <QDateTime>
 #include <QSet>
 #include <QPair>
+#include <QVariantMap>
+#include <QThreadPool>
 #include <atomic>
 #include "gpupipeline.h"
 #include "gstplayer.h"
@@ -157,6 +159,17 @@ private:
 };
 
 /**
+ * 单帧 AI 识别结果（每帧独立识别，滚动到某帧即对那帧推理并缓存）
+ */
+struct AiFrameZoom {
+    bool valid = false;   // 该帧是否识别到牌
+    double zoom = 1.0;    // 放大倍数
+    double cx = 0.5;      // 牌中心归一化 x(0~1)
+    double cy = 0.5;      // 牌中心归一化 y(0~1)
+    int rotation = 0;     // 识别时的画面旋转角（cx/cy 所处旋转空间，§26-② 换算用）
+};
+
+/**
  * 抓拍 Item
  */
 struct CaptureItem {
@@ -170,7 +183,13 @@ struct CaptureItem {
     QVector<int> keyFrameOffsets; // 旧关键帧偏移列表（兼容旧 item）
     int savedFrameCount = 0;    // 已保存/可用帧数
     int h264ValidRangeId = -1;  // H.264 独立帧文件保护范围
-    QImage liveSnapshot;        // 抓拍瞬间的直播画面（仅缩略/首屏兜底）
+    // （liveSnapshot 已删：全分辨率 QImage 快照无读取方，且连拍时内存暴涨+主线程整帧拷贝，见 capture()）
+
+    // ── AI 放大（2026-07-06 改：每帧独立识别）──
+    //   开启自动放大后，滚动到某帧即对该帧推理，成功则缓存到 aiFrames[offset]；
+    //   识别失败/未识别的帧保持上一帧的放大（keep_prev），不强制复位。
+    bool aiDisabled = false;              // §19 用户拖动该格 → 标记识别失败，此格不再自动放大
+    QHash<int, AiFrameZoom> aiFrames;     // offset → 该帧识别结果缓存（仅成功帧写入）
 
     int totalFrames() const { return static_cast<int>(endIndex - startIndex + 1); }
     int eventOffset() const { return static_cast<int>(eventIndex - startIndex); }
@@ -229,6 +248,7 @@ class CaptureManager : public QObject
     Q_PROPERTY(SlowMotionPlayer* slowMotionPlayer READ slowMotionPlayer WRITE setSlowMotionPlayer NOTIFY slowMotionPlayerChanged)
 
     // AI 牌位置识别放大（与实时流解耦，CPU 推理；详见 carddetector.h）
+    //   2026-07-06 改为「每帧独立识别」：开启后滚动到哪帧就识别哪帧，去掉了前后传播张数配置。
     Q_PROPERTY(bool aiCardZoomEnabled READ aiCardZoomEnabled WRITE setAiCardZoomEnabled NOTIFY aiCardZoomEnabledChanged)
 
 public:
@@ -311,6 +331,7 @@ public:
     void setExposure(double value);  // 综合调节算法
     Q_INVOKABLE void resetCameraSettings();  // 恢复默认
     Q_INVOKABLE void zoomLog(const QString &msg);  // 缩放调试日志写入 zp.txt
+    Q_INVOKABLE void aiZoomLog(const QString &msg);  // 自动放大(AI识别)调试日志写入 ai_zoom.txt
     
     // 慢放抓拍模式
     bool slowMotionActive() const { return m_slowMotionActive; }
@@ -369,6 +390,15 @@ public:
     // 模型放大倍数（与黄金瞳一致，默认 3.0）
     Q_INVOKABLE void setAiZoomScale(double scale) { m_aiZoomScale = scale; }
 
+    // 滚动切帧查表：返回该帧已缓存的识别结果 {valid, zoom, cx, cy}；
+    //   valid=false（未识别到/尚未识别）→ QML 保持上一帧放大（keep_prev）。
+    Q_INVOKABLE QVariantMap aiZoomForFrame(int itemIndex, int frameOffset) const;
+
+    // ⭐ 用户拖动放大后的截图 → 视为该格 AI 识别失败（牌不在识别框内）：
+    //   置 aiDisabled=true 并清空该 item 每帧识别缓存，使其退回"非自动放大"，保留用户手动平移结果，
+    //   之后该格切帧不再触发识别/放大。记入 ai_zoom.txt 便于排查为何识别失败。
+    Q_INVOKABLE void markAiRecognitionFailed(int itemIndex);
+
 public slots:
     void onFrameReceived(const QImage &frame, qint64 frameIndex);
     void onFrameIndexReady(qint64 frameIndex);  // 新增：只接收帧索引
@@ -394,7 +424,7 @@ signals:
 
     // AI 放大：cx/cy 为牌中心在原图的归一化坐标(0~1)；QML 据此设置 itemZoom/itemOffset
     void cardZoomReady(int itemIndex, int frameOffset, double zoom, double cx, double cy);
-    void cardZoomCleared(int itemIndex);          // 该帧未检出牌 / 关闭功能
+    void cardZoomCleared(int itemIndex);          // 关闭功能 → 复位放大
     void aiCardZoomEnabledChanged();
 
 private slots:
@@ -410,7 +440,7 @@ private:
     static QByteArray readNaluFile(const QString &dir, int frameOffset);
     void scheduleFrameDecode(int itemIndex, int frameOffset);
     void ensureCardDetector();                                  // 懒加载检测器+模型
-    void requestCardDetect(int itemIndex, int frameOffset);     // 防抖派发检测
+    void requestCardDetect(int itemIndex, int frameOffset, int attempt = 0);  // 派发检测（取帧为空时限次定时重试）
     bool tryGetFrameCache(int itemIndex, int frameOffset, QImage *out) const;
     void putFrameCache(int itemIndex, int frameOffset, const QImage &img);
     void evictFrameCache();
@@ -466,7 +496,7 @@ private:
     bool m_aiCardZoomEnabled = false;
     double m_aiZoomScale = 3.0;
     CardDetector *m_cardDetector = nullptr;     // 独立后台线程，懒加载
-    QTimer *m_aiDebounceTimer = nullptr;        // 滚动切帧防抖
+    QTimer *m_aiDebounceTimer = nullptr;        // 滚动切帧防抖（停下才对当前帧识别）
     int m_aiPendingItem = -1;
     int m_aiPendingFrame = -1;
     int m_aiPendingCaptureItem = -1;            // 截图后等事件帧解码就绪再检测
@@ -486,6 +516,27 @@ private:
     QHash<qint64, FrameCacheEntry> m_frameCache;
     qint64 m_frameCacheCounter = 0;
     static constexpr int MAX_FRAME_CACHE = 300;
+    // ⭐ 2026-07-19「滚动帧卡实时流」：帧缓存加字节上限。原来只按张数(300)封顶——
+    //   全分辨率 QImage 一张 1080p≈8MB、4K≈33MB，300 张=2.5~10GB，低端机直接内存换页
+    //   （分页→整机停顿→实时流卡）。超出字节预算按 LRU 逐出，代价=长距离来回滚动时
+    //   多一次后台重解码（几十 ms，不感知）。
+    static constexpr qint64 MAX_FRAME_CACHE_BYTES = 512LL * 1024 * 1024;
+    qint64 m_frameCacheBytes = 0;   // m_decodeMutex 保护
+
+    // ⭐ 2026-07-19：解码任务改专用单线程池（原 QtConcurrent 全局池：快速滚动时任务
+    //   积压堵满全局池并在 m_decodeMutex 上排队，还拖累其它用全局池的子系统）。
+    QThreadPool m_decodePool;
+    // 每个 item 最近想看的帧（gotoFrame/截图时更新，m_decodeMutex 保护）。
+    // 解码任务出队时若已偏离 wanted±DECODE_KEEP_WINDOW → 直接作废，
+    // 快速滚动不再产生「停手后还解几秒陈旧帧」的积压。
+    QHash<int, int> m_wantedOffset;
+    static constexpr int DECODE_KEEP_WINDOW = 3;   // 覆盖 gotoFrame±1 与 onBatchWritten±3 预取
+
+    // ⭐ 2026-07-19「按住空格连拍卡实时流」：截图最小间隔（键盘自动重复 ~30 次/s →
+    //   每秒 30 次 item 创建+grid 重排+解码+纹理上传，低端机主线程被顶死）。
+    //   120ms 上限 ≈8 张/s，快于人手连点极限；抓拍序列前后各 10 帧本就大量重叠，无信息损失。
+    static constexpr qint64 MIN_CAPTURE_INTERVAL_MS = 120;
+    qint64 m_lastCaptureMs = 0;     // 仅主线程访问
 
     QMutex m_mutex;
     QMutex m_decodeMutex;

@@ -10,7 +10,11 @@
      object-fit:fill = GStreamer 端 VideoOutput.Stretch（拉伸铺满容器、不留黑边），二者口径对齐。
      宽高默认铺满容器；旋转 90/270 时由 applyTransform 把宽高对调（等价 GStreamer 的宽高互换），
      position:absolute + 居中定位，便于旋转后仍居中铺满。 */
-  #remoteVideo { position: absolute; left: 50%; top: 50%; display: block; width: 100%; height: 100%; object-fit: fill; background: #000; transform-origin: center center; transform: translate(-50%,-50%); transition: transform 0.08s linear; }
+  /* ⭐ 呈现层抗顿：默认用 inset:0 + margin:auto 居中铺满，常态【零 transform / 零 transition】，
+     让 Qt WebEngine 的 <video> 走硬件 overlay 直通(zero-copy)呈现，不被提升为逐帧 GPU 合成层。
+     （旧写法 transform:translate(-50%,-50%) + transition 会把 video 常驻合成层 → 丢直通 → PRESENT GAP。）
+     只有用户真正缩放/旋转/镜像/偏移时，applyTransform 才临时加 transform（那时卡一下可接受）。 */
+  #remoteVideo { position: absolute; inset: 0; margin: auto; display: block; width: 100%; height: 100%; object-fit: fill; background: #000; transform-origin: center center; }
   /* SRT 不支持提示（网页内核无法播 SRT） */
   #srtBox {
     position: absolute; left: 50%; top: 50%; transform: translate(-50%,-50%);
@@ -22,7 +26,7 @@
     background: rgba(0,0,0,0.62); color: #00e676; padding: 8px 12px;
     border-radius: 6px; font-family: Consolas, monospace; font-size: 13px; line-height: 1.55;
     white-space: pre; pointer-events: none; min-width: 250px;
-    /* ⭐ 默认隐藏统计信息，点右上角「信息」按钮才显示 */
+    /* ⭐ 默认隐藏统计信息，点右上角「信息」按钮才显示（2026-07-15：恢复点击展开，不再靠 hover 直接显示） */
     display: none;
   }
   #statsPanel .k { color: #80d8ff; }
@@ -35,12 +39,16 @@
        右移到开关按钮左侧（right:74px），开启时与开关并排不重叠。 */
     display: none;
   }
-  /* ⭐ 统计信息开关按钮（右上角，默认关闭态） */
+  /* ⭐ 统计信息开关按钮（右上角）。
+     ⭐ 2026-07-15：改为「鼠标进入画面才显示这个按钮，点击按钮才显示统计面板」——
+     不能像统计面板一样直接靠 hover 显示太多信息挡视线，按钮本身是"入口"，点了才展开详细信息。
+     display 由 JS 的 setStatsHoverFromQml() 控制（QML 侧转发 hover 状态，见下方脚本注释）。 */
   #statsToggle {
     position: absolute; right: 10px; top: 10px; z-index: 10000;
     background: rgba(0,0,0,0.45); color: #cfd8dc; padding: 4px 10px;
     border-radius: 4px; font-size: 12px; cursor: pointer; user-select: none;
     border: 1px solid rgba(255,255,255,0.18); transition: background 0.15s;
+    display: none;
   }
   #statsToggle:hover { background: rgba(0,0,0,0.7); }
   #statsToggle.on { background: rgba(33,150,243,0.85); color: #fff; border-color: transparent; }
@@ -70,20 +78,39 @@
   const srtEl    = document.getElementById('srtBox');
   const toggleEl = document.getElementById('statsToggle');
 
-  // ⭐ 统计信息默认关闭，点右上角「信息」按钮才显示（含分辨率/码率/FPS/丢包等 + Chromium 标识）。
-  let statsVisible = false;
-  function applyStatsVisibility() {
-    statsEl.style.display = statsVisible ? 'block' : 'none';
-    badgeEl.style.display = statsVisible ? 'block' : 'none';
-    if (statsVisible) toggleEl.classList.add('on'); else toggleEl.classList.remove('on');
+  // ⭐ 2026-07-15：两步显示——① 鼠标进入实时流画面 → 只显示右上角「信息」开关按钮（入口）；
+  //   ② 点击该按钮 → 才展开详细统计面板 + Chromium 徽标。避免鼠标一放上去统计信息就铺一堆挡视线。
+  //   按钮本身的显隐由 QML 侧下发（不能靠页面自己监听 document 的 mousemove/mouseenter——
+  //   MainPage.qml 里盖在整个实时流面板上的 livePanelHover（z 最高，负责驱动底部控制栏 + 这个按钮的
+  //   hover 效果）会把鼠标移动(hover)事件拦在 WebEngineView 之上，页面收不到真实 mousemove；
+  //   QML 端 livePanelHover 本来就能可靠拿到 hover 状态，直接转发过来最省事）。
+  //   统计面板/徽标的展开与收起则是纯点击开关，与鼠标是否还在画面内无关（点开就一直显示，再点一次关掉）。
+  let statsToggleHover = false  // 鼠标是否在实时流画面内（决定「信息」按钮是否显示）
+  let statsOn = false           // 用户是否点开了统计面板（决定详细信息+徽标是否显示）
+
+  function applyStatsToggleVisibility() {
+    if (toggleEl) toggleEl.style.display = statsToggleHover ? 'block' : 'none'
   }
+  function applyStatsPanelVisibility() {
+    statsEl.style.display = statsOn ? 'block' : 'none'
+    badgeEl.style.display = statsOn ? 'block' : 'none'
+    if (toggleEl) { if (statsOn) toggleEl.classList.add('on'); else toggleEl.classList.remove('on') }
+  }
+  applyStatsToggleVisibility()
+  applyStatsPanelVisibility()
+
+  // QML → JS：livePanel.isHovering 变化时直接调用，true=鼠标在实时流面板内，false=移出
+  window.setStatsHoverFromQml = function(visible) {
+    statsToggleHover = !!visible
+    applyStatsToggleVisibility()
+  }
+
   if (toggleEl) {
     toggleEl.addEventListener('click', function() {
-      statsVisible = !statsVisible;
-      applyStatsVisibility();
-    });
+      statsOn = !statsOn
+      applyStatsPanelVisibility()
+    })
   }
-  applyStatsVisibility();
 
   // ⭐ 本地画面变换（缩放/镜像/旋转），由 QML 在网页内核作主播放器时调用。
   //   与 GStreamer 端 VideoOutput 完全对齐：
@@ -105,24 +132,51 @@
     // 记录本次参数，供窗口 resize 时重算（保持铺满）。
     window._lastTransform = { zoom: z, mirror: mirror, rotation: rotation, offsetX: ox, offsetY: oy };
 
+    // ⭐ 呈现层抗顿关键：常态（无缩放/旋转/镜像/偏移）时【完全不设 transform】，
+    //   让 <video> 保持硬件 overlay 直通、不被提升为逐帧 GPU 合成层（消 PRESENT GAP）。
+    //   CSS 已用 inset:0 + margin:auto 居中铺满，所以 transform 不再需要 translate(-50%,-50%) 来居中。
+    var isIdentity = (z === 1.0 && rot === 0 && ox === 0 && oy === 0 && sx === 1 && sy === 1);
+
     // 容器尺寸 = webview 视口（KernelTestView 铺满 videoContainer，故等于容器大小）。
     var cw = window.innerWidth || document.documentElement.clientWidth || 0;
     var ch = window.innerHeight || document.documentElement.clientHeight || 0;
-    // 尺寸还没就绪（极早调用）：用百分比兜底铺满，避免 0 尺寸黑屏。
-    if (!cw || !ch) {
+
+    if (isIdentity) {
+      // 常态：清空 transform，走硬件直通。宽高恢复 100% 铺满（不显式钉像素，交给 object-fit:fill）。
       videoEl.style.width = '100%';
       videoEl.style.height = '100%';
-      videoEl.style.transform =
-        'translate(-50%,-50%) translate(' + ox + 'px,' + oy + 'px) rotate(' + rot + 'deg) scale(' + sx + ',' + sy + ')';
+      videoEl.style.transform = 'none';
       return;
     }
-    var swapped = (rot === 90 || rot === 270);
-    // 90/270 对调宽高（等价 GStreamer 的 VideoOutput 宽高互换），其余铺满容器。
-    videoEl.style.width  = (swapped ? ch : cw) + 'px';
-    videoEl.style.height = (swapped ? cw : ch) + 'px';
 
+    // 需要变换：临时加 transform（用户缩放/旋转/镜像/偏移时，短暂走合成层可接受）。
+    var swapped = (rot === 90 || rot === 270);
+    if (!cw || !ch) {
+      // 尺寸还没就绪（极早调用）：百分比兜底铺满。
+      videoEl.style.width = '100%';
+      videoEl.style.height = '100%';
+    } else {
+      // 90/270 对调宽高（等价 GStreamer 的 VideoOutput 宽高互换），其余铺满容器。
+      videoEl.style.width  = (swapped ? ch : cw) + 'px';
+      videoEl.style.height = (swapped ? cw : ch) + 'px';
+    }
+    // CSS 已居中(inset:0+margin:auto)，transform 只需 偏移→旋转→缩放（以元素中心为原点）。
     videoEl.style.transform =
-      'translate(-50%,-50%) translate(' + ox + 'px,' + oy + 'px) rotate(' + rot + 'deg) scale(' + sx + ',' + sy + ')';
+      'translate(' + ox + 'px,' + oy + 'px) rotate(' + rot + 'deg) scale(' + sx + ',' + sy + ')';
+  };
+
+  // ⭐ Android 本地滤镜（网页内核 sink）：iOS 走设备端滤镜，Android 不支持 → PC 端本地处理。
+  //   网页内核用 CSS filter 落地（Chromium 合成器 GPU 处理，不占 JS 主线程、不占 Qt 主线程，
+  //   规避「主线程逐帧 canvas 编码卡死」那类坑）。参数为 CSS 乘数：1.0=中性。
+  //   中性时清空 filter，让 <video> 回到硬件 overlay 直通（消 PRESENT GAP）。
+  window.applyColorFilter = function(brightness, contrast, saturate) {
+    var b = (typeof brightness === 'number' && brightness > 0) ? brightness : 1.0;
+    var c = (typeof contrast   === 'number' && contrast   > 0) ? contrast   : 1.0;
+    var s = (typeof saturate   === 'number' && saturate  >= 0) ? saturate   : 1.0;
+    var isNeutral = (Math.abs(b - 1) < 1e-3 && Math.abs(c - 1) < 1e-3 && Math.abs(s - 1) < 1e-3);
+    videoEl.style.filter = isNeutral
+      ? 'none'
+      : ('brightness(' + b + ') contrast(' + c + ') saturate(' + s + ')');
   };
 
   // 容器尺寸变化（窗口拖动/全屏切换）时，重算当前变换以保持铺满。
@@ -162,6 +216,7 @@
   let lastBytes = 0, lastTs = 0, lastFrames = 0, lastFrameTs = 0;
   let lastDecoded = 0, stallSeconds = 0;
   let reconnectTimer = null, reconnecting = false;
+  let iceDisconnectTimer = null;   // ⭐ ICE 'disconnected' 宽限期定时器：disconnected 常能自愈，给几秒再决定是否重连
 
   // ⭐ 截图/慢放帧源：把解码后的 VideoFrame 连续编码成 JPEG 回传 C++（WebFrameSource 落盘）。
   //   与 GStreamer 端「逐帧 H.264 落盘」对等——截图要取事件帧前 N 帧，故必须持续落帧，
@@ -199,6 +254,41 @@
   function showErr(msg) { errEl.style.display = 'block'; errEl.textContent = msg; logC('ERR ' + msg); }
   function hideErr() { errEl.style.display = 'none'; }
   function logC(m) { try { if (bridge) bridge.log(m); } catch(_){} console.log('[webplayer]', m); }
+  // [stutter-diag] webview-kernel realtime-stream + stall log -> exe-dir nh.txt (separate file for offline root-cause)
+  function nhLog(m) { try { if (bridge && bridge.kernelStat) bridge.kernelStat(m); } catch(_){} }
+  var nhLastFreeze = 0;       // [stutter-diag] previous freezeCount, for per-second delta
+  var nhLastPresentTs = 0;    // [stutter-diag] last presented-frame ts (rVFC) for gap detection
+  var nhLastMediaTime = -1;   // [stutter-diag] 上一帧的 mediaTime（媒体时间戳，秒）——区分"帧本身节奏"vs"呈现节奏"
+  var nhLastPresentedFrames = 0; // [stutter-diag] 上次 rVFC 的 presentedFrames，用于算 gap 期间跳过的帧数
+  var nhStallActive = false;  // [stutter-diag] whether a stall is currently being reported
+  var nhLastRes = '';         // [stutter-diag] last WxH, to log resolution changes (SRS 切档/转码切流会强制解码器重配置 → 每次可能记一次 freeze)
+  // [stutter-diag] auto A/B: 每 AB_PERIOD_MS 自动在「抓帧开/关」间切换，往 nh.txt 打分段标记，
+  //   这样一份日志里天然含开/关两种状态的对照，无需手动开控制台。默认关，window.setAbDiag(true) 或 URL hash #abdiag 开启。
+  var nhAbDiag = false;
+  var nhAbPhaseTs = 0;
+  var AB_PERIOD_MS = 20000;   // 每 20s 切一次
+  window.setAbDiag = function(on){
+    nhAbDiag = !!on;
+    nhAbPhaseTs = (typeof performance !== 'undefined') ? performance.now() : Date.now();
+    if (nhAbDiag) { captureEnabled = true; nhLog('>> AB DIAG on (auto toggle capture every ' + (AB_PERIOD_MS/1000) + 's)'); nhLog('>> AB PHASE capture=ON'); }
+    else { captureEnabled = true; nhLog('>> AB DIAG off (capture restored ON)'); }
+    logC('自动A/B诊断 ' + (nhAbDiag ? '开' : '关'));
+  };
+  try { if (location.hash && location.hash.indexOf('abdiag') >= 0) window.setAbDiag(true); } catch(_){}
+  // [stutter-diag] main-thread long tasks freeze the compositor (#1 suspect for unexplained stutter). Log each >=50ms.
+  (function installLongTaskObserver(){
+    try {
+      if (typeof PerformanceObserver === 'undefined') return;
+      var obs = new PerformanceObserver(function(list){
+        var es = list.getEntries();
+        for (var i=0;i<es.length;i++){
+          var e = es[i];
+          if (e.duration >= 50) nhLog('LONGTASK dur=' + Math.round(e.duration) + 'ms name=' + e.name + ' start=' + Math.round(e.startTime));
+        }
+      });
+      obs.observe({ entryTypes: ['longtask'] });
+    } catch(_){}
+  })();
 
   // ============ QWebChannel 初始化（P2P 信令桥）============
   //   qt.webChannelTransport 由 WebEngine 在 webChannel 设好后注入，可能比页面 JS 稍晚；
@@ -286,6 +376,7 @@
 
   window.stopPlay = async function() {
     if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+    if (iceDisconnectTimer) { clearTimeout(iceDisconnectTimer); iceDisconnectTimer = null; }
     reconnecting = false;
     if (statsTimer) { clearInterval(statsTimer); statsTimer = null; }
     // ⭐ 停播即上报 fps=0，QML 拉流心跳随之停发 → iOS 3s 后判定「PC 未连接」。
@@ -304,22 +395,68 @@
   };
 
   // ============ 公共：track 处理 + 双缓冲防卡顿 ============
-  function attachTrack(stream) {
+  function attachTrack(stream, receiver) {
     videoEl.srcObject = stream;
-    // ⭐ 双缓冲/低延迟提示：让 Chromium 内核 jitterbuffer 维持一个小目标缓冲，
-    //   避免「缓冲耗尽 → 画面卡住不动」（这就是用户观察到的：内核无马赛克但会卡住）。
+    // ⭐ 抗"画面顿住"关键：SRS/WHEP 链路下内核默认把 jitterBufferTarget 压到极低（实测 jbDelay≈43ms），
+    //   抗抖动能力太差——帧到齐了(零丢包)但到达时间稍有抖动就赶不上下一个 VSync → PRESENT GAP（肉眼顿住）。
+    //   nh.txt 已证明：cap=off(抓帧关) + loss=0% + 无 LONGTASK 时仍有 PRESENT GAP，纯呈现层抖动，唯一对症解=加大抖动缓冲。
+    //   （D:\zhen 是 P2P 直连、抖动小，故它不设也不卡；SRS/WHEP 经服务器转发+GOP cache，抖动更大，必须设。）
+    //   设 200ms：吸收到达抖动、平滑呈现，代价是端到端延迟 +~160ms，对监控/画质对比场景完全可接受。
     try {
-      const recv = pc.getReceivers().find(r => r.track && r.track.kind === 'video');
-      if (recv && 'jitterBufferTarget' in recv) {
-        recv.jitterBufferTarget = 600;   // ms，200→600：进一步放宽缓冲，吸收主线程卡顿/抖动，优先消顿住（延迟略增）
-        logC('已设 jitterBufferTarget=600ms（加大双缓冲，优先消顿住）');
-      } else if (recv && 'playoutDelayHint' in recv) {
-        recv.playoutDelayHint = 0.6;
+      // 🔥 2026-07-02 收回诊断值（原 2.0s 是为坐实"发送端突发到达"的实验值，已坐实并回推流端修根）：
+      //   - P2P 直连：完全不设，交给 Chromium 自适应 jitter buffer（对标竞品 D:\zhen 零干预，
+      //     实测 netJitter≈30ms，自适应几十 ms 起步足够，白设只会加延迟）。
+      //   - SRS/WHEP：设 300ms（服务器转发+GOP cache 抖动更大，需固定缓冲；发送端攒帧修复后
+      //     无需 2000ms 削峰，300ms 为延迟/流畅折中，与 §15.2 结论一致）。
+      if (mode === 'p2p') {
+        logC('P2P 直连：不设 jitterBufferTarget（用 Chromium 自适应，低延迟）');
+      } else {
+        const JB_TARGET_SEC = 0.3;
+        // 优先用 ontrack 传入的 receiver（最可靠）；兜底遍历 pc.getReceivers。
+        let vrecvs = [];
+        if (receiver && receiver.track && receiver.track.kind === 'video') vrecvs = [receiver];
+        else if (pc && pc.getReceivers) vrecvs = pc.getReceivers().filter(r => r.track && r.track.kind === 'video');
+        vrecvs.forEach(r => {
+          try { r.jitterBufferTarget = JB_TARGET_SEC * 1000; } catch(_){}          // 新标准：毫秒
+          try { r.playoutDelayHint = JB_TARGET_SEC; } catch(_){}                    // 老属性：秒（Chromium 兼容）
+        });
+        logC('jitterBufferTarget 设为 ' + (JB_TARGET_SEC*1000) + 'ms（SRS 抗呈现抖动），命中 receiver=' + vrecvs.length);
       }
-    } catch(e) { logC('设 jitterBufferTarget 失败: ' + e); }
+    } catch(e) { logC('设 jitterBufferTarget 失败（用内核默认）: ' + e); }
 
     // ⭐ 启动截图/慢放帧抓取（把解码帧连续编 JPEG 回传 C++）。
     startFrameCapture(stream);
+    // [stutter-diag] measure actual *presented* frame intervals via requestVideoFrameCallback.
+    //   A long gap = visible stutter even when decode stats look fine. Logs gaps >= 120ms to nh.txt.
+    try {
+      if (videoEl.requestVideoFrameCallback) {
+        nhLastPresentTs = 0; nhLastMediaTime = -1; nhLastPresentedFrames = 0;
+        var nhRvfc = function(now, meta){
+          // ⭐ [pacing-diag] 关键诊断：区分"帧本身节奏"vs"呈现节奏"，定位顿到底在解码前还是呈现层。
+          //   now       = 墙钟时间（该帧真正被呈现的时刻）→ 相邻差 = 呈现间隔（呈现节奏）。
+          //   mediaTime = 该帧的媒体时间戳（源帧时间，秒）→ 相邻差 = 帧的原始时间间隔（发送端/媒体节奏）。
+          //   presentedFrames = 累计呈现帧数 → gap 期间增量>1 说明合成器一次吐了多帧（补帧/追帧）。
+          //   判据：呈现间隔(wallGap)很大 但 媒体间隔(mediaGap)接近正常(≈50ms×跳帧数) → 帧是均匀的，顿在呈现层
+          //         → 上 canvas+rAF 方案；若 mediaGap 本身就大且不匀 → 发送端 pacing/NACK 问题。
+          var mt = (meta && typeof meta.mediaTime === 'number') ? meta.mediaTime : -1;
+          var pf = (meta && meta.presentedFrames) ? meta.presentedFrames : 0;
+          if (nhLastPresentTs > 0) {
+            var gap = now - nhLastPresentTs;
+            if (gap >= 120) {
+              var mediaGap = (mt >= 0 && nhLastMediaTime >= 0) ? Math.round((mt - nhLastMediaTime) * 1000) : -1;
+              var pfDelta = (pf && nhLastPresentedFrames) ? (pf - nhLastPresentedFrames) : -1;
+              nhLog('>> PRESENT GAP ' + Math.round(gap) + 'ms (visible stutter) presentedFrames=' + pf
+                  + ' mediaGap=' + mediaGap + 'ms pfDelta=' + pfDelta);
+            }
+          }
+          nhLastPresentTs = now;
+          nhLastMediaTime = mt;
+          nhLastPresentedFrames = pf;
+          if (videoEl.srcObject) videoEl.requestVideoFrameCallback(nhRvfc);
+        };
+        videoEl.requestVideoFrameCallback(nhRvfc);
+      }
+    } catch(_){}
   }
 
   // ============ 截图/慢放：连续抓帧编 JPEG 回传 C++ ============
@@ -555,6 +692,15 @@
       negotiating = true;
       try {
         logC('收到 iOS Offer');
+        // [H265] 能力/协商诊断：Offer 里是否带 H265、本内核能否收 H265（Chromium 需 WebRtcAllowH265Receive
+        //   + 平台 HEVC 硬解；不满足时 Answer 自动只留 H264，iOS 侧回落 H264 推流，不黑屏只降级）。
+        try {
+          var offerHasH265 = /H265|HEVC/i.test(msg.sdp);
+          var rxCaps = (window.RTCRtpReceiver && RTCRtpReceiver.getCapabilities) ? RTCRtpReceiver.getCapabilities('video') : null;
+          var kernelH265 = !!(rxCaps && rxCaps.codecs && rxCaps.codecs.some(function(c){ return /H265|HEVC/i.test(c.mimeType||''); }));
+          nhLog('>> H265 CHECK offerHasH265=' + offerHasH265 + ' kernelSupportsH265=' + kernelH265
+              + (offerHasH265 && !kernelH265 ? ' (将回落H264: 内核不支持H265接收)' : ''));
+        } catch(_){}
         await pc.setRemoteDescription({ type:'offer', sdp: msg.sdp });
         // 二次校验：setRemoteDescription 后状态必须是 have-remote-offer 才能 createAnswer
         if (pc.signalingState !== 'have-remote-offer') {
@@ -581,6 +727,7 @@
       logC('iOS 挂断 reason=' + reason + ' → 停止，不重连');
       peerStopped = true;
       if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+      if (iceDisconnectTimer) { clearTimeout(iceDisconnectTimer); iceDisconnectTimer = null; }
       reconnecting = false;
       if (statsTimer) { clearInterval(statsTimer); statsTimer = null; }
       // ⭐ iOS 挂断也上报 fps=0 + 停帧抓取（与 stopPlay 口径一致）。
@@ -604,7 +751,7 @@
       try { const s = await call0(bridge.getIceServers); iceServers = JSON.parse(s || '[]'); } catch(_){}
     }
     pc = new RTCPeerConnection({ bundlePolicy:'max-bundle', iceServers: iceServers });
-    pc.ontrack = (ev) => { if (ev.streams && ev.streams[0]) attachTrack(ev.streams[0]); };
+    pc.ontrack = (ev) => { if (ev.streams && ev.streams[0]) attachTrack(ev.streams[0], ev.receiver); };
     pc.onicecandidate = (ev) => {
       if (mode === 'p2p' && ev.candidate && bridge && cfg._iosDev) {
         bridge.sendSignal('WEBRTC_ICE', cfg._iosDev, '', '',
@@ -616,6 +763,8 @@
       const st = pc.iceConnectionState;
       logC('ICE: ' + st);
       if (st === 'connected' || st === 'completed') {
+        // ⭐ ICE 恢复：取消 disconnected 宽限期重连（说明只是短暂抖动/主线程卡顿导致的假断线）。
+        if (iceDisconnectTimer) { clearTimeout(iceDisconnectTimer); iceDisconnectTimer = null; logC('ICE 已自愈，取消待定重连'); }
         // ⭐ 网页内核作主播放器时 GStreamer 已让出 P2P，原本由 GStreamer 的
         //   onFirstFrameReceived 发的 VIEWER_CONNECTED 不会触发 → iOS 收不到「PC 已连接」反馈。
         //   这里在内核 P2P 首次连上时补发同一信令（与 GStreamer 端口径完全一致），
@@ -629,8 +778,24 @@
         everConnected = true;
         reconnectAttempts = 0;   // 连上了，重连计数清零
       }
-      if (st === 'failed' || st === 'disconnected') {
+      // ⭐ 'failed' = 永久失败，立即重连；'disconnected' = 常能自愈（尤其主线程长任务导致心跳延迟时），
+      //   给 6s 宽限期，期间若回到 connected 则上面的分支会取消，避免"假断线→完全重建流→更长断流"。
+      if (st === 'failed') {
+        if (iceDisconnectTimer) { clearTimeout(iceDisconnectTimer); iceDisconnectTimer = null; }
         scheduleReconnect();
+      } else if (st === 'disconnected') {
+        if (!iceDisconnectTimer && !reconnecting && !peerStopped) {
+          logC('ICE disconnected → 6s 宽限期观察是否自愈');
+          iceDisconnectTimer = setTimeout(() => {
+            iceDisconnectTimer = null;
+            if (!pc) return;
+            const cur = pc.iceConnectionState;
+            if (cur === 'disconnected' || cur === 'failed') {
+              logC('ICE 6s 未自愈（当前=' + cur + '）→ 触发重连');
+              scheduleReconnect();
+            }
+          }, 6000);
+        }
       }
     };
   }
@@ -653,6 +818,7 @@
 
     reconnecting = true;
     const tag = everConnected ? '网络中断' : ('iOS 未响应(第' + reconnectAttempts + '次)');
+    nhLog('>> RECONNECT scheduled (' + tag + ') iceState=' + (pc ? pc.iceConnectionState : 'nopc') + ' stall=' + stallSeconds + 's');
     logC(tag + ' → 3 秒后自动重连');
     statsEl.textContent = tag + '，自动重连中…';
     reconnectTimer = setTimeout(async () => {
@@ -675,8 +841,12 @@
   //   P2P：重发 WEBRTC_REQUEST → iOS 重新协商 → 吐新 IDR（iOS 无需改动）。
   //   SRS：重新 startSRS（重发 Offer）→ SRS 吐新关键帧。
   //   损坏的参考帧链路整段刷新后，马赛克消除。节流由调用处 ARTIFACT_MIN_INTERVAL 控制。
+  var lastKfRecoveryTs = 0;   // 🔥 2026-07-02: 内部节流（stall 分级兜底改为 2s 起每秒进来，这里统一挡）
   async function scheduleKeyframeRecovery() {
     if (peerStopped) return;
+    var nowTs = Date.now();
+    if (nowTs - lastKfRecoveryTs < 3000) return;  // 最小 3s 间隔，防 WS request_keyframe 风暴
+    lastKfRecoveryTs = nowTs;
     // ⭐ 2026 改：花屏恢复「只请求关键帧」，不再 rebuildPC / 重发 WEBRTC_REQUEST / 重建 Offer。
     //   旧实现重建整个 PeerConnection（P2P）或重发 Offer（SRS），每次都有 ICE/DTLS 重协商空窗，
     //   导致媒体断流、packetsLost 计数跳变 —— 弱网下越抖越重建、越重建越抖（自残）。
@@ -716,12 +886,22 @@
       try {
         const stats = await pc.getStats();
         let inbound = null, selPair = null;
+        const codecById = {};   // [H265] codecId → mimeType（确认实际协商到的编码）
         stats.forEach(r => {
           if (r.type==='inbound-rtp' && r.kind==='video') inbound = r;
+          if (r.type==='codec') codecById[r.id] = r.mimeType || '';
           // ⭐ 选中的候选对：判断真实走的是「直连(host/srflx/prflx)」还是「公网中继(relay)」
           if (r.type==='candidate-pair' && (r.nominated || r.selected)) selPair = r;
         });
         if (!inbound) { statsEl.textContent = '等待视频流…'; return; }
+        // [H265] 实际生效编码变化时打一条（首次/切换各一条，供 nh 日志对齐卡顿分析）
+        try {
+          var curCodec = inbound.codecId ? (codecById[inbound.codecId] || '') : '';
+          if (curCodec && curCodec !== window._nhLastCodec) {
+            window._nhLastCodec = curCodec;
+            nhLog('>> CODEC ' + curCodec + (/H265|HEVC/i.test(curCodec) ? ' (H265会话)' : ' (H264会话)'));
+          }
+        } catch(_){}
         // ⭐ 线路类型（relay = 绕公网 TURN，同局域网下应为直连）
         let routeTxt = '—';
         if (selPair) {
@@ -751,6 +931,9 @@
         const w = inbound.frameWidth||0, h = inbound.frameHeight||0;
         const lost = inbound.packetsLost||0, nack = inbound.nackCount||0, pli = inbound.pliCount||0;
         const jb = (inbound.jitterBufferDelay!=null && inbound.jitterBufferEmittedCount) ? Math.round(inbound.jitterBufferDelay/inbound.jitterBufferEmittedCount*1000) : 0;
+        // ⭐ 网络原始抖动（RFC3550 jitter，inbound-rtp.jitter 单位秒→ms）：直接反映"网络包到达抖不抖"。
+        //   若 netJitter 很小(<10ms)但仍 PRESENT GAP → 顿在呈现层(GPU/VSync)，非网络；若 netJitter 大 → 网络到达抖动。
+        const netJitter = inbound.jitter!=null ? Math.round(inbound.jitter*1000) : -1;
         const freeze = inbound.freezeCount!=null ? inbound.freezeCount : '-';
         const stallTxt = stallSeconds>=2 ? ('<span class="warn">画面卡住 '+stallSeconds+'s</span>') : ('<span class="k">流畅</span>');
 
@@ -777,14 +960,46 @@
         }
 
         // ⭐ 抓帧编码路径：直观显示「重活」是在 Worker 还是退回了主线程（顿住排查用）。
+        // [stutter-diag] per-second realtime-stream snapshot to nh.txt + dedicated stall/freeze events
+        var nhFreezeNum = (typeof freeze === 'number') ? freeze : 0;
+        var nhFreezeDelta = Math.max(0, nhFreezeNum - nhLastFreeze);
+        nhLastFreeze = nhFreezeNum;
+        // [stutter-diag] 分辨率变化单独打点：SRS 自适应/多档转码切流 或 发送端切档会强制解码器重配置，
+        //   常伴随 freeze / PRESENT GAP。把「变化时刻 + 新旧分辨率」钉出来，便于和 freeze 时间对齐。
+        var nhRes = w + 'x' + h;
+        if (nhLastRes && nhLastRes !== nhRes) nhLog('>> RES CHANGE ' + nhLastRes + ' -> ' + nhRes + ' (decoder reconfig; watch freeze/gap)');
+        nhLastRes = nhRes;
+        // [stutter-diag] 自动 A/B：到期切换抓帧开关并打分段标记（一份日志含开/关对照，无需手动开控制台）。
+        var nhAbTag = '-';
+        if (nhAbDiag) {
+          var nowAb = (typeof performance !== 'undefined') ? performance.now() : Date.now();
+          if (nowAb - nhAbPhaseTs >= AB_PERIOD_MS) {
+            nhAbPhaseTs = nowAb;
+            captureEnabled = !captureEnabled;
+            nhLog('>> AB PHASE capture=' + (captureEnabled ? 'ON' : 'OFF'));
+          }
+          nhAbTag = captureEnabled ? 'on' : 'off';
+        }
+        var nhCap = (!frameReader) ? 'none' : (!captureEnabled ? 'off' : (capWorkerOk ? 'worker' : 'main'));
+        nhLog('STAT codec=' + (window._nhLastCodec || '?') + ' res=' + w + 'x' + h + ' fps=' + fps + ' kbps=' + kbps
+            + ' loss=' + lossRate.toFixed(2) + '% lostDelta=' + lostDelta + ' dropDelta=' + dropDelta
+            + ' nack=' + nack + ' pli=' + pli + ' jbDelay=' + jb + 'ms netJitter=' + netJitter + 'ms freeze=' + nhFreezeNum + '(+' + nhFreezeDelta + ')'
+            + ' stall=' + stallSeconds + 's cap=' + nhCap + ' capBusy=' + capBusy + ' ab=' + nhAbTag);
+        if (nhFreezeDelta > 0) nhLog('>> FREEZE +' + nhFreezeDelta + ' total=' + nhFreezeNum + ' res=' + w + 'x' + h + ' fps=' + fps + ' jbDelay=' + jb + 'ms cap=' + nhCap + ' loss=' + lossRate.toFixed(2) + '%');
+        if (stallSeconds >= 2 && !nhStallActive) { nhStallActive = true; nhLog('>> STALL start (decode frozen) fps=' + fps + ' kbps=' + kbps + ' cap=' + nhCap + ' jbDelay=' + jb + 'ms'); }
+        if (stallSeconds === 0 && nhStallActive) { nhStallActive = false; nhLog('>> STALL end'); }
         var capTxt;
         if (!frameReader) { capTxt = '<span class="warn">未启动</span>'; }
         else if (!captureEnabled) { capTxt = '关闭(A/B)'; }
         else if (capWorkerOk) { capTxt = '<span class="k">Worker（离主线程）</span>'; }
         else { capTxt = '<span class="warn">主线程兜底</span>'; }
 
+        // [H265] 调试面板显示实际协商编码（H265 橙色醒目；来自 stats codecId → mimeType）
+        var codecShort = window._nhLastCodec ? window._nhLastCodec.replace(/^video\//i, '').toUpperCase() : '?';
+        var codecTxt = /H265|HEVC/.test(codecShort) ? '<span class="warn">' + codecShort + '</span>' : codecShort;
+
         statsEl.innerHTML =
-          '<span class="k">内核</span>: Chromium · ' + mode.toUpperCase() + '\n' +
+          '<span class="k">内核</span>: Chromium · ' + mode.toUpperCase() + ' · ' + codecTxt + '\n' +
           '<span class="k">分辨率</span>: ' + w + 'x' + h + '\n' +
           '<span class="k">解码FPS</span>: ' + fps + '\n' +
           '<span class="k">码率</span>: ' + kbps + ' kbps\n' +
@@ -795,8 +1010,18 @@
           '<span class="k">抖动缓冲</span>: ' + jb + ' ms (内核自适应)\n' +
           '<span class="k">卡顿次数</span>: ' + freeze + '　状态: ' + stallTxt;
 
-        // 卡住超过 2 秒 → 主动重连兜底
-        if (stallSeconds >= 5) { logC('画面卡住≥5s → 触发重连'); scheduleReconnect(); }
+        // ⭐ 卡顿兜底分级（避免"主线程长任务→解码短暂停→误判断线→完全重建流→更长断流"的自残）：
+        //   🔥 2026-07-02 提前：nh.txt 实测 STALL 期间码率照收、NACK 在涨=解码器在等 IDR，
+        //      原来 5s 才要关键帧等于白白多卡 3 秒。改 ① 2s 起就请求关键帧（scheduleKeyframeRecovery
+        //      自带 ≥4s 节流，不会风暴）；② ≥10s 关键帧救不回（大概率真断线/ICE 挂了）才完全重连。
+        //   真断线由 connectionState==='failed'/'disconnected' 单独触发 scheduleReconnect（见 rebuildPC）。
+        if (stallSeconds >= 10) {
+          logC('画面卡住≥10s（关键帧未恢复）→ 触发重连');
+          scheduleReconnect();
+        } else if (stallSeconds >= 2) {
+          logC('画面卡住≥2s → 先请求关键帧（不重建流）');
+          scheduleKeyframeRecovery();
+        }
       } catch(e) { statsEl.textContent = 'getStats 异常: ' + e; }
     }, 1000);
   }

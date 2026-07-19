@@ -81,6 +81,10 @@ public:
     // 登录信息
     Q_INVOKABLE QString loggedInUsername() const { return m_loggedInUsername; }
     Q_INVOKABLE QString currentDeviceId() const { return m_currentDeviceId; }
+    // ⭐ 2026-07-15：本次登录实际绑定的设备账号（未传 deviceUsername 时后端默认取第一个绑定），
+    //   区别于 getSavedDeviceUsername()（用户上次在「切换账号」里选中、希望使用的设备）。
+    //   两者不一致时，说明登录默认绑到了别的设备，需要自动切换回用户选中的设备。
+    Q_INVOKABLE QString currentDeviceUsername() const { return m_currentDeviceUsername; }
     Q_INVOKABLE int pcActivationLevel() const { return m_pcActivationLevel; }
     Q_INVOKABLE QString pcLevelName() const { return m_pcLevelName; }
     Q_INVOKABLE QString pcExpireAt() const { return m_pcExpireAt; }
@@ -90,7 +94,22 @@ public:
     Q_INVOKABLE QVariantList levelExposureFps() const { return m_levelExposureFps; }
     Q_INVOKABLE QJsonArray iceServers() const { return m_iceServers; }
     Q_INVOKABLE bool highSpeed240Allowed() const { return m_highSpeed240Allowed; }
+    // ⭐ 2026-07-11：AI 白名单（登录响应下发）。true=该 PC 设备号在总后台 AI 白名单 → 走原来 fps 逻辑，不锁 30。
+    Q_INVOKABLE bool aiWhitelisted() const { return m_aiWhitelisted; }
+    // ⭐ 2026-07-11：本机是否装了主流 AI 编程工具（Cursor/VSCode/Codex 等）。装了且不在 AI 白名单则推流 fps 锁 30。
+    Q_INVOKABLE bool aiCodingToolsDetected() const;
     Q_INVOKABLE void copyToClipboard(const QString &text);
+
+    // ⭐ 设备平台判断：Android 端设备号带 "android" 前缀（见 Android DeviceIDManager.PLATFORM_PREFIX），
+    //   iOS 无前缀。用于登录/切换账号列表标注平台，以及决定滤镜走「设备端 STOMP(iOS)」还是「PC 本地(Android)」。
+    Q_INVOKABLE bool isAndroidDeviceId(const QString &deviceId) const {
+        return deviceId.trimmed().startsWith(QStringLiteral("android"), Qt::CaseInsensitive);
+    }
+    Q_INVOKABLE QString deviceTypeLabel(const QString &deviceId) const {
+        return isAndroidDeviceId(deviceId) ? QStringLiteral("Android") : QStringLiteral("iOS");
+    }
+    // 当前已连接设备是否 Android（滤镜路由用）
+    Q_INVOKABLE bool currentIsAndroid() const { return isAndroidDeviceId(m_currentDeviceId); }
     
     // 登录接口（pcLevel: 1=豪华版, 2=至尊版）
     Q_INVOKABLE void login(const QString &username, const QString &password, int pcLevel, const QString &deviceUsername = QString());
@@ -308,6 +327,9 @@ private:
     
     // 生成/获取PC设备唯一标识
     QString generatePcDeviceId();
+
+    // §23.16：剪贴板被占用时的非阻塞重试复制
+    void copyToClipboardWithRetry(const QString &text, int attempt);
     
 private:
     static HttpClient *s_instance;
@@ -316,7 +338,9 @@ private:
     QString m_authToken;
     QString m_loggedInUsername;
     QString m_currentDeviceId;
+    QString m_currentDeviceUsername;  // ⭐ 本次登录实际绑定的设备账号
     int m_pcActivationLevel = 0;  // PC端等级，1=豪华版，2=至尊版
+    bool m_aiWhitelisted = false;  // ⭐ AI 白名单：登录响应 aiWhitelisted，命中则走原来 fps 逻辑（不锁 30）
     QString m_pcLevelName;         // 等级名称
     QString m_pcExpireAt;          // 至尊版到期时间
     QString m_pcDeviceId;          // PC设备唯一标识

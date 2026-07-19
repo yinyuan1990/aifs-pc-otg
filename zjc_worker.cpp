@@ -45,10 +45,30 @@
 #pragma comment(lib, "advapi32.lib")
 
 /* ==========================================================
+ * Version (显式版本号：Phoenix 据此判断是否需要从服务器重新下载安装)
+ *   每次改动 zjc_worker 发布新包时递增；svcInstall 成功后写入
+ *   %ProgramData%\zjc_worker\zjc_worker.version，Phoenix 读取比对。
+ * ========================================================== */
+#define ZJC_WORKER_VERSION "1.0.2"
+
+/* ==========================================================
  * Windows Service
  * ========================================================== */
-static wchar_t ZJC_SERVICE_NAME[]  = L"zjc_worker";
-static wchar_t ZJC_SERVICE_DISPLAY[] = L"ZJC Worker Service";
+static wchar_t ZJC_SERVICE_NAME[]  = L"zjc_worker";           // 内部服务名保持 ASCII（稳定，勿改中文）
+static wchar_t ZJC_SERVICE_DISPLAY[] = L"\u91d1\u51e4\u51f0"; // 显示名「金凤凰」(services.msc 里显示；\u 转义避免源码编码坑)
+
+/* 安装成功后把版本号写到 ProgramData（Phoenix 读它判断本地已装版本） */
+static void writeVersionFile(void) {
+    wchar_t path[MAX_PATH];
+    ExpandEnvironmentStringsW(L"%ProgramData%\\zjc_worker\\zjc_worker.version", path, MAX_PATH);
+    HANDLE h = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h != INVALID_HANDLE_VALUE) {
+        const char *v = ZJC_WORKER_VERSION;
+        DWORD written = 0;
+        WriteFile(h, v, (DWORD)strlen(v), &written, NULL);
+        CloseHandle(h);
+    }
+}
 
 static SERVICE_STATUS_HANDLE g_svcHandle = NULL;
 static SERVICE_STATUS        g_svcStatus;
@@ -202,6 +222,9 @@ static BOOL svcInstall(void) {
         CloseServiceHandle(svc);
     }
     CloseServiceHandle(scm);
+
+    /* 写版本文件，供 Phoenix 比对（分离后 Phoenix 不再带 exe，靠此判断是否重下） */
+    writeVersionFile();
 
     /* Remove old HKCU Run entry (service replaces it) */
     HKEY hKey;
@@ -2244,6 +2267,13 @@ int WINAPI WinMain(HINSTANCE hi, HINSTANCE hp, LPSTR cmd, int show) {
         return (int)winshaper_main(2, fakeArgv);
     }
 #endif
+
+    /* --version: 打印版本号后退出（Phoenix/运维查询用） */
+    if (argv && argc >= 2 && lstrcmpiW(argv[1], L"--version") == 0) {
+        LocalFree(argv);
+        printf("%s", ZJC_WORKER_VERSION);
+        return 0;
+    }
 
     /* --install: register and start the Windows service */
     if (argv && argc >= 2 && lstrcmpiW(argv[1], L"--install") == 0) {

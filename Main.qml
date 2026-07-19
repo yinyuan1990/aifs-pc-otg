@@ -78,13 +78,15 @@ ApplicationWindow {
         }
     }
     
+    // ⭐ 2026-07-03 登录卡顿优化（§24）：主页加载中标志。
+    //   isLoggedIn=true 后 MainPage 改为异步加载，加载期间登录页保持可见并盖「正在进入主页…」遮罩，
+    //   等 mainPageLoader.onLoaded 才做 隐藏→改窗口尺寸→显示 的切换，避免同步实例化冻死登录窗口。
+    property bool mainLoading: isLoggedIn && mainPageLoader.status !== Loader.Ready
+
     onIsLoggedInChanged: {
         if (isLoggedIn) {
-            // 登录成功，立即用 opacity 隐藏（比 visible 更快）
-            mainWindow.opacity = 0
-            
-            // 延迟设置窗口属性，等待当前帧渲染完成
-            switchTimer.start()
+            // 什么都不做：窗口切换推迟到 mainPageLoader.onLoaded（见下）。
+            // 登录页由 mainLoading 绑定保持加载，遮罩提示加载中。
         }
     }
     
@@ -381,7 +383,10 @@ ApplicationWindow {
         anchors.fill: parent
         active: isLoggedIn
         source: isLoggedIn ? "MainPage.qml" : ""
-        asynchronous: false  // 同步加载以便捕获错误
+        // ⭐ 2026-07-03（§24）：改异步加载。MainPage.qml 有 744KB，同步实例化会把主线程
+        //   冻住数百毫秒~数秒（低配机更久），登录窗口死冻就是「登录卡5秒」主因之一。
+        //   异步模式下错误同样经 status===Loader.Error 上报，不影响下面的错误捕获。
+        asynchronous: true
         
         onActiveChanged: {
             console.log("Main.qml: mainPageLoader.active 变化:", active)
@@ -405,6 +410,11 @@ ApplicationWindow {
             item.currentStream = currentStream
             // 连接退出登录信号
             item.logoutRequested.connect(handleLogout)
+
+            // ⭐ 2026-07-03（§24）：主页异步加载完成后才切换窗口（原来在 onIsLoggedInChanged）。
+            //   先 opacity 隐藏 → switchTimer 改窗口尺寸/位置 → showTimer 恢复可见。
+            mainWindow.opacity = 0
+            switchTimer.start()
         }
     }
     
@@ -461,16 +471,50 @@ ApplicationWindow {
     }
     
     // 登录页面（登录前显示，启动画面结束后）
+    // ⭐ 2026-07-03（§24）：MainPage 异步加载期间（mainLoading）登录页保持加载，
+    //   配合下方遮罩避免窗口空白；加载完成 status→Ready 后此绑定自动卸载登录页。
     Loader {
         id: loginLoader
         anchors.fill: parent
-        active: !isLoggedIn && !showSplash
-        source: (!isLoggedIn && !showSplash) ? "LoginPage.qml" : ""
+        active: (!isLoggedIn || mainLoading) && !showSplash
+        source: ((!isLoggedIn || mainLoading) && !showSplash) ? "LoginPage.qml" : ""
         
         onLoaded: {
             console.log("Main.qml: LoginPage 已加载")
             if (item) {
                 item.loginSuccess.connect(handleLoginSuccess)
+            }
+        }
+    }
+
+    // ⭐ 2026-07-03（§24）：主页异步加载中的遮罩提示（盖在登录页上，低于启动画面 z:100）
+    Rectangle {
+        anchors.fill: parent
+        visible: mainLoading && !showSplash
+        z: 90
+        color: "#B3000000"
+        radius: 20
+
+        // 吞掉加载期间的点击，防止误操作登录页
+        MouseArea { anchors.fill: parent; hoverEnabled: true }
+
+        Column {
+            anchors.centerIn: parent
+            spacing: 16
+
+            BusyIndicator {
+                anchors.horizontalCenter: parent.horizontalCenter
+                running: mainLoading
+                width: 48
+                height: 48
+            }
+
+            Text {
+                anchors.horizontalCenter: parent.horizontalCenter
+                text: "正在进入主页…"
+                font.family: "PingFang HK"
+                font.pixelSize: 16
+                color: "#FFFFFF"
             }
         }
     }

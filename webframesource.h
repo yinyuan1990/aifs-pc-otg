@@ -5,10 +5,12 @@
 #include <QByteArray>
 #include <QImage>
 #include <QString>
+#include <QStringList>
 #include <QHash>
 #include <QSet>
 #include <QPair>
 #include <QMutex>
+#include <QThreadPool>
 #include <atomic>
 #include "iframesource.h"
 
@@ -63,7 +65,8 @@ signals:
 
 private:
     QString framePath(qint64 frameIndex) const;
-    void cleanupFramesLocked();
+    QStringList cleanupFramesLocked();   // §23.17：锁内只摘索引，返回待删文件路径（删除在锁外/后台做）
+    void removeFilesAsync(const QStringList &paths);
     bool isProtectedLocked(qint64 frameIndex) const;
     void recomputeOldestLocked();
 
@@ -79,6 +82,11 @@ private:
     int m_nextValidRangeId = 1;
 
     QImage m_lastFrame;                             // 最近一帧（grabCurrentFrame 兜底）
+
+    // §23.17：写盘/删文件专用单线程池（保序），主线程只做索引分配后立即返回。
+    QThreadPool m_ioPool;
+    // §23.17：会话代际。reset() 递增；写盘任务完成时代际已变 = 帧属于上一场，丢弃不入索引。
+    std::atomic<int> m_generation{0};
 
     // 与 GstPlayer 同口径的滚动清理参数（受 validRange 保护的帧永不清理，
     //   所以即便慢放录制 5000 帧也不会丢；keep-count 只回收无保护的 live 帧）。

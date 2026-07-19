@@ -121,6 +121,8 @@ Rectangle {
                     var maskedName = devNickname.length > 3 ? devNickname.substring(0, 3) + "**" : devNickname
                     displayText = maskedName + "(" + remark + ")"
                 }
+                // ⭐ 设备后面标注平台（iOS / Android）——按 deviceId 的 android 前缀判断
+                displayText += " · " + HttpClient.deviceTypeLabel(device.deviceId || "")
                 displayList.push(displayText)
             }
             
@@ -151,7 +153,7 @@ Rectangle {
             loggingInLevel = 0
             // ⭐ 特殊处理 code=1005（至尊版到期或未开通）
             if (code === 1005) {
-                loginError = message || "至尊版已到期或未开通，请联系管理员"
+                loginError = message || "AI版已到期或未开通，请联系管理员"
             } else {
                 loginError = message
             }
@@ -710,9 +712,10 @@ Rectangle {
                 }
 
                 // ⭐ 播放内核选择（2026-06-24）：GStreamer / 网页内核，默认上次选择
+                // ⭐ 2026-07-19：按钮下加红色提示（有显卡/无显卡），高度 52→76 容纳提示行（标签18+6+按钮30+6+提示14≈74）
                 Item {
                     Layout.fillWidth: true
-                    height: 52
+                    height: 76
 
                     Column {
                         anchors.left: parent.left
@@ -783,13 +786,41 @@ Rectangle {
                                 }
                             }
                         }
+
+                        // 红色提示行：左右各对应上方按钮
+                        Row {
+                            width: parent.width
+                            height: 14
+                            spacing: 0
+
+                            Text {
+                                width: parent.width / 2
+                                horizontalAlignment: Text.AlignHCenter
+                                text: "有显卡"
+                                font.family: "PingFang HK"
+                                font.pixelSize: 11
+                                color: "#E05555"
+                            }
+
+                            Text {
+                                width: parent.width / 2
+                                horizontalAlignment: Text.AlignHCenter
+                                text: "无显卡"
+                                font.family: "PingFang HK"
+                                font.pixelSize: 11
+                                color: "#E05555"
+                            }
+                        }
                     }
                 }
 
                 // 监控账号选择（非必选）
+                // ⭐ 2026-07-09：登录页不再选 iOS 设备（隐藏此下拉，登录一律传空设备）；
+                //   用户进主页后用「切换账号」自行选择设备。visible=false 在 ColumnLayout 中自动收起不留空隙。
                 Column {
                     id: monitorAccountColumn
                     Layout.fillWidth: true
+                    visible: false
                     spacing: 0
                     
                     property bool isActive: monitorAccountArea.containsMouse || monitorAccountArea.pressed || accountDropdown.visible
@@ -917,7 +948,7 @@ Rectangle {
                             isLoggingIn = true
                             loggingInLevel = 1
                             loginError = ""
-                            HttpClient.login(loginUsername.text.trim(), loginPassword.text.trim(), 1, monitorAccountColumn.selectedDeviceUsername)
+                            HttpClient.login(loginUsername.text.trim(), loginPassword.text.trim(), 1, "")  // ⭐ 2026-07-09：登录不带 iOS 设备，传空；进主页后「切换账号」自选
                         }
                     }
                 }
@@ -946,7 +977,7 @@ Rectangle {
                     
                     Text {
                         anchors.centerIn: parent
-                        text: loggingInLevel === 2 ? "登录中..." : "至尊版登录"
+                        text: loggingInLevel === 2 ? "登录中..." : "AI版登录"
                         font.family: "PingFang HK"
                         font.pixelSize: 24
                         font.weight: Font.Medium
@@ -968,7 +999,7 @@ Rectangle {
                             isLoggingIn = true
                             loggingInLevel = 2
                             loginError = ""
-                            HttpClient.login(loginUsername.text.trim(), loginPassword.text.trim(), 2, monitorAccountColumn.selectedDeviceUsername)
+                            HttpClient.login(loginUsername.text.trim(), loginPassword.text.trim(), 2, "")  // ⭐ 2026-07-09：登录不带 iOS 设备，传空；进主页后「切换账号」自选
                         }
                     }
                 }

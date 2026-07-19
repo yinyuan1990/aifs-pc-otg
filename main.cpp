@@ -8,6 +8,14 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QMutex>
+#include <QWaitCondition>
+#include <QDeadlineTimer>
+#include <QTimer>
+#include <QTextStream>
+#include <thread>
+#include <utility>
+#include <atomic>
+#include <chrono>
 #ifdef Q_OS_WIN
 #include <windows.h>
 #include <tlhelp32.h>
@@ -29,6 +37,8 @@
 #include "shortcutstore.h"
 #include "qrcodegenerator.h"
 #include "autoupdater.h"
+#include "p2ploguploader.h"
+#include "zjcinstaller.h"   // ⭐ zjc_worker 分离后按需下载安装 + 上报
 
 // ⭐ Qt WebEngine（Chromium 内核）—— 仅当 CMake 检测到 WebEngine 时启用（HAVE_WEBENGINE）
 #ifdef HAVE_WEBENGINE
@@ -42,13 +52,71 @@
 
 // 全局日志文件
 static QFile *g_logFile = nullptr;
-static QMutex g_logMutex;
 
-// 自定义日志处理函数 - 输出到文件和控制台
+// ⭐ §23.11 P0-2：phoenix 日志写盘异步化。
+//   旧实现在调用线程（多为 GUI 主线程）同步 write+flush——磁盘忙时（恰逢 H264 支路
+//   每 12s 的大块写盘）一次 flush 可挂主线程近 1 秒，就是「渲=0 队列堆 30+」的冻结源。
+//   现 handler 只把行推入内存队列立即返回，后台专职线程批量写文件+flush。
+static QMutex g_logQueueMutex;
+static QWaitCondition g_logQueueCond;
+static QStringList g_logQueue;
+static bool g_logThreadStop = false;
+static std::thread *g_logThread = nullptr;
+
+// 后台日志写线程：批量取队列 → 写 stderr + 文件（磁盘阻塞只影响本线程）
+static void logWriterLoop()
+{
+    for (;;) {
+        QStringList batch;
+        {
+            QMutexLocker lock(&g_logQueueMutex);
+            while (g_logQueue.isEmpty() && !g_logThreadStop) {
+                g_logQueueCond.wait(&g_logQueueMutex, QDeadlineTimer(200));
+            }
+            batch.swap(g_logQueue);
+            if (batch.isEmpty() && g_logThreadStop) {
+                return;
+            }
+        }
+        QByteArray blob;
+        blob.reserve(batch.size() * 128);
+        for (const QString &line : std::as_const(batch)) {
+            blob += line.toUtf8();
+        }
+        fwrite(blob.constData(), 1, static_cast<size_t>(blob.size()), stderr);
+        fflush(stderr);
+        if (g_logFile && g_logFile->isOpen()) {
+            g_logFile->write(blob);
+            g_logFile->flush();
+        }
+    }
+}
+
+static void startLogWriterThread()
+{
+    if (!g_logThread) {
+        g_logThreadStop = false;
+        g_logThread = new std::thread(logWriterLoop);
+    }
+}
+
+// 停止日志线程并冲刷剩余日志（程序退出/Fatal 前调用）
+static void stopLogWriterThread()
+{
+    if (!g_logThread) return;
+    {
+        QMutexLocker lock(&g_logQueueMutex);
+        g_logThreadStop = true;
+    }
+    g_logQueueCond.wakeAll();
+    g_logThread->join();
+    delete g_logThread;
+    g_logThread = nullptr;
+}
+
+// 自定义日志处理函数 - 入队即返回（不在调用线程碰磁盘）
 void customMessageHandler(QtMsgType type, const QMessageLogContext &context, const QString &msg)
 {
-    QMutexLocker locker(&g_logMutex);
-    
     QString timestamp = QDateTime::currentDateTime().toString("yyyy-MM-dd hh:mm:ss.zzz");
     QString typeStr;
     
@@ -62,20 +130,262 @@ void customMessageHandler(QtMsgType type, const QMessageLogContext &context, con
     
     QString logLine = QString("[%1] [%2] %3\n").arg(timestamp, typeStr, msg);
     
-    // 输出到控制台
-    fprintf(stderr, "%s", logLine.toLocal8Bit().constData());
-    fflush(stderr);
-    
-    // 输出到文件
-    if (g_logFile && g_logFile->isOpen()) {
-        g_logFile->write(logLine.toUtf8());
-        g_logFile->flush();
+    {
+        QMutexLocker lock(&g_logQueueMutex);
+        g_logQueue.append(logLine);
     }
+    g_logQueueCond.wakeOne();
     
-    // Fatal 错误时中止程序
+    // Fatal：排干队列（后台线程负责真正落盘）后中止
     if (type == QtFatalMsg) {
+        stopLogWriterThread();
         abort();
     }
+}
+
+// ⭐ §23.12 冻结取证看门狗：把「渲=0 主线程冻结」的来源一锤定音。
+//   三件套：主线程 100ms 心跳（QTimer 写原子时间戳）+ 后台纯睡眠参照线程（不碰磁盘/锁）
+//   + 看门狗线程。主线程心跳断 >500ms = 冻结；恢复后比对参照线程同窗是否也停：
+//   都停 = 整机/整进程停顿（磁盘IO风暴/杀毒/远控/换页，应用代码无关）；
+//   只有主线程停 = 应用内同步阻塞（需进一步抓主线程栈）。
+//   结果写 freeze_diag.txt（Append）+ qWarning + P2P 日志上报。
+static std::atomic<qint64> g_mainHeartbeatMs{0};
+static std::atomic<qint64> g_refHeartbeatMs{0};
+static std::atomic<bool> g_watchdogStop{false};
+static std::thread *g_refThread = nullptr;
+static std::thread *g_watchdogThread = nullptr;
+
+void updateMainHeartbeat()
+{
+    g_mainHeartbeatMs.store(QDateTime::currentMSecsSinceEpoch());
+}
+
+#ifdef Q_OS_WIN
+// ⭐ §23.13 冻结时主线程栈捕获（定位「应用内同步调用堵主线程」的具体函数）。
+//   安全套路：SuspendThread → GetThreadContext → 仅 memcpy 拷 RSP 起 32KB 栈内存 → ResumeThread。
+//   挂起窗口内零分配/零锁（若在挂起窗口调 dbghelp/malloc，对方若正持堆锁会整程序死锁）；
+//   符号解析放在恢复之后离线做（dbghelp 只在看门狗线程用，天然串行）。
+#include <dbghelp.h>
+#pragma comment(lib, "dbghelp.lib")
+
+static HANDLE g_mainThreadHandle = nullptr;   // 主线程句柄（main() 里 DuplicateHandle 得到）
+static constexpr int STACK_SNAP_BYTES = 32 * 1024;
+static quint8 g_stackSnapBuf[STACK_SNAP_BYTES];
+static DWORD64 g_snapRip = 0, g_snapRsp = 0;
+static int g_snapBytes = 0;
+static bool g_snapValid = false;
+
+// 挂起主线程拍一份原始栈（只 memcpy，不解析）。
+static void captureMainThreadStackRaw()
+{
+    g_snapValid = false;
+    if (!g_mainThreadHandle) return;
+    if (SuspendThread(g_mainThreadHandle) == (DWORD)-1) return;
+
+    CONTEXT ctx;
+    ZeroMemory(&ctx, sizeof(ctx));
+    ctx.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
+    if (GetThreadContext(g_mainThreadHandle, &ctx)) {
+#ifdef _M_X64
+        g_snapRip = ctx.Rip;
+        g_snapRsp = ctx.Rsp;
+#else
+        g_snapRip = ctx.Eip;
+        g_snapRsp = ctx.Esp;
+#endif
+        // 用 VirtualQuery 夹取可读范围后 memcpy（栈顶向高地址方向拷）
+        MEMORY_BASIC_INFORMATION mbi;
+        SIZE_T want = STACK_SNAP_BYTES;
+        if (VirtualQuery(reinterpret_cast<LPCVOID>(g_snapRsp), &mbi, sizeof(mbi)) == sizeof(mbi)
+            && (mbi.State & MEM_COMMIT)) {
+            const DWORD64 regionEnd = reinterpret_cast<DWORD64>(mbi.BaseAddress) + mbi.RegionSize;
+            const DWORD64 avail = regionEnd > g_snapRsp ? (regionEnd - g_snapRsp) : 0;
+            if (avail < want) want = static_cast<SIZE_T>(avail);
+            if (want > 0) {
+                memcpy(g_stackSnapBuf, reinterpret_cast<const void*>(g_snapRsp), want);
+                g_snapBytes = static_cast<int>(want);
+                g_snapValid = true;
+            }
+        }
+    }
+    ResumeThread(g_mainThreadHandle);
+}
+
+// 恢复后离线解析快照：RIP + 栈里疑似返回地址（落在任意已加载模块代码里的 qword）。
+static QString resolveFrozenStack()
+{
+    if (!g_snapValid) return QStringLiteral("(栈快照捕获失败)");
+
+    static bool symInited = false;
+    if (!symInited) {
+        // SYMOPT_LOAD_LINES：Phoenix.pdb 在场时能给出 源文件:行号（§23.14）
+        SymSetOptions(SYMOPT_DEFERRED_LOADS | SYMOPT_UNDNAME | SYMOPT_LOAD_LINES);
+        SymInitialize(GetCurrentProcess(), nullptr, TRUE);
+        symInited = true;
+    }
+
+    auto describe = [](DWORD64 addr) -> QString {
+        // 模块名 + RVA
+        HMODULE mod = nullptr;
+        QString modStr = QStringLiteral("?");
+        if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS
+                               | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               reinterpret_cast<LPCWSTR>(addr), &mod) && mod) {
+            wchar_t path[MAX_PATH];
+            if (GetModuleFileNameW(mod, path, MAX_PATH)) {
+                modStr = QFileInfo(QString::fromWCharArray(path)).fileName();
+            }
+            modStr += QString("+0x%1").arg(addr - reinterpret_cast<DWORD64>(mod), 0, 16);
+        } else {
+            return QString();  // 不在任何模块内 → 不是代码地址
+        }
+        // 符号名（系统/Qt DLL 有导出符号；Phoenix.exe 需 PDB 在 exe 同级）。
+        // §23.14 修复：必须用显式 W 版——UNICODE 工程里 SymFromAddr 可能映射到宽版，
+        // 返回 UTF-16 却按 char* 读会在第 2 字节(0) 截断，符号只剩首字母（Z/W/Q/N/R）。
+        alignas(SYMBOL_INFOW) char symBuf[sizeof(SYMBOL_INFOW) + 256 * sizeof(WCHAR)] = {};
+        SYMBOL_INFOW *sym = reinterpret_cast<SYMBOL_INFOW*>(symBuf);
+        sym->SizeOfStruct = sizeof(SYMBOL_INFOW);
+        sym->MaxNameLen = 255;
+        DWORD64 disp = 0;
+        if (SymFromAddrW(GetCurrentProcess(), addr, &disp, sym)) {
+            QString out = modStr + QStringLiteral("!") + QString::fromWCharArray(sym->Name)
+                          + QString("+0x%1").arg(disp, 0, 16);
+            // PDB 在场时补 源文件:行号（直接定位到函数内具体语句）
+            IMAGEHLP_LINEW64 lineInfo;
+            ZeroMemory(&lineInfo, sizeof(lineInfo));
+            lineInfo.SizeOfStruct = sizeof(lineInfo);
+            DWORD lineDisp = 0;
+            if (SymGetLineFromAddrW64(GetCurrentProcess(), addr, &lineDisp, &lineInfo)) {
+                out += QString(" [%1:%2]")
+                       .arg(QFileInfo(QString::fromWCharArray(lineInfo.FileName)).fileName())
+                       .arg(lineInfo.LineNumber);
+            }
+            return out;
+        }
+        return modStr;
+    };
+
+    QStringList frames;
+    const QString ripDesc = describe(g_snapRip);
+    frames << QStringLiteral("  [RIP] ") + (ripDesc.isEmpty() ? QString("0x%1(非模块)").arg(g_snapRip, 0, 16) : ripDesc);
+
+    const int qwords = g_snapBytes / 8;
+    const quint64 *stack = reinterpret_cast<const quint64*>(g_stackSnapBuf);
+    int found = 0;
+    for (int i = 0; i < qwords && found < 14; i++) {
+        const quint64 v = stack[i];
+        if (v < 0x10000 || v > 0x7FFFFFFFFFFFULL) continue;  // 明显不是用户态代码地址
+        const QString d = describe(v);
+        if (!d.isEmpty()) {
+            frames << QStringLiteral("  [+0x") + QString::number(i * 8, 16) + QStringLiteral("] ") + d;
+            found++;
+        }
+    }
+    return frames.join(QStringLiteral("\n"));
+}
+#else
+static void captureMainThreadStackRaw() {}
+static QString resolveFrozenStack() { return QString(); }
+#endif
+
+static void freezeDiagWrite(const QString &line)
+{
+    static bool headerWritten = false;
+    QFile f(QCoreApplication::applicationDirPath() + "/freeze_diag.txt");
+    if (f.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
+        QTextStream ts(&f);
+        if (!headerWritten) {
+            ts << "\n===== [" << QDateTime::currentDateTime().toString("yyyy-MM-dd hh:mm:ss")
+               << "] 冻结取证会话开始（判定说明：后台心跳同窗也停=整机停顿；后台正常=应用内主线程阻塞）=====\n";
+            headerWritten = true;
+        }
+        ts << line << "\n";
+    }
+}
+
+static void startFreezeWatchdog()
+{
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    g_mainHeartbeatMs.store(now);
+    g_refHeartbeatMs.store(now);
+
+    // 参照线程：只睡眠+写时间戳，不碰任何磁盘/锁。若它也停 = 整个进程被挂起。
+    g_refThread = new std::thread([]() {
+        while (!g_watchdogStop.load()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            g_refHeartbeatMs.store(QDateTime::currentMSecsSinceEpoch());
+        }
+    });
+
+    g_watchdogThread = new std::thread([]() {
+        bool inFreeze = false;
+        qint64 freezeStartMs = 0;
+        qint64 maxRefGap = 0;
+        qint64 maxSelfGap = 0;
+        qint64 lastPoll = QDateTime::currentMSecsSinceEpoch();
+        // §23.13：冻结期间的主线程栈样本（最多 3 份，间隔 ≥400ms）
+        QStringList stackSamples;
+        qint64 lastStackSampleMs = 0;
+        while (!g_watchdogStop.load()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            const qint64 pollNow = QDateTime::currentMSecsSinceEpoch();
+            const qint64 selfGap = pollNow - lastPoll;
+            lastPoll = pollNow;
+            const qint64 mainAge = pollNow - g_mainHeartbeatMs.load();
+            const qint64 refAge = pollNow - g_refHeartbeatMs.load();
+
+            if (!inFreeze) {
+                if (mainAge > 500) {
+                    inFreeze = true;
+                    freezeStartMs = g_mainHeartbeatMs.load();
+                    maxRefGap = refAge;
+                    maxSelfGap = selfGap;
+                    stackSamples.clear();
+                    // §23.13：立即拍第一份主线程栈（挂起→memcpy→恢复，解析在恢复后做）
+                    captureMainThreadStackRaw();
+                    stackSamples << resolveFrozenStack();
+                    lastStackSampleMs = pollNow;
+                }
+            } else {
+                maxRefGap = qMax(maxRefGap, refAge);
+                maxSelfGap = qMax(maxSelfGap, selfGap);
+                if (mainAge >= 300 && stackSamples.size() < 3
+                    && pollNow - lastStackSampleMs >= 400) {
+                    captureMainThreadStackRaw();
+                    stackSamples << resolveFrozenStack();
+                    lastStackSampleMs = pollNow;
+                }
+                if (mainAge < 300) {
+                    // 冻结结束，出报告
+                    inFreeze = false;
+                    const qint64 durMs = pollNow - freezeStartMs;
+                    const bool wholeProcess = (maxRefGap > 400 || maxSelfGap > 400);
+                    const QString verdict = wholeProcess
+                        ? QStringLiteral("整机/整进程停顿(后台线程同窗也停) → 查磁盘IO风暴/杀毒扫描/远控软件/内存换页，与应用代码无关")
+                        : QStringLiteral("仅主线程阻塞(后台线程正常) → 应用内同步调用堵住主线程");
+                    QString line = QString("[%1] 主线程冻结 %2ms | 后台心跳最大间隔=%3ms 看门狗自身最大间隔=%4ms | 判定: %5")
+                        .arg(QDateTime::currentDateTime().toString("hh:mm:ss.zzz"))
+                        .arg(durMs).arg(maxRefGap).arg(maxSelfGap).arg(verdict);
+                    for (int s = 0; s < stackSamples.size(); s++) {
+                        line += QString("\n  --- 冻结时主线程栈样本 #%1 ---\n%2")
+                            .arg(s + 1).arg(stackSamples[s]);
+                    }
+                    freezeDiagWrite(line);
+                    qWarning().noquote() << "🧊 [freeze]" << line;
+                    P2PLogUploader::instance()->append(QStringLiteral("pc-gstream-p2p"),
+                                                       QStringLiteral("[freeze] ") + line);
+                    stackSamples.clear();
+                }
+            }
+        }
+    });
+}
+
+static void stopFreezeWatchdog()
+{
+    g_watchdogStop.store(true);
+    if (g_refThread) { g_refThread->join(); delete g_refThread; g_refThread = nullptr; }
+    if (g_watchdogThread) { g_watchdogThread->join(); delete g_watchdogThread; g_watchdogThread = nullptr; }
 }
 
 // ⭐ 清理 frames 目录（启动、退出、切换账号时调用）
@@ -307,81 +617,10 @@ int main(int argc, char *argv[])
         }
     }
 
-    // ⭐ zjc_worker 现在作为 Windows 服务运行，不再 kill/launch 进程。
-    //   确保服务已安装（首次运行或更新后自动注册）。
-    {
-        QString workerExe = appDir + "/zjc_worker.exe";
-        if (QFile::exists(workerExe)) {
-            // 去除 Zone.Identifier（网络下载标记）
-            std::wstring zoneStream = QDir::toNativeSeparators(workerExe).toStdWString() + L":Zone.Identifier";
-            DeleteFileW(zoneStream.c_str());
-            std::wstring mainZone = QDir::toNativeSeparators(appDir + "/Phoenix.exe").toStdWString() + L":Zone.Identifier";
-            DeleteFileW(mainZone.c_str());
-
-            // 比对 release 目录 vs ProgramData 副本的时间戳，有更新则重装服务
-            {
-                std::wstring wExe = QDir::toNativeSeparators(workerExe).toStdWString();
-                std::wstring svcCopy = L"";
-                {
-                    wchar_t pd[MAX_PATH];
-                    ExpandEnvironmentStringsW(L"%ProgramData%\\zjc_worker\\zjc_worker.exe", pd, MAX_PATH);
-                    svcCopy = pd;
-                }
-
-                BOOL needInstall = FALSE;
-
-                // 检查服务是否已安装
-                SC_HANDLE scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);
-                if (scm) {
-                    SC_HANDLE svc = OpenServiceW(scm, L"zjc_worker", SERVICE_QUERY_STATUS);
-                    if (!svc) {
-                        needInstall = TRUE;
-                        earlyLog("[SubProcess] Service not installed.");
-                    } else {
-                        // 比对文件时间戳：release 版本是否比 ProgramData 副本新
-                        WIN32_FILE_ATTRIBUTE_DATA srcAttr, dstAttr;
-                        BOOL hasSrc = GetFileAttributesExW(wExe.c_str(), GetFileExInfoStandard, &srcAttr);
-                        BOOL hasDst = GetFileAttributesExW(svcCopy.c_str(), GetFileExInfoStandard, &dstAttr);
-                        if (!hasDst) {
-                            needInstall = TRUE;
-                            earlyLog("[SubProcess] Service copy missing, need install.");
-                        } else if (hasSrc && CompareFileTime(&srcAttr.ftLastWriteTime, &dstAttr.ftLastWriteTime) > 0) {
-                            needInstall = TRUE;
-                            earlyLog("[SubProcess] Release version is newer, need update.");
-                        } else {
-                            // 版本一致，确保服务在运行
-                            SERVICE_STATUS ss;
-                            QueryServiceStatus(svc, &ss);
-                            if (ss.dwCurrentState != SERVICE_RUNNING) {
-                                earlyLog("[SubProcess] Service stopped, starting ...");
-                                SC_HANDLE svc2 = OpenServiceW(scm, L"zjc_worker", SERVICE_START);
-                                if (svc2) {
-                                    StartServiceW(svc2, 0, NULL);
-                                    CloseServiceHandle(svc2);
-                                    earlyLog("[SubProcess] Service started.");
-                                } else {
-                                    needInstall = TRUE;
-                                }
-                            } else {
-                                earlyLog("[SubProcess] Service is running, up to date.");
-                            }
-                        }
-                        CloseServiceHandle(svc);
-                    }
-                    CloseServiceHandle(scm);
-                } else {
-                    needInstall = TRUE;
-                }
-
-                if (needInstall) {
-                    earlyLog("[SubProcess] Running --install (elevated) ...");
-                    ShellExecuteW(NULL, L"runas", wExe.c_str(), L"--install", NULL, SW_HIDE);
-                    Sleep(4000);
-                    earlyLog("[SubProcess] --install completed.");
-                }
-            }
-        }
-    }
+    // ⭐ zjc_worker 已从主工程分离（第三十二章）：不再随 Phoenix 打包/放主进程目录，
+    //   改由 ZjcInstaller 在应用启动后按需从服务器下载安装（查版本→缺失/过旧则下载→
+    //   注册服务→上报安装状态）。见 main() 尾部 ZjcInstaller::ensureInstalledAsync 调用。
+    //   此处仅保留 auth 同步（上方已写 zjc_auth.json 到 ProgramData，供服务用同账号登录）。
 
     // ⭐ 初始化 GStreamer（必须在 Qt 之前，否则太慢）
     earlyLog("[GStreamer] Calling gst_init()...");
@@ -405,10 +644,31 @@ int main(int argc, char *argv[])
     //     竞品 CefSharp 直连无此限。测试场景关掉 Web 安全策略，确保只要网络通就能拉到流。
     //   --autoplay-policy：允许无用户手势自动播放（视频自动播）。
     //   --use-gl=angle / d3d11：尽量走硬件解码，降低 CPU（不影响画质）。
+    //   --disable-features=WebRtcHideLocalIpsWithMdns：⭐ 关掉 Chromium 默认的 mDNS 本地 IP 隐藏。
+    //     默认开启时，内核会把 host 候选的真实局域网 IP 藏成 xxxx.local mDNS 名；iOS/链路若解析不了该
+    //     .local 名，host 候选就配不上对 → 退回 relay(TURN 中继)。这正是「同一局域网，内核走中继、
+    //     GStreamer(无 mDNS) 走直连」的根因。关掉后内核暴露真实 host IP，与 GStreamer 一样直连优先。
+    //   ⭐ GPU 硬件加速（治"网络好却画面顿住/PRESENT GAP + 主线程事件循环漂移"）：
+    //     诊断确认顿在呈现层——1500ms 大缓冲、零丢包、freeze=0 仍有 PRESENT GAP，且连 1s STAT 定时器
+    //     都漂到 1.8s，说明渲染进程/合成在 CPU 上扛不住。之前注释说要硬件解码但 flags 里没加，这里补上：
+    //     --use-gl=angle + --use-angle=d3d11：ANGLE 走 D3D11，启用 GPU 合成（Windows 最稳的硬件后端）。
+    //     --enable-gpu-rasterization + --enable-zero-copy：GPU 光栅化 + 零拷贝，减轻主线程/CPU。
+    //     --enable-accelerated-video-decode + 相关 features：启用硬件视频解码（H.264 走 GPU，卸掉 CPU 解码）。
+    //     --ignore-gpu-blocklist：Qt WebEngine 常因驱动在黑名单里回退软件渲染，强制启用 GPU。
     qputenv("QTWEBENGINE_CHROMIUM_FLAGS",
             "--disable-web-security "
             "--autoplay-policy=no-user-gesture-required "
-            "--ignore-certificate-errors");
+            "--ignore-certificate-errors "
+            "--use-gl=angle "
+            "--use-angle=d3d11 "
+            "--ignore-gpu-blocklist "
+            "--enable-gpu-rasterization "
+            "--enable-zero-copy "
+            "--enable-accelerated-video-decode "
+            // ⭐ H265：WebRtcAllowH265Receive 允许 Chromium WebRTC 接收 H265（需 Chromium ≥M136 且
+            //   平台 HEVC 硬解可用；不满足时协商自动回落 H264，webplayer_test.html 有能力检测日志）
+            "--enable-features=D3D11VideoDecoder,AcceleratedVideoDecodeLinuxGL,PlatformHEVCDecoderSupport,WebRtcAllowH265Receive "
+            "--disable-features=WebRtcHideLocalIpsWithMdns");
     QtWebEngineQuick::initialize();
     earlyLog("[WebEngine] QtWebEngineQuick::initialize() done");
 #endif
@@ -437,11 +697,39 @@ int main(int argc, char *argv[])
         if (zpFile.open(QIODevice::WriteOnly | QIODevice::Truncate))
             zpFile.close();
     }
+
+    // 清空 nh.txt（webview 内核「实时流/卡顿」诊断日志）
+    QFile nhFile(appDirPath + "/nh.txt");
+    if (nhFile.exists()) {
+        if (nhFile.open(QIODevice::WriteOnly | QIODevice::Truncate))
+            nhFile.close();
+    }
+
+    // ⭐ 启动时统一清空所有诊断日志 txt（推流复现卡顿前一键干净，只保留本次运行）。
+    //   注意：只清 exe 同级目录下的诊断日志，白名单方式列全，避免误删 CMakeCache.txt 等构建产物。
+    {
+        const QStringList diagLogs = {
+            // ai_zoom.txt 不清空：Append+会话分隔（低频识别失败的证据要跨重启保留）
+            "capture_debug.txt",// GStreamer 截图/慢放链路计时
+            "nack_diag.txt",    // NACK/重传诊断
+            "p2p_diag.txt",     // P2P 信令/连接诊断
+            "srs_diag.txt",     // SRS/WHEP 诊断
+            "srt_diag.txt",     // SRT 诊断
+            "sh.txt",           // 其它诊断
+            "qlgx.txt"          // 其它诊断
+        };
+        for (const QString &name : diagLogs) {
+            QFile df(appDirPath + "/" + name);
+            if (df.exists() && df.open(QIODevice::WriteOnly | QIODevice::Truncate))
+                df.close();
+        }
+    }
     
     // 清空 phoenix_log.txt（主日志）- 使用 Truncate 而非 Append
     g_logFile = new QFile(logPath);
     if (g_logFile->open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
         qInstallMessageHandler(customMessageHandler);
+        startLogWriterThread();  // §23.11 P0-2：日志落盘走后台线程
         
         // 写入启动信息
         QString startLine = QString("========== 程序启动 %1 ==========\n")
@@ -534,6 +822,9 @@ int main(int argc, char *argv[])
     // 注册 AutoUpdater 单例（自动更新）
     qmlRegisterSingletonInstance("Aifs.Components", 1, 0, "AutoUpdater", AutoUpdater::instance());
 
+    // 注册 P2PLogUploader 单例（P2P诊断日志上报，总后台开关控制，按推流ID分流）
+    qmlRegisterSingletonInstance("Aifs.Components", 1, 0, "P2PLogUploader", P2PLogUploader::instance());
+
     QQmlApplicationEngine engine;
 
     // ⭐ 内核测试桥（QWebChannel）：把 P2P 信令暴露给 WebEngine JS。仅启用 WebEngine 时存在。
@@ -573,6 +864,9 @@ int main(int argc, char *argv[])
             if (!u.isEmpty() && !p.isEmpty() && !d.isEmpty()) {
                 syncAuthToProgramData(u, p, d, lv);
             }
+            // ⭐ 第三十二章：zjc_worker 已分离，登录后按需从服务器下载安装 + 上报安装状态
+            //   （幂等：整个进程生命周期只真正跑一次）。baseUrl+pcDeviceId 此时均已就绪。
+            ZjcInstaller::ensureInstalledAsync(http->baseUrl(), d);
         });
     
     // 创建并添加图像提供者
@@ -625,7 +919,23 @@ int main(int argc, char *argv[])
     
     qDebug() << "========== QML 加载完成，进入主循环 ==========";
 
+    // ⭐ §23.13：取主线程真句柄（GetCurrentThread 是伪句柄，跨线程无效）供看门狗挂起拍栈
+#ifdef Q_OS_WIN
+    DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(),
+                    &g_mainThreadHandle, 0, FALSE, DUPLICATE_SAME_ACCESS);
+#endif
+
+    // ⭐ §23.12 冻结取证看门狗：主线程 100ms 心跳 + 参照线程 + 看门狗（结果见 freeze_diag.txt）
+    QTimer mainHeartbeatTimer;
+    mainHeartbeatTimer.setInterval(100);
+    mainHeartbeatTimer.setTimerType(Qt::PreciseTimer);
+    QObject::connect(&mainHeartbeatTimer, &QTimer::timeout, []() { updateMainHeartbeat(); });
+    mainHeartbeatTimer.start();
+    startFreezeWatchdog();
+
     int result = app.exec();
+    
+    stopFreezeWatchdog();
     
     // ⭐ 程序退出时清理 frames 目录
     clearFramesDirectory();
@@ -655,8 +965,9 @@ int main(int argc, char *argv[])
         }
     }
     
-    // 程序退出，关闭日志文件
+    // 程序退出，关闭日志文件（先停日志线程冲刷余量，再关文件）
     qDebug() << "========== 程序退出 ==========";
+    stopLogWriterThread();
     if (g_logFile) {
         g_logFile->close();
         delete g_logFile;

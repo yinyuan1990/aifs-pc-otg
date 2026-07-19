@@ -4,6 +4,7 @@
 #include <QObject>
 #include <QVideoSink>
 #include <QVideoFrame>
+#include <QJsonArray>
 #include <QMutex>
 #include <QRecursiveMutex>
 #include <QThread>
@@ -44,6 +45,8 @@ class GstPlayer : public QObject, public IFrameSource
     Q_PROPERTY(int receiveFps READ receiveFps NOTIFY receiveFpsChanged)
     Q_PROPERTY(int bufferSize READ bufferSize NOTIFY bufferSizeChanged)
     Q_PROPERTY(int bufferTarget READ bufferTarget NOTIFY bufferTargetChanged)
+    // ⭐ P2P 连接阶段文字（连接中/切网重连中/重连中n/5/等待手机/已连接/失败），供 QML 面板+顶栏绑定
+    Q_PROPERTY(QString webrtcStatus READ webrtcStatus NOTIFY webrtcStatusChanged)
     
 public:
     explicit GstPlayer(QObject *parent = nullptr);
@@ -112,6 +115,12 @@ public:
     Q_INVOKABLE void handleWebRTCSignaling(const QJsonObject &message);
     Q_INVOKABLE bool isP2PMode() const { return m_useP2P; }
 
+    // ⭐ H265：CONFIG_STATE.videoCodec 下发（"h264"/"h265"），QML 在 playP2P 前调用。
+    //   仅 P2P 生效；具体 H265 逻辑全部在 h265support.h/.cpp（与 H264 主链路解耦）。
+    Q_INVOKABLE void setVideoCodec(const QString &codec);
+    Q_INVOKABLE QString videoCodec() const { return m_useH265 ? QStringLiteral("h265") : QStringLiteral("h264"); }
+    Q_INVOKABLE bool isH265Mode() const { return m_useH265; }
+
     // ⭐ 内核测试模式：内核（Chromium）独占 P2P 时，GStreamer 必须彻底退场——
     //   不拉流、不渲染、不处理任何 WebRTC 信令、且任何自动重连/重启 P2P 都被拦截，
     //   否则两端都向同一 username 抢 iOS 会话，导致内核侧出不来画面。
@@ -123,7 +132,43 @@ public:
     Q_INVOKABLE void disconnectSRT();
     // ⭐ 供 QML 在确定 SRT 模式时尽早调用，提前预热解码器/编码器（消除首屏卡 3.3s）。进程级只跑一次。
     Q_INVOKABLE void warmupSRT() { warmupDecoderEncoderAsync(); }
+
+    // ⭐ B 档统计（GStreamer 左上角面板用；数据复用现有内部统计，每秒在统计定时器刷新到 atomic 快照，
+    //   QML 用 1s Timer 轮询读取，避免跨线程 NOTIFY）。
+    Q_INVOKABLE int statJitterMs() const { return m_statJitterMs.load(); }          // 抖动 EMA(ms)
+    Q_INVOKABLE int statPliCount() const { return m_statPli.load(); }               // 累计 PLI 请求数
+    Q_INVOKABLE int statStallSeconds() const { return m_noFpsSeconds.load(); }      // 连续 0fps 秒数（卡顿）
+    Q_INVOKABLE int statNackPerSec() const { return m_statNackPerSec.load(); }      // 本秒 NACK 请求数
+    Q_INVOKABLE int statRtxOkPerSec() const { return m_statRtxOkPerSec.load(); }    // 本秒重传补回数
+    Q_INVOKABLE int statLostPerSec() const { return m_statLostPerSec.load(); }      // 本秒丢包数
+    Q_INVOKABLE double statLossPct() const { return m_statLossPctX100.load() / 100.0; } // 丢包率%
+    Q_INVOKABLE int statQueueDepth() const { return m_statQueueDepth.load(); }      // 应用层抖动缓冲队列深度(帧)
+    // 仅表示连接模式（P2P 直连链路 / SRS 服务器中转），不代表 ICE 是否走 relay。
+    Q_INVOKABLE QString statConnMode() const { return m_useP2P ? QStringLiteral("P2P") : QStringLiteral("SRS"); }
+    // ⭐ 真实 ICE 线路（webrtcbin get-stats 读选中候选对的 local/remote candidate-type）
+    Q_INVOKABLE QString statRoute() const {
+        const int l = m_routeLocalCode.load(), r = m_routeRemoteCode.load();
+        if (l == 0 && r == 0) return QStringLiteral("探测中…");
+        if (l == 4 || r == 4) return QStringLiteral("中继(relay)");
+        return QStringLiteral("直连");
+    }
+    Q_INVOKABLE QString statRouteDetail() const {  // 例：本端 host / 远端 srflx
+        return QStringLiteral("本端 ") + iceCodeStr(m_routeLocalCode.load())
+             + QStringLiteral(" / 远端 ") + iceCodeStr(m_routeRemoteCode.load());
+    }
 private:
+    static QString iceCodeStr(int c) {
+        switch (c) { case 1: return QStringLiteral("host"); case 2: return QStringLiteral("srflx");
+                     case 3: return QStringLiteral("prflx"); case 4: return QStringLiteral("relay");
+                     default: return QStringLiteral("?"); }
+    }
+    static int iceCandTypeCode(const char *t) {
+        if (!t) return 0;
+        if (!qstrcmp(t, "host")) return 1; if (!qstrcmp(t, "srflx")) return 2;
+        if (!qstrcmp(t, "prflx")) return 3; if (!qstrcmp(t, "relay")) return 4; return 0;
+    }
+    // webrtcbin get-stats 异步回调：解析选中候选对的 local/remote candidate-type → 缓存到 m_routeLocalCode/m_routeRemoteCode
+    static void onWebRtcStatsReady(GstPromise *promise, gpointer userData);
     // SRT 专用：真正的 pipeline 创建+启动（重活），由 connectSRT 异步触发，避免冻结 GUI 首屏。
     void doConnectSRTPipeline();
     // 标记本次 SRT 连接会话，异步触发时校验是否已被新的连接/断开取代。
@@ -147,6 +192,12 @@ public:
     Q_INVOKABLE void setHue(double value);          // -1.0 ~ 1.0
     Q_INVOKABLE void setGamma(double value);        // 0.01 ~ 10.0
     Q_INVOKABLE void setAllImageParams(double brightness, double contrast, double saturation, double hue, double gamma);
+
+    // ⭐ Android 本地滤镜 sink：iOS 走设备端滤镜，Android 不支持滤镜 → 由 PC 端 GStreamer
+    //   videobalance/gamma 落地。像素处理在 GStreamer 管线线程完成，绝不占用 Qt 主线程
+    //   （此处仅做轻量 g_object_set 属性写入）。gamma<=0 表示保持不变。
+    Q_INVOKABLE void applyColorFilter(double brightness, double contrast, double saturation, double gamma);
+    Q_INVOKABLE void clearColorFilter();  // 复位中性（b=0, c=1, s=1, gamma=1）
     
     // ⭐ 配置fps（PC手动设置时调用，用于延迟计算）
     Q_INVOKABLE void setConfigFps(double fps);
@@ -290,7 +341,10 @@ private:
     static GstFlowReturn onH264FrameSample(GstAppSink *sink, gpointer userData);
     bool writeH264Frame(qint64 frameIndex, const QByteArray &data);
     void resetH264FrameState();
-    void cleanupH264FramesLocked();
+    // §23.11 P0-1：锁内只摘索引并返回待删文件路径，真正的 QFile::remove 由调用方
+    // 丢 QThreadPool 后台执行（removeH264FilesAsync），避免持锁/在主线程做批量磁盘删除。
+    QStringList cleanupH264FramesLocked();
+    static void removeH264FilesAsync(const QStringList &paths);
     bool isH264FrameProtectedLocked(qint64 frameIndex) const;
     void recomputeOldestH264FrameLocked();
     qint64 takePendingH264FrameIndex();
@@ -322,6 +376,7 @@ private:
     bool m_transceiverAdded = false;  // 防止重复添加 transceiver
     bool m_useWebRTC = false;  // 是否使用 WebRTC 模式
     bool m_useP2P = false;     // P2P 直连模式
+    bool m_useH265 = false;    // ⭐ H265 会话（仅 P2P；元素/关键帧/日志分派见 h265support.h）
     std::atomic<bool> m_kernelTestMode{false};   // 内核测试模式：GStreamer 完全让出 P2P
     QString m_pairedIosDeviceId;  // 配对的 iOS 设备 ID
 
@@ -339,8 +394,13 @@ private:
     bool m_srtInitialCropDone = false; // SRT 专用：首帧 gop_cache 历史帧是否已裁过一次
     bool m_p2pConnected = false;  // P2P ICE 连接是否已建立
     int m_iceRetryCount = 0;      // ICE 失败重试计数
+    // ⭐ 切网重协商防卡死：记住当前会话的远端 ice-ufrag。收到 ufrag 变化的 re-offer(已连接态)=
+    //   手机切网/ICE Restart，GStreamer webrtcbin 无法在旧实例上重启 ICE → 必须整体重建。
+    //   destroyPipeline 时清空（重建后的首个 fresh offer 不误判为重协商）。
+    QString m_currentRemoteIceUfrag;
     std::atomic<bool> m_waitingForP2POffer{false};  // 等待 iOS Offer
     std::atomic<int> m_p2pViewRequestRetryCount{0}; // WEBRTC_REQUEST 重发次数
+    QJsonArray m_p2pIceServers;   // §25.7e：connectP2P 传入的 ICE 服务器，供切中继重建 pipeline 复用
     // ICE 断线主动重连：epoch 让“DISCONNECTED 延迟检查”在期间状态已恢复时自动失效
     std::atomic<int> m_iceReconnectEpoch{0};
     bool m_iceReconnecting = false;                 // 是否正在主动重连（防重复触发）
@@ -353,6 +413,16 @@ private:
     std::atomic<int> m_srsRetryCount{0};  // 🔥 SRS 400错误重试计数
     QString m_pendingOfferSdp;  // 🔥 待重试的 Offer SDP
     std::atomic<int> m_noFpsSeconds{0};   // 🔥 连续0fps秒数（5秒自动断开）
+    // ⭐ B 档面板统计快照（每秒在统计定时器里刷新；atomic 供 QML 线程安全读取）
+    std::atomic<int> m_statJitterMs{0};
+    std::atomic<int> m_statPli{0};
+    std::atomic<int> m_statNackPerSec{0};
+    std::atomic<int> m_statRtxOkPerSec{0};
+    std::atomic<int> m_statLostPerSec{0};
+    std::atomic<int> m_statLossPctX100{0};
+    std::atomic<int> m_statQueueDepth{0};
+    std::atomic<int> m_routeLocalCode{0};   // 选中候选对本端类型 0未知/1host/2srflx/3prflx/4relay
+    std::atomic<int> m_routeRemoteCode{0};  // 选中候选对远端类型
     qint64 m_fpsAdjustCooldownMs{0};      // 🔥 手动调帧冷却期结束时间（防止误触发降帧）
     static constexpr int FPS_ADJUST_COOLDOWN_SEC = 5;   // 冷却5秒（配合送达率判断，不需要太长）
     
@@ -511,6 +581,7 @@ private:
     std::atomic<int> m_consecutiveGoodFrames{0};   // 🔥 连续正常帧计数（必须 >=5 才退出等待）
     qint64 m_lastKeyframeRequestMs = 0;            // 上次请求关键帧时间
     int m_pliRequestCount = 0;                     // PLI 请求计数
+    qint64 m_h265NoIrapPliMs = 0;                  // H265 无IRAP催帧节流（wait-for-keyframe 兜底放行后每秒催一次）
     gulong m_depayProbeId = 0;                     // 🔥 解码前 probe ID
     static constexpr int PLI_INTERVAL_WEAK_MS = 200;  // 弱网 PLI 间隔 200ms
     static constexpr int PLI_INTERVAL_NORMAL_MS = 500; // 正常 PLI 间隔 500ms

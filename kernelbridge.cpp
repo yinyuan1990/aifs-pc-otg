@@ -2,8 +2,14 @@
 #include "websocketclient.h"
 #include "httpclient.h"
 #include "webframesource.h"
+#include "p2ploguploader.h"
+#include "h265support.h"   // ⭐ H265 会话日志分流（nh_h265.txt / pc-web-p2p-h265）
 #include <QDebug>
 #include <QDateTime>
+#include <QFile>
+#include <QMutex>
+#include <QThreadPool>
+#include <QCoreApplication>
 
 KernelBridge::KernelBridge(QObject *parent)
     : QObject(parent)
@@ -115,6 +121,49 @@ void KernelBridge::notifyWheelZoom(double deltaY, double mouseX, double mouseY)
 void KernelBridge::log(const QString &msg)
 {
     qDebug().noquote() << "[KernelTest JS]" << msg;
+}
+
+void KernelBridge::kernelStat(const QString &line)
+{
+    // ⭐ 独立写 exe 同级 nh.txt：webview 内核每秒实时流快照 + 卡顿(FREEZE/STALL/LONGTASK/PRESENT GAP)事件。
+    //   QWebChannel 回调在 Qt 主线程执行——§23.17：文件写入挪单线程后台池（保序），
+    //   主线程只取时间戳+入队立即返回，磁盘忙时不再挂主线程（同 §23.11 phoenix 日志的治法）。
+    if (!QCoreApplication::instance()) return;
+    const QString ts = QDateTime::currentDateTime().toString("[hh:mm:ss.zzz] ");
+    const QString appDir = QCoreApplication::applicationDirPath();
+
+    // 单线程池：任务 FIFO 顺序执行，nh.txt 行序与调用序一致。
+    static QThreadPool *s_nhPool = []() {
+        auto *p = new QThreadPool();
+        p->setMaxThreadCount(1);
+        return p;
+    }();
+
+    // ⭐ H265 会话：网页内核日志本地写 nh_h265.txt、上报前缀带 -h265（与 H264 完全分开）
+    const bool h265 = H265Support::isActive();
+    s_nhPool->start([appDir, ts, line, h265]() {
+        QFile f(appDir + (h265 ? "/nh_h265.txt" : "/nh.txt"));
+        if (!f.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) return;
+        // ⭐ 进程内首次写入插一行会话分隔，避免多次运行的 STAT/FREEZE 混在一起、无法定位「这一次」的卡顿。
+        static bool s_sessionHeaderWritten = false;
+        if (!s_sessionHeaderWritten) {
+            s_sessionHeaderWritten = true;
+            const QByteArray hdr = QDateTime::currentDateTime()
+                                       .toString("[yyyy-MM-dd hh:mm:ss] === nh session start ===\n")
+                                       .toUtf8();
+            f.write(hdr);
+        }
+        f.write(ts.toUtf8());
+        f.write(line.toUtf8());
+        f.write("\n");
+        f.close();
+    });
+
+    // ⭐ 第二十二章：总后台「P2P日志」开关打开时，网页内核诊断行同步上报服务器
+    //   （按推流ID分流，前缀 pc-web-p2p；H265 会话 → pc-web-p2p-h265）。
+    //   append 只进内存缓冲（线程安全、无磁盘操作），主线程可直调。
+    P2PLogUploader::instance()->append(
+        H265Support::uploadPrefix(QStringLiteral("pc-web-p2p")), ts + line);
 }
 
 void KernelBridge::onWebrtcSignalingReceived(const QJsonObject &message)

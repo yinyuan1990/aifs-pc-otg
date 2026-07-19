@@ -7,8 +7,21 @@
 #include <QMutexLocker>
 #include <QTextStream>
 #include <QThread>
+#include <QThreadPool>
 
 static QMutex s_logMutex;
+
+// §23.19：写盘挪单线程后台池（FIFO 保序）。原来在调用线程同步 write+flush——截图链路
+// 在主线程调用多次，磁盘忙时单次 flush 可挂主线程数百 ms~1s（与 phoenix 日志 §23.11 同款）。
+static QThreadPool *captureLogPool()
+{
+    static QThreadPool *pool = []() {
+        auto *p = new QThreadPool();
+        p->setMaxThreadCount(1);
+        return p;
+    }();
+    return pool;
+}
 
 static QFile *debugLogFile()
 {
@@ -35,17 +48,19 @@ static QFile *debugLogFile()
 
 void captureDebugLog(const QString &tag, const QString &msg)
 {
-    QMutexLocker locker(&s_logMutex);
-    QFile *file = debugLogFile();
-    if (!file || !file->isOpen()) {
-        return;
-    }
-
-    QTextStream s(file);
-    s << QDateTime::currentDateTime().toString("[hh:mm:ss.zzz] ")
-      << "[" << tag << "][T" << captureDebugThreadTag() << "] "
-      << msg << "\n";
-    s.flush();
+    // 调用线程只做字符串拼接+入队（时间戳/线程号在调用时取，保真）；写盘在后台单线程。
+    const QString line = QDateTime::currentDateTime().toString("[hh:mm:ss.zzz] ")
+        + "[" + tag + "][T" + captureDebugThreadTag() + "] " + msg + "\n";
+    captureLogPool()->start([line]() {
+        QMutexLocker locker(&s_logMutex);
+        QFile *file = debugLogFile();
+        if (!file || !file->isOpen()) {
+            return;
+        }
+        QTextStream s(file);
+        s << line;
+        s.flush();
+    });
 }
 
 QString captureDebugThreadTag()

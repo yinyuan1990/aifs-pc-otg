@@ -16,11 +16,26 @@ WebFrameSource::WebFrameSource(QObject *parent)
     // 会话前缀：避免重启后旧帧文件与新索引串号。
     m_sessionPrefix = QDateTime::currentDateTime().toString("yyyyMMddHHmmss");
 
-    // 启动时清掉上次会话残留的 webframes（与 GstPlayer 初始化清目录一致）。
-    QDir dir(m_frameDir);
-    const QStringList stale = dir.entryList(QStringList() << "*.jpg", QDir::Files);
-    for (const QString &f : stale) {
-        QFile::remove(dir.filePath(f));
+    // §23.17：写盘/删文件专用单线程（保序）。主线程（QWebChannel 回调）不再碰磁盘。
+    m_ioPool.setMaxThreadCount(1);
+
+    // §23.17：启动清理挪后台——原来在主线程枚举+逐个删除全部旧 .jpg（与 createH264FrameBranch
+    //   同款冻结源）。只删「非本会话前缀」文件，与本会话并发写入天然无冲突。
+    {
+        const QString dir = m_frameDir;
+        const QString keepPrefix = m_sessionPrefix + QStringLiteral("_");
+        m_ioPool.start([dir, keepPrefix]() {
+            QDir frameDir(dir);
+            const QStringList stale = frameDir.entryList(QStringList() << "*.jpg", QDir::Files);
+            int removed = 0;
+            for (const QString &f : stale) {
+                if (f.startsWith(keepPrefix)) continue;
+                if (frameDir.remove(f)) removed++;
+            }
+            if (removed > 0) {
+                qDebug() << "🗑️ WebFrameSource: 后台清理上一会话残留" << removed << "个 .jpg";
+            }
+        });
     }
 
     qDebug() << "✅ WebFrameSource ready, dir:" << m_frameDir << "prefix:" << m_sessionPrefix;
@@ -28,6 +43,8 @@ WebFrameSource::WebFrameSource(QObject *parent)
 
 WebFrameSource::~WebFrameSource()
 {
+    // 等后台写盘任务排干，防任务回身摸已销毁的 this。
+    m_ioPool.waitForDone(3000);
 }
 
 QString WebFrameSource::framePath(qint64 frameIndex) const
@@ -60,46 +77,68 @@ qint64 WebFrameSource::pushJpegFrame(const QByteArray &jpeg, qint64 frameIndex)
         }
     }
 
-    // 落盘（原子写：tmp → rename），与 GstPlayer::writeH264Frame 同口径。
-    QDir().mkpath(m_frameDir);
-    const QString path = framePath(idx);
-    const QString tmpPath = path + ".tmp";
-    QFile::remove(tmpPath);
-    {
-        QFile file(tmpPath);
-        if (!file.open(QIODevice::WriteOnly)) {
-            qWarning() << "WebFrameSource: open tmp fail" << tmpPath;
-            return -1;
-        }
-        if (file.write(jpeg) != jpeg.size()) {
-            file.close();
-            QFile::remove(tmpPath);
-            return -1;
-        }
-        file.close();
-    }
-    QFile::remove(path);
-    if (!QFile::rename(tmpPath, path)) {
+    // §23.17：写盘+JPEG解码+清理整体挪单线程后台——本函数在 Qt 主线程（QWebChannel 回调）
+    //   被调，原来每帧 4 次文件系统操作 + 整帧 JPEG 解码全在主线程，磁盘忙时同款冻结。
+    //   单线程池保序；h264FrameStored 在写盘成功后从后台线程发出（消费侧 CaptureManager/
+    //   SlowMotionPlayer 均为 QueuedConnection，跨线程安全）。
+    const int gen = m_generation.load(std::memory_order_acquire);
+    m_ioPool.start([this, jpeg, idx, gen]() {
+        // 落盘（原子写：tmp → rename），与 GstPlayer::writeH264Frame 同口径。
+        const QString path = framePath(idx);
+        const QString tmpPath = path + ".tmp";
         QFile::remove(tmpPath);
-        return -1;
-    }
-
-    {
-        QMutexLocker lock(&m_mutex);
-        m_available.insert(idx);
-        const qint64 oldNewest = m_newest.load(std::memory_order_acquire);
-        if (idx > oldNewest) m_newest.store(idx, std::memory_order_release);
-        if (m_oldest.load(std::memory_order_acquire) < 0) {
-            m_oldest.store(idx, std::memory_order_release);
+        {
+            QFile file(tmpPath);
+            if (!file.open(QIODevice::WriteOnly)) {
+                QDir().mkpath(m_frameDir);   // 目录被外力删除时兜底重建再试一次
+                if (!file.open(QIODevice::WriteOnly)) {
+                    qWarning() << "WebFrameSource: open tmp fail" << tmpPath;
+                    return;
+                }
+            }
+            if (file.write(jpeg) != jpeg.size()) {
+                file.close();
+                QFile::remove(tmpPath);
+                return;
+            }
+            file.close();
         }
-        // 缓存最近一帧供 grabCurrentFrame 兜底（轻量：只在解析成功时存）。
-        QImage img;
-        if (img.loadFromData(jpeg, "JPEG")) m_lastFrame = img;
+        QFile::remove(path);
+        if (!QFile::rename(tmpPath, path)) {
+            QFile::remove(tmpPath);
+            return;
+        }
 
-        cleanupFramesLocked();
-    }
+        // reset() 已换代：这帧属于上一场，删掉落盘文件、不入索引。
+        if (gen != m_generation.load(std::memory_order_acquire)) {
+            QFile::remove(path);
+            return;
+        }
 
-    emit h264FrameStored(idx);
+        QStringList doomed;
+        {
+            QMutexLocker lock(&m_mutex);
+            m_available.insert(idx);
+            const qint64 oldNewest = m_newest.load(std::memory_order_acquire);
+            if (idx > oldNewest) m_newest.store(idx, std::memory_order_release);
+            if (m_oldest.load(std::memory_order_acquire) < 0) {
+                m_oldest.store(idx, std::memory_order_release);
+            }
+            // 缓存最近一帧供 grabCurrentFrame 兜底（轻量：只在解析成功时存）。
+            QImage img;
+            if (img.loadFromData(jpeg, "JPEG")) m_lastFrame = img;
+
+            doomed = cleanupFramesLocked();
+        }
+        // 滚动清理的文件删除在锁外做（本来就在后台 IO 线程，顺手删）。
+        for (const QString &p : doomed) {
+            QFile::remove(p);
+            QFile::remove(p + ".tmp");
+        }
+
+        emit h264FrameStored(idx);
+    });
+
     return idx;
 }
 
@@ -113,18 +152,38 @@ int WebFrameSource::registerH264ValidRange(qint64 start, qint64 end)
 
 void WebFrameSource::updateH264ValidRange(int id, qint64 start, qint64 end)
 {
-    QMutexLocker lock(&m_mutex);
-    if (m_validRanges.contains(id)) {
-        m_validRanges[id] = qMakePair(start, end);
-        cleanupFramesLocked();
+    QStringList doomed;
+    {
+        QMutexLocker lock(&m_mutex);
+        if (m_validRanges.contains(id)) {
+            m_validRanges[id] = qMakePair(start, end);
+            doomed = cleanupFramesLocked();
+        }
     }
+    removeFilesAsync(doomed);
 }
 
 void WebFrameSource::unregisterH264ValidRange(int id)
 {
-    QMutexLocker lock(&m_mutex);
-    m_validRanges.remove(id);
-    cleanupFramesLocked();
+    QStringList doomed;
+    {
+        QMutexLocker lock(&m_mutex);
+        m_validRanges.remove(id);
+        doomed = cleanupFramesLocked();
+    }
+    removeFilesAsync(doomed);
+}
+
+// §23.17：批量文件删除统一走后台 IO 线程（主线程调用方零磁盘操作）。
+void WebFrameSource::removeFilesAsync(const QStringList &paths)
+{
+    if (paths.isEmpty()) return;
+    m_ioPool.start([paths]() {
+        for (const QString &p : paths) {
+            QFile::remove(p);
+            QFile::remove(p + ".tmp");
+        }
+    });
 }
 
 QImage WebFrameSource::grabCurrentFrame()
@@ -135,6 +194,9 @@ QImage WebFrameSource::grabCurrentFrame()
 
 void WebFrameSource::reset()
 {
+    // §23.17：换代——在飞的写盘任务完成时发现代际已变，自行丢弃，不会把旧场帧写回索引。
+    m_generation.fetch_add(1, std::memory_order_acq_rel);
+
     QStringList toDelete;
     {
         QMutexLocker lock(&m_mutex);
@@ -147,9 +209,14 @@ void WebFrameSource::reset()
         m_newest.store(-1, std::memory_order_release);
         m_lastFrame = QImage();
     }
-    for (const QString &p : toDelete) {
-        QFile::remove(p);
-        QFile::remove(p + ".tmp");
+    // §23.17：文件删除挪后台 IO 线程（reset 由主线程调，批量删除同款冻结源）。
+    if (!toDelete.isEmpty()) {
+        m_ioPool.start([toDelete]() {
+            for (const QString &p : toDelete) {
+                QFile::remove(p);
+                QFile::remove(p + ".tmp");
+            }
+        });
     }
 }
 
@@ -174,15 +241,19 @@ void WebFrameSource::recomputeOldestLocked()
     m_oldest.store(oldest, std::memory_order_release);
 }
 
-void WebFrameSource::cleanupFramesLocked()
+QStringList WebFrameSource::cleanupFramesLocked()
 {
+    // §23.17：锁内只摘索引并返回待删路径，文件删除由调用方在锁外（后台 IO 线程）执行，
+    //   避免持锁做磁盘操作（updateH264ValidRange/unregisterH264ValidRange 可能在主线程调进来）。
+    QStringList doomedPaths;
+
     const qint64 newest = m_newest.load(std::memory_order_acquire);
-    if (newest < 0) return;
+    if (newest < 0) return doomedPaths;
 
     const qint64 cleanupBelow = newest - FRAME_KEEP_COUNT;
     const qint64 safeBelow = newest - SAFETY_MARGIN;
     const qint64 cutoff = qMin(cleanupBelow, safeBelow);
-    if (cutoff < 0) return;
+    if (cutoff < 0) return doomedPaths;
 
     QList<qint64> toRemove;
     for (qint64 idx : m_available) {
@@ -192,12 +263,12 @@ void WebFrameSource::cleanupFramesLocked()
     }
 
     for (qint64 idx : toRemove) {
-        QFile::remove(framePath(idx));
-        QFile::remove(framePath(idx) + ".tmp");
+        doomedPaths << framePath(idx);
         m_available.remove(idx);
     }
 
     if (!toRemove.isEmpty()) {
         recomputeOldestLocked();
     }
+    return doomedPaths;
 }

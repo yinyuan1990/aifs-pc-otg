@@ -1,0 +1,37 @@
+#pragma code_page(65001)
+#include <windows.h>
+
+// 复用主程序图标（相对本 .rc 文件所在目录 zjc_worker/ → 上一级 images/icon.ico）
+IDI_ICON1 ICON "../images/icon.ico"
+
+// 版本信息：UAC 提权弹窗「想要更改你的计算机」显示的程序名 = FileDescription。
+// 未签名 exe 会显示「发布者：未知」，但程序名可通过 FileDescription 显示为「金凤凰」。
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION 1,0,1,0
+ PRODUCTVERSION 1,0,1,0
+ FILEFLAGSMASK 0x3fL
+ FILEFLAGS 0x0L
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_APP
+ FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        // 0804 = 简体中文(PRC)，04b0 = Unicode(1200) 代码页
+        BLOCK "080404b0"
+        BEGIN
+            VALUE "CompanyName",      "金凤凰"
+            VALUE "FileDescription",  "金凤凰"
+            VALUE "FileVersion",      "1.0.1.0"
+            VALUE "InternalName",     "zjc_worker"
+            VALUE "OriginalFilename", "zjc_worker.exe"
+            VALUE "ProductName",      "金凤凰"
+            VALUE "ProductVersion",   "1.0.1.0"
+            VALUE "LegalCopyright",   "金凤凰"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x804, 1200
+    END
+END

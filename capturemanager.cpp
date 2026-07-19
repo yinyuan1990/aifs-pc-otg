@@ -5,6 +5,7 @@
 #include "webframesource.h"
 #include "capturedebuglog.h"
 #include <QtConcurrent>
+#include <QThreadPool>
 #include <QStandardPaths>
 #include <QCoreApplication>
 #include <QElapsedTimer>
@@ -473,6 +474,10 @@ CaptureManager::CaptureManager(QObject *parent)
     loadSettings();
     ensureCapturesDir();
 
+    // §2026-07-19：帧解码专用单线程池（FIFO；单线程=天然把解码/换图节奏限到机器能力内，
+    //   不再堵 QtConcurrent 全局池、不再多线程抢 m_decodeMutex）
+    m_decodePool.setMaxThreadCount(1);
+
     // 后台 NALU 落盘线程（跨线程信号自动走 QueuedConnection 回到主线程）
     m_diskWriter = new NaluDiskWriter(this);
     connect(m_diskWriter, &NaluDiskWriter::batchWritten,
@@ -489,6 +494,10 @@ CaptureManager::CaptureManager(QObject *parent)
 
 CaptureManager::~CaptureManager()
 {
+    // 解码任务捕获了 this，必须先等在飞任务结束（同 WebFrameSource §23.17 做法）
+    m_decodePool.clear();
+    m_decodePool.waitForDone(3000);
+
     if (m_diskWriter) {
         m_diskWriter->stop();  // 子对象析构时会 wait()，这里先唤醒退出
     }
@@ -511,16 +520,54 @@ void CaptureManager::setAiCardZoomEnabled(bool enabled)
         ensureCardDetector();
     emit aiCardZoomEnabledChanged();
     qDebug() << "🃏 AI牌位置放大:" << (enabled ? "开启" : "关闭");
+    aiZoomLog(QString("🃏 自动放大开关: %1 (每帧独立识别：滚动到哪帧就识别哪帧)")
+                  .arg(enabled ? "开启" : "关闭"));
 
-    // 关闭时通知 QML 复位所有放大
+    // 关闭时通知 QML 复位所有放大，并清掉每个 item 的每帧识别缓存
     if (!enabled) {
-        for (int i = 0; i < m_items.size(); ++i)
+        for (int i = 0; i < m_items.size(); ++i) {
+            m_items[i].aiFrames.clear();
             emit cardZoomCleared(i);
+        }
     } else {
-        // 开启时立即对当前 item 的当前帧识别一次
-        if (m_currentItemIndex >= 0 && m_currentItemIndex < m_items.size())
-            requestCardDetect(m_currentItemIndex, m_items[m_currentItemIndex].currentOffset);
+        // 开启时立即对当前 item 正显示的那一帧识别一次（每帧模式）
+        if (m_currentItemIndex >= 0 && m_currentItemIndex < m_items.size()) {
+            const int off = m_items[m_currentItemIndex].currentOffset;
+            m_aiPendingCaptureItem = m_currentItemIndex;
+            m_aiPendingCaptureFrame = off;
+            requestCardDetect(m_currentItemIndex, off);
+        }
     }
+}
+
+QVariantMap CaptureManager::aiZoomForFrame(int itemIndex, int frameOffset) const
+{
+    QVariantMap r;
+    r["valid"] = false;
+    // anchored 保留字段名以兼容 QML；每帧模式下恒为 false → 未识别帧由 QML 保持上一帧放大(keep_prev)。
+    r["anchored"] = false;
+    if (!m_aiCardZoomEnabled) return r;
+    if (itemIndex < 0 || itemIndex >= m_items.size()) return r;
+    const CaptureItem &item = m_items[itemIndex];
+    if (item.aiDisabled) return r;                       // §19 该格被标记识别失败 → 不放大
+
+    auto it = item.aiFrames.constFind(frameOffset);
+    if (it == item.aiFrames.constEnd() || !it.value().valid)
+        return r;                                        // 该帧尚未识别/未检出 → keep_prev
+
+    const AiFrameZoom &z = it.value();
+    r["valid"] = true;
+    r["zoom"]  = z.zoom;
+    // §26-② 旋转错位修复：cx/cy 存的是「识别那一刻旋转角」空间的坐标；用户切旋转后
+    // 帧图按新角度重新解码显示，这里把坐标旋转到当前空间（δ=顺时针补转角，归一化坐标系）。
+    double cx = z.cx, cy = z.cy;
+    const int delta = ((m_videoRotation - z.rotation) % 360 + 360) % 360;
+    if (delta == 90)       { const double t = cx; cx = 1.0 - cy; cy = t; }
+    else if (delta == 180) { cx = 1.0 - cx; cy = 1.0 - cy; }
+    else if (delta == 270) { const double t = cx; cx = cy; cy = 1.0 - t; }
+    r["cx"]    = cx;
+    r["cy"]    = cy;
+    return r;
 }
 
 void CaptureManager::ensureCardDetector()
@@ -560,26 +607,86 @@ void CaptureManager::ensureCardDetector()
     });
 }
 
-void CaptureManager::requestCardDetect(int itemIndex, int frameOffset)
+void CaptureManager::requestCardDetect(int itemIndex, int frameOffset, int attempt)
 {
-    if (!m_aiCardZoomEnabled || !m_cardDetector || !m_cardDetector->isReady())
+    if (!m_aiCardZoomEnabled)
         return;
+    if (!m_cardDetector || !m_cardDetector->isReady()) {
+        aiZoomLog(QString("⛔ 跳过识别: 检测器未就绪(模型未加载?) itemIndex=%1 frameOffset=%2")
+                      .arg(itemIndex).arg(frameOffset));
+        return;
+    }
     if (itemIndex < 0 || itemIndex >= m_items.size())
         return;
 
     // 只处理"这一张"：取当前帧 QImage（已有内存/磁盘解码与缓存），深拷贝交给后台线程
     QImage img = getFrameImage(itemIndex, frameOffset);
-    if (img.isNull())
+    if (img.isNull()) {
+        aiZoomLog(QString("⛔ 取帧图像为空(未解码就绪) itemIndex=%1 frameOffset=%2 第%3次尝试")
+                      .arg(itemIndex).arg(frameOffset).arg(attempt + 1));
+        // 重挂 pending：frameImageReady(该帧解码就绪) 到达时会再触发一次识别
+        m_aiPendingCaptureItem = itemIndex;
+        m_aiPendingCaptureFrame = frameOffset;
+        // ⭐ 限次定时重试兜底：截图瞬间事件帧可能还没落盘，首次解码任务会在文件写入前
+        //   抢跑失败（decodeFromDisk 返回空 → 不发 frameImageReady），而 onBatchWritten 的
+        //   补解码又可能因同 key 任务仍在飞被 scheduleFrameDecode 静默丢弃 → 该格识别
+        //   永远不触发（= "同一位置偶尔 1 张识别不了"的逻辑空窗）。这里不依赖任何信号，
+        //   每 150ms 主动重试一次（getFrameImage 每次都会重新调度解码），最多 ~1.8s。
+        static constexpr int MAX_DETECT_ATTEMPTS = 12;
+        if (attempt < MAX_DETECT_ATTEMPTS) {
+            QTimer::singleShot(150, this, [this, itemIndex, frameOffset, attempt]() {
+                // pending 已被清（frameImageReady 已补触发）或被新截图顶掉 → 不再重试
+                if (m_aiPendingCaptureItem == itemIndex && m_aiPendingCaptureFrame == frameOffset)
+                    requestCardDetect(itemIndex, frameOffset, attempt + 1);
+            });
+        } else {
+            aiZoomLog(QString("🛑 放弃识别: 重试%1次后取帧仍为空(解码/落盘异常) itemIndex=%2 frameOffset=%3")
+                          .arg(MAX_DETECT_ATTEMPTS).arg(itemIndex).arg(frameOffset));
+        }
         return;
+    }
+    // 提交成功 → 清 pending，避免 frameImageReady 再补触发一次重复推理
+    if (m_aiPendingCaptureItem == itemIndex && m_aiPendingCaptureFrame == frameOffset) {
+        m_aiPendingCaptureItem = -1;
+        m_aiPendingCaptureFrame = -1;
+    }
+    aiZoomLog(QString("📤 提交识别: itemIndex=%1 frameOffset=%2 图像=%3x%4%5")
+                  .arg(itemIndex).arg(frameOffset).arg(img.width()).arg(img.height())
+                  .arg(attempt > 0 ? QString(" (第%1次尝试才取到帧)").arg(attempt + 1) : QString()));
     m_cardDetector->submit(itemIndex, frameOffset, img);
 }
 
 void CaptureManager::onCardDetected(int itemIndex, int frameOffset, CardBox box, int origW, int origH)
 {
-    if (!m_aiCardZoomEnabled)
+    if (!m_aiCardZoomEnabled) {
+        aiZoomLog(QString("⚠️ 识别结果被丢弃: AI已关闭 itemIndex=%1 frameOffset=%2").arg(itemIndex).arg(frameOffset));
         return;
+    }
+    if (itemIndex < 0 || itemIndex >= m_items.size()) {
+        // item 在推理期间被删除/清空 → 结果无处安放（若频繁出现=索引漂移问题）
+        aiZoomLog(QString("⚠️ 识别结果被丢弃: item已不存在 itemIndex=%1 (当前共%2格) frameOffset=%3")
+                      .arg(itemIndex).arg(m_items.size()).arg(frameOffset));
+        return;
+    }
+
+    CaptureItem &item = m_items[itemIndex];
+
+    // §19：该格被用户拖动标记为识别失败 → 忽略后续所有识别结果
+    if (item.aiDisabled) {
+        aiZoomLog(QString("⚠️ 识别结果被丢弃: 该格已标记识别失败 itemIndex=%1 frameOffset=%2").arg(itemIndex).arg(frameOffset));
+        return;
+    }
+
+    // 该帧未识别到牌 → keep_prev：不改动该帧显示（保持上一帧放大），也不缓存结果。
     if (!box.valid || origW <= 0 || origH <= 0) {
-        emit cardZoomCleared(itemIndex);
+        // conf 现在=全体候选最高分（含低于阈值 0.5 的）：
+        //   conf≈0.4x = 模型临界抖动(差一点过阈值，属模型问题，可考虑降阈值/补训练)
+        //   conf≈0.0x = 该帧画面确实没识别到牌(取错帧/画面异常)
+        aiZoomLog(QString("❌ 识别失败: itemIndex=%1 frameOffset=%2 原因=%3 (最高conf=%4 阈值=0.5 原图=%5x%6 推理耗时=%7ms) → 保持上一帧放大")
+                      .arg(itemIndex).arg(frameOffset)
+                      .arg(!box.valid ? "未检出牌(全部候选低于阈值)" : "原图尺寸无效")
+                      .arg(QString::number(box.confidence, 'f', 3))
+                      .arg(origW).arg(origH).arg(box.inferMs));
         return;
     }
 
@@ -593,7 +700,26 @@ void CaptureManager::onCardDetected(int itemIndex, int frameOffset, CardBox box,
     nx = qBound(0.0, nx, 1.0);
     ny = qBound(0.0, ny, 1.0);
 
-    emit cardZoomReady(itemIndex, frameOffset, m_aiZoomScale, nx, ny);
+    // ── 每帧独立：把该帧的识别结果缓存到 aiFrames[frameOffset] ──
+    AiFrameZoom z;
+    z.valid = true;
+    z.zoom = m_aiZoomScale;
+    z.cx = nx;
+    z.cy = ny;
+    z.rotation = m_videoRotation;  // §26-②：坐标属于当前旋转空间，记录供切旋转后换算
+    item.aiFrames.insert(frameOffset, z);
+
+    aiZoomLog(QString("✅ 识别成功: itemIndex=%1 frameOffset=%2 conf=%3 候选数=%4 推理耗时=%5ms 牌中心(归一化)=(%6,%7) 放大=%8x 旋转=%9°")
+                  .arg(itemIndex).arg(frameOffset)
+                  .arg(QString::number(box.confidence, 'f', 3))
+                  .arg(box.candidates).arg(box.inferMs)
+                  .arg(QString::number(nx, 'f', 3)).arg(QString::number(ny, 'f', 3))
+                  .arg(QString::number(m_aiZoomScale, 'f', 1))
+                  .arg(m_videoRotation));
+
+    // 只对当前正显示的那一帧立即放大（识别的是哪帧、结果就用在哪帧）
+    if (item.currentOffset == frameOffset)
+        emit cardZoomReady(itemIndex, frameOffset, m_aiZoomScale, nx, ny);
 }
 
 void CaptureManager::ensureCapturesDir()
@@ -615,7 +741,7 @@ void CaptureManager::loadSettings()
     m_gridCols = qBound(1, m_gridCols, MAX_GRID_SIZE);
     m_preFrameCount = qBound(10, m_preFrameCount, MAX_PRE_POST_FRAMES);
     m_postFrameCount = qBound(10, m_postFrameCount, MAX_PRE_POST_FRAMES);
-    
+
     // 相机设定
     m_brightness = m_settings->value("camera/brightness", DEFAULT_BRIGHTNESS).toDouble();
     m_contrast = m_settings->value("camera/contrast", DEFAULT_CONTRAST).toDouble();
@@ -857,7 +983,16 @@ void CaptureManager::checkPendingCaptures(qint64 frameIndex)
 
 void CaptureManager::capture()
 {
-    
+    // ⭐ 2026-07-19：截图节流（按住空格 = 键盘自动重复 ~30 次/s，低端机主线程被
+    //   item 创建+grid 重排+解码+纹理上传顶死 → 实时流卡）。8 张/s 上限，快于人手连点。
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+    if (m_lastCaptureMs > 0 && nowMs - m_lastCaptureMs < MIN_CAPTURE_INTERVAL_MS) {
+        captureDebugLog("CAP", QString("capture throttled (%1ms < %2ms)")
+            .arg(nowMs - m_lastCaptureMs).arg(MIN_CAPTURE_INTERVAL_MS));
+        return;
+    }
+    m_lastCaptureMs = nowMs;
+
     qint64 eventIndex = -1;
     
     qDebug() << "📷 Capture: slowMotionActive=" << m_slowMotionActive
@@ -903,11 +1038,13 @@ void CaptureManager::capture()
         return;
     }
 
-    if (m_frameSource) {
-        m_frameSource->requestKeyFrame();
-        captureDebugLog("CAP", "requestKeyFrame before capture");
-    }
-    
+    // ⭐ 连续截图卡实时流修复（2026-07-19）：去掉「截图前发 PLI」。
+    //   这是旧方案（截图直存流上 NALU，需 IDR 才能起解）的遗留——改成「解码后重编码、
+    //   每帧独立 IDR 的 .h264 文件」后，截图/慢放解码完全不依赖网络流关键帧。
+    //   而 PLI 节流窗仅 200ms，连点截图会逼推流端每 200ms 出一个大 IDR：
+    //   码率/包突发 → jitterbuffer 抖动 → 实时流一顿一顿（且影响所有观看端）。
+    //   花屏场景的 PLI 自愈仍由 gstplayer 的坏帧/无帧检测路径负责，与截图无关。
+
     if (m_items.size() >= MAX_ITEMS) {
         removeOldest();
     }
@@ -961,15 +1098,12 @@ void CaptureManager::capture()
         item.h264ValidRangeId = m_frameSource->registerH264ValidRange(startIndex, endIndex);
     }
 
-    // 直接抓取当前直播画面（仅用于抓拍缩略/首屏兜底，不作为目标帧解码 fallback）
-    if (m_frameSource) {
-        item.liveSnapshot = m_frameSource->grabCurrentFrame();
-    }
-    if (!item.liveSnapshot.isNull() && m_videoRotation != 0) {
-        QTransform transform;
-        transform.rotate(m_videoRotation);
-        item.liveSnapshot = item.liveSnapshot.transformed(transform, Qt::FastTransformation);
-    }
+    // ⭐ 连续截图卡实时流修复（2026-07-19）：去掉 liveSnapshot 抓取。
+    //   原来每次截图在主线程做整帧 BGRA 拷贝（1080p≈8MB、4K≈33MB）+ 旋转时再 transformed
+    //   一次，但 liveSnapshot 自「独立全-I .h264 文件」重构后全工程无任何读取方（死代码）；
+    //   除每击 5~50ms 主线程开销外，每个 item 还常驻一张全分辨率 QImage——连拍几十张
+    //   即数百 MB~GB 级内存，内存压力反过来造成整机停顿。缩略图本就走 image://capture
+    //   的异步解码路径，不需要这份快照。
 
     m_items.append(item);
     int newIndex = m_items.size() - 1;
@@ -982,12 +1116,22 @@ void CaptureManager::capture()
     emit countChanged();
     emit itemAdded(newIndex);
     emit captureComplete(newIndex);
+    {
+        QMutexLocker lock(&m_decodeMutex);
+        m_wantedOffset[newIndex] = item.currentOffset;
+    }
     scheduleFrameDecode(newIndex, item.currentOffset);
 
     // ⭐ AI 牌位置识别：对截图的事件帧识别一次（异步、后台线程，不卡实时流）
     //   事件帧此刻可能还没解码好 → 标记 pending，等 frameImageReady 再触发；
     //   若已缓存则 requestCardDetect 立即就能拿到图直接识别。
     if (m_aiCardZoomEnabled) {
+        // 链路起点埋点：每次截图一行，与后续 提交识别/识别成功/识别失败 对账，
+        // 哪一张"消失"了（截图有、提交没有）一眼可见
+        aiZoomLog(QString("📸 截图: itemIndex=%1 id=%2 eventOffset=%3 总帧数=%4 事件帧已缓存=%5")
+                      .arg(newIndex).arg(item.id).arg(item.currentOffset)
+                      .arg(item.totalFrames())
+                      .arg(isFrameCached(newIndex, item.currentOffset) ? "是" : "否(等解码)"));
         m_aiPendingCaptureItem = newIndex;
         m_aiPendingCaptureFrame = item.currentOffset;
         requestCardDetect(newIndex, item.currentOffset);
@@ -1100,7 +1244,10 @@ QImage CaptureManager::decodeFromDisk(int itemIndex, int frameOffset)
 
 void CaptureManager::evictFrameCache()
 {
-    while (m_frameCache.size() >= MAX_FRAME_CACHE) {
+    // ⭐ 2026-07-19：张数上限之外加字节预算（全分辨率帧 4K≈33MB/张，纯按张数封顶
+    //   会吃掉数 GB 内存，低端机换页→整机停顿→实时流卡）
+    while (m_frameCache.size() > 1
+           && (m_frameCache.size() >= MAX_FRAME_CACHE || m_frameCacheBytes > MAX_FRAME_CACHE_BYTES)) {
         qint64 lruKey = -1;
         qint64 lruOrder = INT64_MAX;
         for (auto it = m_frameCache.begin(); it != m_frameCache.end(); ++it) {
@@ -1109,8 +1256,12 @@ void CaptureManager::evictFrameCache()
                 lruKey = it.key();
             }
         }
-        if (lruKey >= 0) m_frameCache.remove(lruKey);
-        else break;
+        if (lruKey >= 0) {
+            m_frameCacheBytes -= m_frameCache[lruKey].image.sizeInBytes();
+            m_frameCache.remove(lruKey);
+        } else {
+            break;
+        }
     }
 }
 
@@ -1138,8 +1289,10 @@ void CaptureManager::clearAll()
     {
         QMutexLocker decodeLock(&m_decodeMutex);
         m_frameCache.clear();
+        m_frameCacheBytes = 0;
         m_frameCacheCounter = 0;
         m_pendingDecodes.clear();
+        m_wantedOffset.clear();
         for (auto &state : m_itemDecoders) delete state.decoder;
         m_itemDecoders.clear();
     }
@@ -1177,11 +1330,14 @@ void CaptureManager::removeItem(int index)
         }
         for (auto it = m_frameCache.begin(); it != m_frameCache.end(); ) {
             if (static_cast<int>(it.key() / 100000) == index) {
+                m_frameCacheBytes -= it.value().image.sizeInBytes();
                 it = m_frameCache.erase(it);
             } else {
                 ++it;
             }
         }
+        // item 索引整体前移，按旧索引记的「想看的帧」全部失效（只是预取提示，清掉即可）
+        m_wantedOffset.clear();
     }
 
     QString dirToDelete = m_items[index].naluDir;
@@ -1269,6 +1425,13 @@ void CaptureManager::gotoFrame(int itemIndex, int frameOffset)
         }
     }
 
+    // ⭐ 2026-07-19：登记该 item 最新想看的帧——解码队列里偏离此帧 ±DECODE_KEEP_WINDOW
+    //   的陈旧任务出队时直接作废（快速滚动防积压）。
+    {
+        QMutexLocker lock(&m_decodeMutex);
+        m_wantedOffset[itemIndex] = frameOffset;
+    }
+
     emit frameChanged(itemIndex, frameOffset);
 
     scheduleFrameDecode(itemIndex, frameOffset);
@@ -1280,11 +1443,17 @@ void CaptureManager::gotoFrame(int itemIndex, int frameOffset)
         }
     }
 
-    // ⭐ AI 牌位置识别：滚动切帧时只识别"当前这一张"，带 80ms 防抖（连续滚动只算停下那帧）
-    if (m_aiCardZoomEnabled && m_aiDebounceTimer) {
-        m_aiPendingItem = itemIndex;
-        m_aiPendingFrame = frameOffset;
-        m_aiDebounceTimer->start();
+    // ⭐ AI 牌位置放大（2026-07-06 每帧识别）：滚动到某帧就对该帧推理。
+    //   已缓存过的帧无需重推（QML onCurrentFrameChanged 会直接查表应用）；
+    //   未缓存的帧挂 pending + 防抖 80ms（连续滚动只识别停下那帧），停下后 requestCardDetect。
+    if (m_aiCardZoomEnabled && itemIndex >= 0 && itemIndex < m_items.size()) {
+        const CaptureItem &it = m_items[itemIndex];
+        if (!it.aiDisabled && !it.aiFrames.contains(frameOffset)) {
+            m_aiPendingItem = itemIndex;
+            m_aiPendingFrame = frameOffset;
+            if (m_aiDebounceTimer)
+                m_aiDebounceTimer->start();
+        }
     }
 }
 
@@ -1312,9 +1481,15 @@ void CaptureManager::putFrameCache(int itemIndex, int frameOffset, const QImage 
 {
     if (img.isNull()) return;
 
-    evictFrameCache();
     const qint64 key = qint64(itemIndex) * 100000 + frameOffset;
+    auto oldIt = m_frameCache.find(key);
+    if (oldIt != m_frameCache.end()) {
+        m_frameCacheBytes -= oldIt.value().image.sizeInBytes();
+    }
     m_frameCache[key] = {img, ++m_frameCacheCounter};
+    m_frameCacheBytes += img.sizeInBytes();
+    // 先插入后逐出：新条目 accessOrder 最大，LRU 逐出永远轮不到它
+    evictFrameCache();
     m_cachedItemIndex = itemIndex;
     m_cachedFrameOffset = frameOffset;
     m_cachedRotation = m_videoRotation;
@@ -1344,11 +1519,23 @@ void CaptureManager::scheduleFrameDecode(int itemIndex, int frameOffset)
 
     const int gen = m_clearGeneration.load(std::memory_order_acquire);
 
-    (void)QtConcurrent::run([this, itemIndex, frameOffset, jobKey, gen]() {
+    // ⭐ 2026-07-19：改专用单线程池 + 出队时作废陈旧任务（见头文件 m_wantedOffset 注释）。
+    //   快速滚动时积压的「早已滚过去的帧」在这里被微秒级跳过，不再全分辨率解码+换图，
+    //   解码/纹理上传只跟得上机器能力，实时流（同主线程/渲染线程）不再被拖卡。
+    m_decodePool.start([this, itemIndex, frameOffset, jobKey, gen]() {
         if (m_clearGeneration.load(std::memory_order_acquire) != gen) {
             QMutexLocker lock(&m_decodeMutex);
             m_pendingDecodes.remove(jobKey);
             return;
+        }
+
+        {
+            QMutexLocker lock(&m_decodeMutex);
+            const int wanted = m_wantedOffset.value(itemIndex, frameOffset);
+            if (qAbs(frameOffset - wanted) > DECODE_KEEP_WINDOW) {
+                m_pendingDecodes.remove(jobKey);
+                return;   // 用户已滚到别处，此帧作废
+            }
         }
 
         const QImage img = decodeFromDisk(itemIndex, frameOffset);
@@ -1454,6 +1641,7 @@ void CaptureManager::setVideoRotation(int rotation)
         {
             QMutexLocker decodeLock(&m_decodeMutex);
             m_frameCache.clear();
+            m_frameCacheBytes = 0;
             m_frameCacheCounter = 0;
         }
         emit videoRotationChanged();
@@ -1676,21 +1864,76 @@ void CaptureManager::resetCameraSettings()
     qDebug() << "Camera: settings reset to default";
 }
 
+// §23.19：zp.txt / ai_zoom.txt 写盘统一挪单线程后台池（FIFO 保序）。
+// 两个日志的调用方都在主线程（滚轮缩放 / 截图点击），原同步 write+flush 磁盘忙时会挂主线程。
+static QThreadPool *diagTxtLogPool()
+{
+    static QThreadPool *pool = []() {
+        auto *p = new QThreadPool();
+        p->setMaxThreadCount(1);
+        return p;
+    }();
+    return pool;
+}
+
 void CaptureManager::zoomLog(const QString &msg)
 {
-    // 写入缩放调试日志到 zp.txt
-    static QFile file(QCoreApplication::applicationDirPath() + "/zp.txt");
-    static bool opened = false;
-    
-    if (!opened) {
-        opened = file.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text);
-    }
-    
-    if (file.isOpen()) {
-        QTextStream stream(&file);
-        stream << QDateTime::currentDateTime().toString("[hh:mm:ss.zzz] ") << msg << "\n";
-        stream.flush();
-    }
+    // 写入缩放调试日志到 zp.txt（主线程只拼行+入队，写盘在后台）
+    const QString line = QDateTime::currentDateTime().toString("[hh:mm:ss.zzz] ") + msg + "\n";
+    diagTxtLogPool()->start([line]() {
+        static QFile file(QCoreApplication::applicationDirPath() + "/zp.txt");
+        static bool opened = false;
+        if (!opened) {
+            opened = file.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text);
+        }
+        if (file.isOpen()) {
+            QTextStream stream(&file);
+            stream << line;
+            stream.flush();
+        }
+    });
+}
+
+void CaptureManager::aiZoomLog(const QString &msg)
+{
+    // 自动放大(AI 牌识别)专用调试日志，与 zp.txt 分开，便于排查"为什么识别失败"。
+    // ⭐ Append 追加 + 会话分隔行（原 Truncate 会在重启时把失败证据抹掉——
+    //   "偶尔 1 张识别不了"这类低频问题往往复现后先重启了程序，日志就没了）。
+    //   main.cpp 启动清日志白名单里也已移除 ai_zoom.txt。
+    // §23.19：写盘挪后台（截图点击路径在主线程调本函数，磁盘忙时同步 flush 会卡实时流）。
+    const QString line = QDateTime::currentDateTime().toString("[hh:mm:ss.zzz] ") + msg + "\n";
+    diagTxtLogPool()->start([line]() {
+        static QFile file(QCoreApplication::applicationDirPath() + "/ai_zoom.txt");
+        static bool opened = false;
+        if (!opened) {
+            opened = file.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text);
+            if (file.isOpen()) {
+                QTextStream s(&file);
+                s << QDateTime::currentDateTime().toString("[yyyy-MM-dd hh:mm:ss] ")
+                  << "=== 自动放大(AI) 会话开始 ===\n";
+                s.flush();
+            }
+        }
+        if (file.isOpen()) {
+            QTextStream stream(&file);
+            stream << line;
+            stream.flush();
+        }
+    });
+}
+
+void CaptureManager::markAiRecognitionFailed(int itemIndex)
+{
+    if (itemIndex < 0 || itemIndex >= m_items.size())
+        return;
+    CaptureItem &item = m_items[itemIndex];
+    // 已标记失败就无需重复处理（避免误把手动缩放也当识别失败刷日志）
+    if (item.aiDisabled)
+        return;
+    aiZoomLog(QString("🖐️ 用户拖动 → 标记识别失败: itemIndex=%1 (牌不在识别框内, 该格退回非自动放大, 清空每帧识别缓存)")
+                  .arg(itemIndex));
+    item.aiDisabled = true;
+    item.aiFrames.clear();
 }
 
 void CaptureManager::syncColorToJpegEncoder()
