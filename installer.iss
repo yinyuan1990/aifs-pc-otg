@@ -2,7 +2,11 @@
 ; 需要安装 Inno Setup: https://jrsoftware.org/isinfo.php
 
 #define MyAppName "Phoenix"
+; §43 版本号由 pack.bat 经 ISCC /DMyAppVersion=x.y.z 传入（源头=CMakeLists.txt 的 PHOENIX_APP_VERSION）
+; 未传时才用下面的兜底值
+#ifndef MyAppVersion
 #define MyAppVersion "1.0.0"
+#endif
 #define MyAppPublisher "Acard"
 #define MyAppExeName "Phoenix.exe"
 

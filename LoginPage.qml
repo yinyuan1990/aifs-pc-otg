@@ -29,6 +29,8 @@ Rectangle {
     property bool isLoggingIn: false
     property int loggingInLevel: 0  // 正在登录的等级：0=无, 1=豪华版, 2=至尊版
     property string loginError: ""
+    property string latestDownloadUrl: ""      // §44.3 最新版下载地址（公开接口获取）
+    property bool pendingDownloadOpen: false   // 点了"最新版下载"但地址还没到，收到后立即打开
     property string pendingLoginUsername: ""  // 注册成功后待填充的用户名
     property bool toastSwitchToLogin: false   // Toast 消失后是否切换到登录页
     property bool rememberPassword: true       // 是否记住密码（取消勾选则不保存/不自动填充密码）
@@ -77,13 +79,29 @@ Rectangle {
             loggingInLevel = 0
             loginError = ""
             
-            // 保存账号和设备信息；密码仅在勾选「记住密码」时保存
+            // §44.4 账号归一化：登录用前8位模糊匹配，输入的可能是"少一位"的短账号；
+            //   这里一律存服务器返回的【真实账号】(loggedInUsername)，而不是输入框里的短账号。
+            //   否则后续绑定/在线状态用短账号去后端【精确匹配】会查不到 → 绑定的 iOS 设备"消失"。
+            //   登录侧保持模糊(方便只输前8位)，客户端登录成功即归一化，三层(登录/存储/查询)对齐真实账号。
+            var canonicalUsername = HttpClient.loggedInUsername()
+            if (!canonicalUsername || canonicalUsername.length === 0) {
+                canonicalUsername = loginUsername.text.trim()  // 兜底：真实账号取不到才用输入值
+            }
+            var typedUsername = loginUsername.text.trim()
+
+            // 保存账号和设备信息；密码仅在勾选「记住密码」时保存（用真实账号做 key）
             HttpClient.saveAccount(
-                loginUsername.text.trim(), 
+                canonicalUsername,
                 loginPage.rememberPassword ? loginPassword.text.trim() : "",
                 monitorAccountColumn.selectedDeviceUsername,
                 monitorAccountColumn.selectedAccount
             )
+
+            // 清掉历史上可能存过的"短账号"条目，避免切换账号弹窗里出现查不到设备的幽灵账号
+            if (typedUsername.length > 0 && typedUsername !== canonicalUsername) {
+                HttpClient.removeAccount(typedUsername)
+                console.log("🔧 账号归一化：已用真实账号[" + canonicalUsername + "]替换输入的短账号[" + typedUsername + "]")
+            }
             
             // 刷新历史账号列表
             refreshSavedAccounts()
@@ -156,6 +174,31 @@ Rectangle {
                 loginError = message || "AI版已到期或未开通，请联系管理员"
             } else {
                 loginError = message
+            }
+        }
+
+        // §44.2 强制版本号拦截：弹框提示更新 + 点击用浏览器下载新版 exe
+        function onLoginNeedUpdate(message, downloadUrl) {
+            console.log("需要更新版本:", message, "下载地址:", downloadUrl)
+            isLoggingIn = false
+            loggingInLevel = 0
+            loginError = ""
+            updateDialog.message = message || "您的版本过低，请更新到最新版本后再登录"
+            updateDialog.downloadUrl = downloadUrl || ""
+            updateDialog.visible = true
+        }
+
+        // §44.3 收到最新版下载地址：缓存；若用户已点"最新版下载"在等，直接用浏览器打开
+        function onLatestDownloadUrlReceived(url) {
+            console.log("最新版下载地址:", url)
+            loginPage.latestDownloadUrl = url || ""
+            if (loginPage.pendingDownloadOpen) {
+                loginPage.pendingDownloadOpen = false
+                if (loginPage.latestDownloadUrl.length > 0) {
+                    Qt.openUrlExternally(loginPage.latestDownloadUrl)
+                } else {
+                    showToast("未获取到下载地址，请联系管理员", false)
+                }
             }
         }
         
@@ -259,6 +302,41 @@ Rectangle {
             font.pixelSize: 14
             font.weight: Font.Bold
             color: "#E0E0E0"
+        }
+
+        // §44.3 最新版下载：点击用系统浏览器打开总后台配置的 exe 地址（无需登录）
+        Rectangle {
+            Layout.leftMargin: 8
+            width: latestDownloadText.implicitWidth + 16
+            height: 20
+            radius: 3
+            color: latestDownloadArea.containsMouse ? "#2f7fd0" : "#3993D2"
+
+            Text {
+                id: latestDownloadText
+                anchors.centerIn: parent
+                text: "最新版下载"
+                font.family: "PingFang HK"
+                font.pixelSize: 11
+                color: "#FFFFFF"
+            }
+
+            MouseArea {
+                id: latestDownloadArea
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: {
+                    if (loginPage.latestDownloadUrl.length > 0) {
+                        Qt.openUrlExternally(loginPage.latestDownloadUrl)
+                    } else {
+                        // 地址还没拿到：标记待打开并即时拉取，收到后自动在浏览器打开
+                        loginPage.pendingDownloadOpen = true
+                        HttpClient.fetchLatestDownloadUrl()
+                        showToast("正在获取下载地址...", false)
+                    }
+                }
+            }
         }
         
         Item { Layout.fillWidth: true }
@@ -1870,6 +1948,121 @@ Rectangle {
         }
     }
 
+    // ============ 版本过低·需更新对话框遮罩 ============
+    Rectangle {
+        anchors.fill: parent
+        color: "#40000000"
+        visible: updateDialog.visible
+        z: 320
+
+        MouseArea {
+            anchors.fill: parent
+            onClicked: {}  // 遮罩不允许点击关闭，强制用户处理
+        }
+    }
+
+    // ============ 版本过低·需更新对话框 ============
+    Rectangle {
+        id: updateDialog
+        width: 420
+        height: 220
+        anchors.centerIn: parent
+        color: "#2d2d2d"
+        radius: 6
+        visible: false
+        z: 321
+
+        property string message: ""
+        property string downloadUrl: ""
+
+        Column {
+            anchors.fill: parent
+            anchors.margins: 22
+            spacing: 16
+
+            Text {
+                text: "需要更新版本"
+                font.family: "PingFang HK"
+                font.pixelSize: 18
+                font.weight: Font.Medium
+                color: "#E0E0E0"
+            }
+
+            Text {
+                width: parent.width
+                wrapMode: Text.WordWrap
+                text: updateDialog.message
+                font.family: "PingFang HK"
+                font.pixelSize: 13
+                color: "#B0B0B0"
+                lineHeight: 1.3
+            }
+
+            Text {
+                width: parent.width
+                wrapMode: Text.WrapAnywhere
+                text: "下载地址：" + updateDialog.downloadUrl
+                font.family: "PingFang HK"
+                font.pixelSize: 11
+                color: "#808080"
+                visible: updateDialog.downloadUrl.length > 0
+            }
+
+            Row {
+                anchors.right: parent.right
+                spacing: 10
+
+                Rectangle {
+                    width: 90
+                    height: 36
+                    radius: 4
+                    color: cancelUpdArea.containsMouse ? "#3c3c3c" : "#333333"
+                    Text {
+                        anchors.centerIn: parent
+                        text: "取消"
+                        font.family: "PingFang HK"
+                        font.pixelSize: 14
+                        color: "#CCCCCC"
+                    }
+                    MouseArea {
+                        id: cancelUpdArea
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: updateDialog.visible = false
+                    }
+                }
+
+                Rectangle {
+                    width: 130
+                    height: 36
+                    radius: 4
+                    color: dlUpdArea.containsMouse ? "#2f7fd0" : "#3993D2"
+                    Text {
+                        anchors.centerIn: parent
+                        text: "立即下载"
+                        font.family: "PingFang HK"
+                        font.pixelSize: 14
+                        color: "#FFFFFF"
+                    }
+                    MouseArea {
+                        id: dlUpdArea
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            if (updateDialog.downloadUrl.length > 0) {
+                                Qt.openUrlExternally(updateDialog.downloadUrl)  // 用系统默认浏览器打开下载
+                            } else {
+                                showToast("未获取到下载地址，请联系管理员", false)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // ============ 删除账号确认对话框遮罩 ============
     Rectangle {
         anchors.fill: parent
@@ -2159,5 +2352,6 @@ Rectangle {
     
     Component.onCompleted: {
         loadSavedAccount()
+        HttpClient.fetchLatestDownloadUrl()  // §44.3 预取最新版下载地址，点击"最新版下载"即可直接打开
     }
 }

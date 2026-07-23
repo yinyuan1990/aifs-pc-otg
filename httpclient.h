@@ -113,6 +113,9 @@ public:
     
     // 登录接口（pcLevel: 1=豪华版, 2=至尊版）
     Q_INVOKABLE void login(const QString &username, const QString &password, int pcLevel, const QString &deviceUsername = QString());
+
+    // §44.3 获取最新版 PC 客户端下载地址（公开接口，无需登录）；结果经 latestDownloadUrlReceived 返回
+    Q_INVOKABLE void fetchLatestDownloadUrl();
     
     // 注册接口（带昵称）
     Q_INVOKABLE void registerUser(const QString &username, const QString &password, const QString &nickname);
@@ -167,6 +170,11 @@ public:
     // ⭐ 拉取 iOS 三链路开关/硬件默认值/LUT (GET /api/config/ios-pipeline)
     //   成功时发 iosPipelineReceived(configJson) 信号, 失败发 iosPipelineFailed.
     Q_INVOKABLE void getIosPipeline();
+
+    // ⭐ 拉取相机快门(超级帧率cjfps)配置 (GET /api/config/camera-shutter)
+    //   json = {ios:{min,max,step,default}, android:{...}}，按连接设备平台分别生效。
+    //   成功时发 cameraShutterConfigReceived(configJson)，失败静默（QML 用内置默认值）。
+    Q_INVOKABLE void getCameraShutterConfig();
 
     // 更新对焦距离
     Q_INVOKABLE void updateFocusDistance(double value);
@@ -233,6 +241,10 @@ signals:
     // 登录结果信号
     void loginSuccess(const QString &token, const QString &deviceId, const QString &deviceUsername, const QJsonArray &bindingList, int pcActivationLevel, const QString &pcLevelName, const QString &pcExpireAt, int deviceLevel, const QVariantList &levelFps, const QVariantList &levelExposureFps, const QJsonArray &iceServers);
     void loginFailed(int code, const QString &message);
+    // §44.2 强制版本号拦截：需要更新时携带 exe 下载地址，QML 弹框点击用浏览器打开
+    void loginNeedUpdate(const QString &message, const QString &downloadUrl);
+    // §44.3 最新版下载地址获取结果（登录页"最新版下载"按钮用）
+    void latestDownloadUrlReceived(const QString &url);
     
     // 注册结果信号
     void registerSuccess(const QString &username, const QString &message);
@@ -302,6 +314,9 @@ signals:
     // ⭐ iOS 三链路开关/硬件/LUT 配置 ({switches, hardware, lut} 的 JSON 字符串)
     void iosPipelineReceived(const QString &configJson);
     void iosPipelineFailed(int code, const QString &message);
+
+    // ⭐ 相机快门(超级帧率cjfps)配置 ({ios:{min,max,step,default}, android:{...}} 的 JSON 字符串)
+    void cameraShutterConfigReceived(const QString &configJson);
 
 private:
     explicit HttpClient(QObject *parent = nullptr);

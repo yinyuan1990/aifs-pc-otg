@@ -1201,40 +1201,69 @@ QImage CaptureManager::decodeFromDisk(int itemIndex, int frameOffset)
         return QImage();
     }
 
-    QMutexLocker decodeLock(&m_decodeMutex);
-
-    if (m_clearGeneration.load(std::memory_order_acquire) != gen) return QImage();
-
+    // ⭐ 2026-07-24 主线程冻结修复（freeze_diag 实锤）：此前从这里到函数结尾整段抱着
+    //   m_decodeMutex 做 H264 软解/建 GStreamer 管线/整帧旋转，快速拖进度条/Ctrl滚帧时
+    //   解码线程几乎全程持锁，主线程四个入口（getFrameImage/scheduleFrameDecode/
+    //   isFrameCached/gotoFrame 写 m_wantedOffset）抢锁被饿 1~5s → UI 与实时流一起冻。
+    //   改为「短锁取走解码器实例 → 锁外干重活 → 短锁归还」，m_decodeMutex 只护轻量结构。
+    //   安全性：解码池是单线程（同一时刻最多一个 checkout）；主线程 removeItem/clearAll
+    //   在 checkout 期间看不到该实例（map 里已置空），不会 double-delete；归还时若条目
+    //   已被删/清空则由本线程自行销毁，过期解码结果由调用方的 generation 校验丢弃。
     QImage result;
     // ⭐ 按帧源格式分支：网页内核(JPEG)直接 QImage 解，GStreamer(H264) 走软解码器。
     if (m_frameSource->frameFormat() == IFrameSource::FrameFormat::JPEG) {
+        // JPEG 解码不碰任何共享状态，全程锁外
         if (!result.loadFromData(data, "JPEG")) {
             captureDebugLog("CAP", QString("decodeFromDisk JPEG FAIL item=%1 frame=%2 global=%3 bytes=%4")
                 .arg(itemIndex).arg(frameOffset).arg(globalIndex).arg(data.size()));
             return QImage();
         }
     } else {
-        ItemDecodeState &state = m_itemDecoders[itemIndex];
-        if (!state.decoder) {
-            state.decoder = new GstCaptureDecoder();
+        // checkout：短锁取走该 item 的解码器实例
+        GstCaptureDecoder *decoder = nullptr;
+        {
+            QMutexLocker decodeLock(&m_decodeMutex);
+            if (m_clearGeneration.load(std::memory_order_acquire) != gen) return QImage();
+            ItemDecodeState &state = m_itemDecoders[itemIndex];
+            decoder = state.decoder;
+            state.decoder = nullptr;
+        }
+        if (!decoder) {
+            decoder = new GstCaptureDecoder();  // 建管线是重活，锁外做
             captureDebugLog("CAP", QString("decodeFromDisk create decoder item=%1").arg(itemIndex));
         }
 
-        state.decoder->flush();
-        result = state.decoder->decodeNalu(data);
+        decoder->flush();
+        result = decoder->decodeNalu(data);
+
+        // checkin：item 还在就归还实例；期间被 removeItem/clearAll 删掉则自行销毁
+        bool returned = false;
+        {
+            QMutexLocker decodeLock(&m_decodeMutex);
+            auto decIt = m_itemDecoders.find(itemIndex);
+            if (decIt != m_itemDecoders.end() && !decIt.value().decoder) {
+                decIt.value().decoder = decoder;
+                decIt.value().lastOffset = result.isNull() ? -1 : frameOffset;
+                returned = true;
+            }
+        }
+        if (!returned) {
+            delete decoder;  // 销毁 GStreamer 管线同样是重活，锁外做
+            captureDebugLog("CAP", QString("decodeFromDisk item GONE mid-decode item=%1 frame=%2")
+                .arg(itemIndex).arg(frameOffset));
+            return QImage();
+        }
         if (result.isNull()) {
             captureDebugLog("CAP", QString("decodeFromDisk H264 FAIL item=%1 frame=%2 global=%3 %4")
                 .arg(itemIndex).arg(frameOffset).arg(globalIndex).arg(captureDebugNaluPreview(data)));
-            state.lastOffset = -1;
             return QImage();
         }
-        state.lastOffset = frameOffset;
     }
 
     if (m_videoRotation != 0) {
         QTransform t;
         t.rotate(m_videoRotation);
-        result = result.transformed(t, Qt::FastTransformation);
+        result = result.transformed(t, Qt::FastTransformation);  // 整帧旋转也在锁外
     }
 
     captureDebugLog("CAP", QString("decodeFromDisk OK item=%1 frame=%2 size=%3x%4")
@@ -1543,7 +1572,9 @@ void CaptureManager::scheduleFrameDecode(int itemIndex, int frameOffset)
         {
             QMutexLocker lock(&m_decodeMutex);
             m_pendingDecodes.remove(jobKey);
-            if (!img.isNull()) {
+            // ⭐ 2026-07-24：解码期间不再持锁，removeItem/clearAll 可能已清过缓存，
+            //   generation 变了的过期帧禁止回填（否则按旧索引写入=脏缓存）
+            if (!img.isNull() && m_clearGeneration.load(std::memory_order_acquire) == gen) {
                 putFrameCache(itemIndex, frameOffset, img);
                 shouldNotify = true;
             }

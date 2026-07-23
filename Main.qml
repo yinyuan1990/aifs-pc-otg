@@ -651,6 +651,19 @@ ApplicationWindow {
                 }
             }
 
+            // §43 清单差量更新状态（比对中 / 正在下第几个文件）
+            Text {
+                Layout.fillWidth: true
+                Layout.leftMargin: 20
+                Layout.rightMargin: 20
+                visible: AutoUpdater.isDownloading && AutoUpdater.statusText.length > 0
+                text: AutoUpdater.statusText
+                font.family: "PingFang HK"
+                font.pixelSize: 12
+                color: "#9E9E9E"
+                elide: Text.ElideMiddle
+            }
+
             // 安装中提示
             ColumnLayout {
                 Layout.fillWidth: true

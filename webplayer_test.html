@@ -253,6 +253,19 @@
 
   function showErr(msg) { errEl.style.display = 'block'; errEl.textContent = msg; logC('ERR ' + msg); }
   function hideErr() { errEl.style.display = 'none'; }
+  // ⭐ 清理残留画面（2026-07-23）：Chromium 下 srcObject=null 只是断开媒体源，
+  //   <video> 会把最后一帧一直留在画面上（设备退出/崩溃后画面看着像"还在"）。
+  //   必须再调 load() 重置媒体元素才真正清屏。停播/挂断/断线重连统一走这里。
+  function clearVideoFrame(why) {
+    try {
+      if (videoEl.srcObject) {
+        try { videoEl.srcObject.getTracks().forEach(t => t.stop()); } catch(_){}
+        videoEl.srcObject = null;
+      }
+      videoEl.load();   // 重置元素，清掉残留的最后一帧
+      if (why) logC('已清理残留画面: ' + why);
+    } catch(_){}
+  }
   function logC(m) { try { if (bridge) bridge.log(m); } catch(_){} console.log('[webplayer]', m); }
   // [stutter-diag] webview-kernel realtime-stream + stall log -> exe-dir nh.txt (separate file for offline root-cause)
   function nhLog(m) { try { if (bridge && bridge.kernelStat) bridge.kernelStat(m); } catch(_){} }
@@ -388,10 +401,7 @@
       try { bridge.notifyTestStopped(); } catch(_){}
     }
     if (pc) { try { pc.close(); } catch(_){} pc = null; }
-    if (videoEl.srcObject) {
-      try { videoEl.srcObject.getTracks().forEach(t => t.stop()); } catch(_){}
-      videoEl.srcObject = null;
-    }
+    clearVideoFrame('stopPlay');
   };
 
   // ============ 公共：track 处理 + 双缓冲防卡顿 ============
@@ -734,10 +744,7 @@
       if (bridge && bridge.notifyViewerFps) { try { bridge.notifyViewerFps(0); } catch(_){} }
       stopFrameCapture();
       if (pc) { try { pc.close(); } catch(_){} pc = null; }
-      if (videoEl.srcObject) {
-        try { videoEl.srcObject.getTracks().forEach(t => t.stop()); } catch(_){}
-        videoEl.srcObject = null;
-      }
+      clearVideoFrame('对端挂断(' + reason + ')');
       statsEl.innerHTML = '<span class="warn">iOS 已退出/停止推流</span>\n（不再重连，关闭后重开测试）';
     }
   }
@@ -812,11 +819,16 @@
       if (reconnectAttempts > MAX_RECONNECT_BEFORE_CONNECTED) {
         logC('从未连上且已重试 ' + (reconnectAttempts-1) + ' 次 → 放弃（iOS 可能不在线/未推流）');
         statsEl.innerHTML = '<span class="warn">连接失败</span>\niOS 可能不在线或未推流\n（关闭后重开测试）';
+        clearVideoFrame('重连放弃');
         return;
       }
     }
 
     reconnecting = true;
+    // ⭐ 2026-07-23：走到这里=连接已确认死亡（ICE failed / disconnected 6s 未自愈 / 卡死 10s+）。
+    //   立即清掉冻住的最后一帧——设备崩溃/被杀时收不到 HANGUP，只会走这条路，
+    //   不清的话画面会一直残留"假活着"的旧帧（重连成功后 attachTrack 会重新挂新流）。
+    clearVideoFrame('连接中断，进入重连');
     const tag = everConnected ? '网络中断' : ('iOS 未响应(第' + reconnectAttempts + '次)');
     nhLog('>> RECONNECT scheduled (' + tag + ') iceState=' + (pc ? pc.iceConnectionState : 'nopc') + ' stall=' + stallSeconds + 's');
     logC(tag + ' → 3 秒后自动重连');

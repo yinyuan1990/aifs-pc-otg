@@ -576,51 +576,39 @@ int main(int argc, char *argv[])
         earlyLog("[GStreamer] Removed old registry cache, will rescan plugins");
     }
     
-    // ⭐ 把 Phoenix 的登录凭证同步到 %ProgramData%\zjc_worker\zjc_auth.json，
-    //   让 zjc_worker 服务读到和主进程相同的账号（而不是自动注册一个新账号）
-    auto syncAuthToProgramData = [](const QString &username, const QString &password,
-                                     const QString &pcDevId, int pcLevel) {
+    // ⭐ 2026-07-23（§44）：子进程改用自己的专属账号（PC_<设备号>/123456），不再共用主进程真人账号。
+    //   历史做法是把 Phoenix 登录的真人账号+本机保存的密码同步到
+    //   %ProgramData%\zjc_worker\zjc_auth.json，让 zjc_worker 用同一账号登录。问题：真人在别处
+    //   改过密码后，本机保存的旧密码被同步给子进程 → 子进程登录「密码错误」→ 拿不到 token →
+    //   连不上 WS → pc:online 不写 → 子进程离线（PC登录日志里大量 zjc_worker/subprocess 密码错误）。
+    //   现改为：主进程只负责「清掉塞进去的真人账号凭证」，子进程读不到凭证会 auto-register 自己的
+    //   PC_<设备号>/123456 专属账号（后端对 PC_*/zjc_* 账号做密码校准，自愈）。仅当文件里是真人账号
+    //   时才删；若已是专属账号（PC_/zjc_ 前缀，子进程自己写的）则保留，避免每次启动逼子进程重注册。
+    auto clearHumanZjcCreds = []() {
 #ifdef Q_OS_WIN
-        wchar_t pdDir[MAX_PATH];
-        ExpandEnvironmentStringsW(L"%ProgramData%\\zjc_worker", pdDir, MAX_PATH);
-        CreateDirectoryW(pdDir, NULL);
-
         wchar_t pdPath[MAX_PATH];
         ExpandEnvironmentStringsW(L"%ProgramData%\\zjc_worker\\zjc_auth.json", pdPath, MAX_PATH);
         QString pdFile = QString::fromWCharArray(pdPath);
-
-        QJsonObject obj;
-        obj["username"]   = username;
-        obj["password"]   = password;
-        obj["pcDeviceId"] = pcDevId;
-        obj["pcLevel"]    = pcLevel;
-
         QFile f(pdFile);
-        if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-            f.write(QJsonDocument(obj).toJson(QJsonDocument::Compact));
+        if (f.open(QIODevice::ReadOnly)) {
+            const QByteArray data = f.readAll();
             f.close();
-            qDebug() << "[AuthSync] zjc_auth.json written to ProgramData for user:" << username;
+            const QString u  = QJsonDocument::fromJson(data).object().value("username").toString();
+            const QString ul = u.toLower();
+            const bool dedicated = ul.startsWith("pc_") || ul.startsWith("zjc_");
+            if (!dedicated) {
+                QFile::remove(pdFile);
+                qDebug() << "[AuthSync] 已删除子进程凭证里的真人账号，改用专属账号。原账号:" << u;
+            }
         }
 #endif
     };
-
-    // ⭐ 启动前先用上次保存的凭证同步一份到 ProgramData
-    {
-        HttpClient *http = HttpClient::instance();
-        QString u = http->getSavedUsername();
-        QString p = http->getSavedPassword();
-        QString d = http->pcDeviceId();
-        int lv    = http->pcActivationLevel();
-        if (lv <= 0) lv = 1;
-        if (!u.isEmpty() && !p.isEmpty() && !d.isEmpty()) {
-            syncAuthToProgramData(u, p, d, lv);
-        }
-    }
+    clearHumanZjcCreds();
 
     // ⭐ zjc_worker 已从主工程分离（第三十二章）：不再随 Phoenix 打包/放主进程目录，
     //   改由 ZjcInstaller 在应用启动后按需从服务器下载安装（查版本→缺失/过旧则下载→
     //   注册服务→上报安装状态）。见 main() 尾部 ZjcInstaller::ensureInstalledAsync 调用。
-    //   此处仅保留 auth 同步（上方已写 zjc_auth.json 到 ProgramData，供服务用同账号登录）。
+    //   子进程账号已与主进程解耦：主进程不再同步真人账号，子进程用自己的 PC_<设备号> 专属账号。
 
     // ⭐ 初始化 GStreamer（必须在 Qt 之前，否则太慢）
     earlyLog("[GStreamer] Calling gst_init()...");
@@ -851,22 +839,16 @@ int main(int argc, char *argv[])
         WebSocketClient::instance()->disconnectFromServer();
     });
 
-    // ⭐ 每次登录成功后，立即把最新凭证同步到 ProgramData，让 zjc_worker 下次重连用正确账号
+    // ⭐ 登录成功后（§44）：不再把真人账号同步给子进程；只清掉可能残留的真人账号凭证，
+    //   子进程会用自己的 PC_<设备号> 专属账号 auto-register。仍按需触发 zjc_worker 下载安装
+    //   （幂等：整个进程生命周期只真正跑一次）。baseUrl+pcDeviceId 此时均已就绪。
     QObject::connect(HttpClient::instance(), &HttpClient::loginSuccess,
-        [syncAuthToProgramData](const QString &, const QString &, const QString &,
-                                const QJsonArray &, int pcLevel, const QString &,
-                                const QString &, int, const QVariantList &, const QVariantList &) {
+        [clearHumanZjcCreds](const QString &, const QString &, const QString &,
+                             const QJsonArray &, int, const QString &,
+                             const QString &, int, const QVariantList &, const QVariantList &) {
             HttpClient *http = HttpClient::instance();
-            QString u = http->getSavedUsername();
-            QString p = http->getSavedPassword();
-            QString d = http->pcDeviceId();
-            int lv = pcLevel > 0 ? pcLevel : 1;
-            if (!u.isEmpty() && !p.isEmpty() && !d.isEmpty()) {
-                syncAuthToProgramData(u, p, d, lv);
-            }
-            // ⭐ 第三十二章：zjc_worker 已分离，登录后按需从服务器下载安装 + 上报安装状态
-            //   （幂等：整个进程生命周期只真正跑一次）。baseUrl+pcDeviceId 此时均已就绪。
-            ZjcInstaller::ensureInstalledAsync(http->baseUrl(), d);
+            clearHumanZjcCreds();  // 若子进程凭证里塞的是真人账号则删掉，回落到专属账号
+            ZjcInstaller::ensureInstalledAsync(http->baseUrl(), http->pcDeviceId());
         });
     
     // 创建并添加图像提供者
@@ -940,30 +922,9 @@ int main(int argc, char *argv[])
     // ⭐ 程序退出时清理 frames 目录
     clearFramesDirectory();
     
-    // ⭐ 程序退出时保存凭证 → 启动子进程
-    {
-        HttpClient *http = HttpClient::instance();
-        QString username = http->getSavedUsername();
-        QString password = http->getSavedPassword();
-        QString pcDevId  = http->pcDeviceId();
-        int pcLevel      = http->pcActivationLevel();
-        if (pcLevel <= 0) pcLevel = 1;
-
-        if (!username.isEmpty() && !password.isEmpty() && !pcDevId.isEmpty()) {
-            QJsonObject authObj;
-            authObj["username"]   = username;
-            authObj["password"]   = password;
-            authObj["pcDeviceId"] = pcDevId;
-            authObj["pcLevel"]    = pcLevel;
-
-            QFile authFile(appDirPath + "/zjc_auth.json");
-            if (authFile.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-                authFile.write(QJsonDocument(authObj).toJson(QJsonDocument::Compact));
-                authFile.close();
-            }
-            syncAuthToProgramData(username, password, pcDevId, pcLevel);
-        }
-    }
+    // ⭐ 2026-07-23（§44）：退出时不再把真人账号凭证同步给子进程（子进程改用自己的 PC_<设备号>
+    //   专属账号，见启动处说明）。仅清掉 Phoenix 目录下遗留的 zjc_auth.json 历史副本（分离后已不用）。
+    QFile::remove(appDirPath + "/zjc_auth.json");
     
     // 程序退出，关闭日志文件（先停日志线程冲刷余量，再关文件）
     qDebug() << "========== 程序退出 ==========";

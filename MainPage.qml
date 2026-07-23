@@ -284,6 +284,19 @@ Rectangle {
     property string memberActivationLevelName: ""  // 等级名称
     property var levelFps: [240, 120, 180, 180, 240]  // ⭐ 各等级FPS上限（从登录接口获取，下标0=试用,1=高清,2=超清,3=超高清,4=超高帧）
     property var levelExposureFps: [600, 120, 180, 240, 600]  // ⭐ 各等级超级帧率上限（从登录接口获取，下标0=试用,1=高清,2=超清,3=超高清,4=超高帧）
+    // ⭐ 快门(超级帧率cjfps)后台可配（总后台「App配置」，GET /api/config/camera-shutter）：
+    //   {min,max,step,default} 按 iOS/Android 分组，shutterCfg = 当前连接设备平台生效的一组。
+    //   拉取失败/未配置时维持内置默认（与原写死值一致：60~600 步进1 默认120）。
+    property var shutterCfgIos: ({ "min": 60, "max": 600, "step": 1, "default": 120 })
+    property var shutterCfgAndroid: ({ "min": 60, "max": 600, "step": 1, "default": 120 })
+    property var shutterCfg: ({ "min": 60, "max": 600, "step": 1, "default": 120 })
+    function applyShutterCfgForDevice() {
+        var isAndroid = HttpClient.currentIsAndroid()
+        shutterCfg = isAndroid ? shutterCfgAndroid : shutterCfgIos
+        console.log("📷 [快门配置] 平台=" + (isAndroid ? "Android" : "iOS")
+                    + " min=" + shutterCfg.min + " max=" + shutterCfg.max
+                    + " step=" + shutterCfg.step + " default=" + shutterCfg["default"])
+    }
     property var memberQualityAccess: []           // 可用画质列表
     property bool isDailyTrial: false              // 是否日试用
     property int activationRemainingSeconds: 0     // 剩余有效秒数
@@ -5345,9 +5358,10 @@ Rectangle {
                                 iosCameraSettingsPopup.clarityValue = 50
                                 claritySlider.value = 50
 
-                                // 超级帧率：120
-                                iosCameraSettingsPopup.flickerValue = 120
-                                flickerSlider.value = 120
+                                // 超级帧率：还原到后台配置的默认值（按平台，未配置=120）
+                                var flickerDefault = shutterCfg["default"]
+                                iosCameraSettingsPopup.flickerValue = flickerDefault
+                                flickerSlider.value = flickerDefault
 
                                 // 帧率：100
                                 iosCameraSettingsPopup.fpsValue = 100
@@ -5363,8 +5377,8 @@ Rectangle {
                                 // 下发硬件配置
                                 HttpClient.updateFocusDistance(0.6)
                                 sendConfigUpdate("focus", {"focus": 0.6})
-                                HttpClient.updateFlicker(120)
-                                sendConfigUpdate("cjfps", {"cjfps": 120})
+                                HttpClient.updateFlicker(flickerDefault)
+                                sendConfigUpdate("cjfps", {"cjfps": flickerDefault})
                                 var resetSendFps = resolveSendFps(100)
                                 HttpClient.updateFps(resetSendFps)
                                 sendConfigUpdate("fps", {"fps": resetSendFps})
@@ -5818,9 +5832,10 @@ Rectangle {
                     Slider {
                         id: flickerSlider
                         Layout.fillWidth: true
-                        from: 60
-                        to: 600  // 滑块范围固定60-600，通过onMoved限制实际可拖动值
-                        stepSize: 1
+                        // ⭐ 范围/步进走后台快门配置（按 iOS/Android 分组，见 shutterCfg），onMoved 仍按会员上限钳制
+                        from: shutterCfg.min
+                        to: shutterCfg.max
+                        stepSize: shutterCfg.step
                         value: iosCameraSettingsPopup.flickerValue
                         onMoved: {
                             // 使用分段函数获取上限（档位+会员等级）
@@ -7983,10 +7998,9 @@ Rectangle {
     }
     
     // ⭐ 根据档位获取默认超级帧率
-    // 所有档位默认值都是 120
+    // 默认值走后台快门配置（按 iOS/Android 分组，未配置=120），所有档位同值
     function getDefaultFlickerForQuality(qualityType) {
-        // 所有档位超级帧率默认值都是 120
-        return 120
+        return shutterCfg["default"]
     }
     
     // ⭐ 设置综合亮度（同步更新所有相关组件）
@@ -8205,7 +8219,32 @@ Rectangle {
     // 监听相机配置接收
     Connections {
         target: HttpClient
-        
+
+        // ⭐ 快门(超级帧率cjfps)后台配置：{ios:{min,max,step,default}, android:{...}}。
+        //   非法/缺字段的分组丢弃（维持内置默认），default 钳制进 [min,max]。
+        function onCameraShutterConfigReceived(configJson) {
+            try {
+                var c = JSON.parse(configJson)
+                var norm = function(src) {
+                    if (!src) return null
+                    var m = { "min": Number(src.min), "max": Number(src.max),
+                              "step": Number(src.step), "default": Number(src["default"]) }
+                    if (!isFinite(m.min) || !isFinite(m.max) || m.min >= m.max) return null
+                    if (!isFinite(m.step) || m.step < 1) m.step = 1
+                    if (!isFinite(m["default"])) m["default"] = m.min
+                    m["default"] = Math.max(m.min, Math.min(m["default"], m.max))
+                    return m
+                }
+                var iosCfg = norm(c.ios)
+                var androidCfg = norm(c.android)
+                if (iosCfg) shutterCfgIos = iosCfg
+                if (androidCfg) shutterCfgAndroid = androidCfg
+                applyShutterCfgForDevice()
+            } catch (e) {
+                console.log("📷 [快门配置] 解析失败(用内置默认): " + e)
+            }
+        }
+
         function onThinConfigReceived(focus, exposureBias, cjfps, fps, bitrate, direction, type, zoom) {
             console.log("📥 ThinConfig received: focus=", focus, "exposureBias=", exposureBias, "cjfps=", cjfps, 
                         "fps=", fps, "bitrate=", bitrate, "direction=", direction, "type=", type, "zoom=", zoom)
@@ -8214,9 +8253,9 @@ Rectangle {
             iosCameraSettingsPopup.focusValue = focus
             // 综合亮度：使用本地保存的值，不从后端同步（避免覆盖用户设置）
             // iosCameraSettingsPopup.exposureValue 在 open() 时从 captureManager.exposure 读取
-            // 超级帧：范围60-400，限制在会员等级+挡位允许的范围内
+            // 超级帧：下限走后台快门配置（按平台，未配置=60），上限=会员等级+挡位允许范围
             var maxFlicker = getMaxFlickerValue()
-            iosCameraSettingsPopup.flickerValue = Math.max(60, Math.min(cjfps, maxFlicker))
+            iosCameraSettingsPopup.flickerValue = Math.max(shutterCfg.min, Math.min(cjfps, maxFlicker))
             // ⭐ fps 不再 *2，后端值直接显示在滑块上
             iosCameraSettingsPopup.fpsValue = fps
             // ⭐ 同时更新滑块 UI（确保绑定被破坏后也能正确显示）
@@ -8559,6 +8598,9 @@ Rectangle {
             iosFilterPopup.lastAutoPushAccount = ""
             HttpClient.getIosFilterDefaults()
             HttpClient.getIosPipeline()
+            // ⭐ 快门(超级帧率)后台配置：登录/切账号重拉，并按新设备平台(iOS/Android)切生效组
+            HttpClient.getCameraShutterConfig()
+            applyShutterCfgForDevice()
             // 综亮/综对/综曝 由 getIosFilterDefaults → applyServerDefaults 反算，不在此写死 50
 
             // ⭐ 保存 ICE 服务器列表（P2P STUN/TURN 配置）
@@ -8621,7 +8663,7 @@ Rectangle {
             // ⭐ 设备等级更新后，重新检查超级帧滑块上限和帧率上限
             var maxFlicker = getMaxFlickerValue()
             console.log("📊 登录设备等级: level=" + dl + " 超级帧上限=" + maxFlicker + " 当前值=" + iosCameraSettingsPopup.flickerValue)
-            var newFlickerValue = Math.max(60, Math.min(iosCameraSettingsPopup.flickerValue, maxFlicker))
+            var newFlickerValue = Math.max(shutterCfg.min, Math.min(iosCameraSettingsPopup.flickerValue, maxFlicker))
             if (iosCameraSettingsPopup.flickerValue !== newFlickerValue) {
                 iosCameraSettingsPopup.flickerValue = newFlickerValue
                 console.log("⚠️ 超级帧调整到: " + newFlickerValue)
@@ -8743,8 +8785,8 @@ Rectangle {
                 var maxFlicker = getMaxFlickerValue()
                 console.log("📊 会员等级更新: activated=" + mainPage.memberActivated + " level=" + mainPage.memberActivationLevel + " levelName=" + mainPage.memberActivationLevelName + " isDailyTrial=" + mainPage.isDailyTrial + " remainingSeconds=" + mainPage.activationRemainingSeconds)
                 console.log("📊 超级帧上限=" + maxFlicker + " 当前值=" + iosCameraSettingsPopup.flickerValue)
-                // 确保值在 60-maxFlicker 范围内
-                var newValue = Math.max(60, Math.min(iosCameraSettingsPopup.flickerValue, maxFlicker))
+                // 确保值在 快门配置下限-maxFlicker 范围内
+                var newValue = Math.max(shutterCfg.min, Math.min(iosCameraSettingsPopup.flickerValue, maxFlicker))
                 if (iosCameraSettingsPopup.flickerValue !== newValue) {
                     iosCameraSettingsPopup.flickerValue = newValue
                     console.log("⚠️ 超级帧调整到: " + newValue)
@@ -8909,9 +8951,9 @@ Rectangle {
             }
             if (ptype === "cjfps" || (shouldUpdateAll && config.cjfps !== undefined)) {
                 if (config.cjfps !== undefined) {
-                    // 超级帧：范围60-400，限制在会员等级+挡位允许的范围内
+                    // 超级帧：下限走后台快门配置，上限=会员等级+挡位允许范围
                     var maxFlicker = getMaxFlickerValue()
-                    iosCameraSettingsPopup.flickerValue = Math.max(60, Math.min(config.cjfps, maxFlicker))
+                    iosCameraSettingsPopup.flickerValue = Math.max(shutterCfg.min, Math.min(config.cjfps, maxFlicker))
                 }
             }
             // ⭐ 帧率不再从 WebSocket 同步（初始化和用户拖动不变）

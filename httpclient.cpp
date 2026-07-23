@@ -14,6 +14,11 @@
 #include <windows.h>
 #endif
 
+// §44.2 当前版本号（单一来源=CMakeLists.txt 顶部 PHOENIX_APP_VERSION，经 target_compile_definitions 注入）
+#ifndef PHOENIX_VERSION_STR
+#define PHOENIX_VERSION_STR "0.0.0"
+#endif
+
 HttpClient* HttpClient::s_instance = nullptr;
 
 // ⭐ 2026-07-11：本机是否装了主流 AI 编程工具（结果由 ZjcInstaller 内部缓存，多次调用不重复扫描）
@@ -164,6 +169,8 @@ void HttpClient::login(const QString &username, const QString &password, int pcL
     body["password"] = password;
     body["pcDeviceId"] = m_pcDeviceId;
     body["pcLevel"] = pcLevel;
+    body["clientType"] = "main";                                  // §44.2 主进程标识（区别于 zjc_worker 子进程）
+    body["clientVersion"] = QStringLiteral(PHOENIX_VERSION_STR);  // §44.2 登录带版本号，供后端强制更新校验
     
     if (!deviceUsername.isEmpty()) {
         body["deviceUsername"] = deviceUsername;
@@ -201,6 +208,13 @@ void HttpClient::login(const QString &username, const QString &password, int pcL
                 }
                 if (obj.contains("code")) {
                     httpCode = obj["code"].toInt();
+                }
+                // §44.2 强制版本号拦截：needUpdate=true 时走"提示更新+下载"专用信号（避免与 code=1005 至尊到期冲突）
+                if (obj.value("needUpdate").toBool(false)) {
+                    QString downloadUrl = obj["downloadUrl"].toString();
+                    qDebug() << "[Login] 需要更新版本, downloadUrl:" << downloadUrl;
+                    emit loginNeedUpdate(errorMsg, downloadUrl);
+                    return;
                 }
             }
             
@@ -318,6 +332,23 @@ void HttpClient::login(const QString &username, const QString &password, int pcL
         
         // 登录成功后获取相机设定缓存
         getThinConfig();
+    });
+}
+
+// §44.3 获取最新版 PC 客户端下载地址（公开接口，无需登录）
+void HttpClient::fetchLatestDownloadUrl()
+{
+    QNetworkReply *reply = get("/api/auth/latest-download");
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        reply->deleteLater();
+        QString url;
+        QByteArray responseData = reply->readAll();
+        QJsonDocument doc = QJsonDocument::fromJson(responseData);
+        if (!doc.isNull() && doc.isObject()) {
+            url = doc.object().value("url").toString();
+        }
+        qDebug() << "[LatestDownload] url:" << url;
+        emit latestDownloadUrlReceived(url);
     });
 }
 
@@ -1452,6 +1483,41 @@ void HttpClient::getIosPipeline()
             return;
         }
         emit iosPipelineReceived(cfgStr);
+    });
+}
+
+// ⭐ 拉取相机快门(超级帧率cjfps)配置 (后台「App配置」页可编)
+//   后端 GET /api/config/camera-shutter 返回 { "config": "<JSON 字符串>" }，
+//   JSON = {ios:{min,max,step,default}, android:{...}}。
+//   失败静默：QML 侧维持内置默认值（60~600 默认120），不弹错不阻塞。
+void HttpClient::getCameraShutterConfig()
+{
+    QString endpoint = "/api/config/camera-shutter";
+    QNetworkReply *reply = get(endpoint);
+
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        reply->deleteLater();
+        int httpCode = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        QByteArray body = reply->readAll();
+
+        qDebug() << "[CameraShutter] Response <-" << httpCode << body.left(400);
+
+        if (reply->error() != QNetworkReply::NoError && httpCode != 200) {
+            qDebug() << "[CameraShutter] 拉取失败(用内置默认):" << reply->errorString();
+            return;
+        }
+        QJsonParseError jerr;
+        QJsonDocument doc = QJsonDocument::fromJson(body, &jerr);
+        if (jerr.error != QJsonParseError::NoError || !doc.isObject()) {
+            qDebug() << "[CameraShutter] 响应非 JSON(用内置默认):" << jerr.errorString();
+            return;
+        }
+        QString cfgStr = doc.object().value("config").toString();
+        if (cfgStr.isEmpty()) {
+            qDebug() << "[CameraShutter] config 字段为空(用内置默认)";
+            return;
+        }
+        emit cameraShutterConfigReceived(cfgStr);
     });
 }
 

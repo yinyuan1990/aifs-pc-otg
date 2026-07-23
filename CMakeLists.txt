@@ -2,6 +2,11 @@ cmake_minimum_required(VERSION 3.16)
 
 project(Phoenix VERSION 0.1 LANGUAGES C CXX)
 
+# ⭐ §43 版本号单一来源：发版只改这一行！
+#   - autoupdater.cpp 经宏 PHOENIX_VERSION_STR 得到当前版本（不再硬编码）
+#   - pack.bat 解析本行生成 manifest.json / yqlversion_new.json
+set(PHOENIX_APP_VERSION "8.2.3")
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
@@ -127,6 +132,9 @@ target_include_directories(Phoenix PRIVATE
 
 # ⭐ GStreamer WebRTC API 需要此宏定义
 target_compile_definitions(Phoenix PRIVATE GST_USE_UNSTABLE_API)
+
+# ⭐ §43 当前版本号注入（单一来源见顶部 PHOENIX_APP_VERSION）
+target_compile_definitions(Phoenix PRIVATE PHOENIX_VERSION_STR="${PHOENIX_APP_VERSION}")
 
 # ⭐ Qt WebEngine + WebChannel 可用时定义 HAVE_WEBENGINE，main.cpp / 测试逻辑据此条件编译
 #   并加入桥对象 kernelbridge（QWebChannel 把 C++ P2P 信令暴露给 WebEngine 里的 JS）。
