@@ -4552,11 +4552,13 @@ void GstPlayer::createWebRTCOffer()
         // ⭐ 移除 profile-level-id 限制，让 WebRTC 自动协商
         // 支持所有 Profile (Baseline/Main/High) 和 Level (3.1~5.2+)
         // 解决 iPhone 16 等新设备可能使用不同编码参数的问题
-        // ⭐ H265（第四十九章）：H265 会话 recvonly transceiver 用 H265 caps，否则 webrtcbin 生成的
-        //   play Offer 只含 H264，SRS 带 ?codec=hevc 找不到 H265 payload 直接回 400（服务器日志坐实）。
+        // ⭐ H265（第四十九章）：H265 会话 recvonly transceiver 用 H265 caps（与 H264 路径对称：
+        //   只给 add-transceiver caps、不再另设 codec-preferences——实测上一版多设 codec-preferences=H265
+        //   会让 webrtcbin 在 offerer 角色下建不出媒体、Offer 丢掉整条 m=video，SRS 报 "no media descriptions"）。
+        //   caps 用 rtph265depay 期望的标准 RTP 格式（不带固定 payload，PT 由 webrtcbin 动态分配）。
         GstCaps *videoCaps = m_useH265
             ? gst_caps_from_string(
-                "application/x-rtp,media=video,payload=100,encoding-name=H265,clock-rate=90000")
+                "application/x-rtp,media=(string)video,clock-rate=(int)90000,encoding-name=(string)H265")
             : gst_caps_from_string(
                 "application/x-rtp,media=video,payload=109,encoding-name=H264,"
                 "clock-rate=90000,packetization-mode=(string)1,"
@@ -4573,19 +4575,6 @@ void GstPlayer::createWebRTCOffer()
             if (transceiver) {
                 qDebug() << (m_useH265 ? "✅ 已添加 recvonly H265 视频 transceiver"
                                        : "✅ 已添加 recvonly H264 视频 transceiver");
-                // ⭐ H265：再显式钉 codec-preferences=H265，确保 Offer 只提 H265（双保险，部分 GStreamer 版本 add-transceiver caps 不完全等价于 codec-preferences）
-                if (m_useH265) {
-                    GObjectClass *tcls0 = G_OBJECT_GET_CLASS(transceiver);
-                    if (g_object_class_find_property(tcls0, "codec-preferences")) {
-                        GstCaps *h265Pref = gst_caps_from_string(
-                            "application/x-rtp, media=(string)video, encoding-name=(string)H265, clock-rate=(int)90000");
-                        g_object_set(transceiver, "codec-preferences", h265Pref, nullptr);
-                        gst_caps_unref(h265Pref);
-                        H265Support::log("[SRS协商] recvonly transceiver codec-preferences=H265（Offer 强制 H265）");
-                    } else {
-                        H265Support::log("⚠️ transceiver 无 codec-preferences 属性，H265 Offer 可能仍回退 H264");
-                    }
-                }
 
                 // ⭐⭐⭐ 对标 Chrome：在 transceiver 上启用 NACK 重传（核心！）
                 //   - do-nack 默认 FALSE，不显式设永远不发 NACK → 丢包只能等关键帧 → 花屏。
