@@ -4804,6 +4804,14 @@ Rectangle {
         if (!useWebEngineKernel) return
         var view = kernelPlayerLoader.item
         if (!view) return
+        // ⭐ 2026-07-24：SRS/SRT 启动前必须有流参数。Loader 的 onLoaded 可能早于 CONFIG_STATE
+        //   到达（currentStream 还是空），空参启动只会让页面报「SRS 参数缺失 host/stream」，
+        //   还会把下面的去抖时间戳占住——436ms 后真正带参数的 playWebRTC 反被去抖忽略 → 黑屏。
+        //   参数没就绪就直接返回（不占去抖），等 CONFIG_STATE 触发的 playWebRTC 再启动。
+        if (connectMode !== 1 && (!currentStream || currentStream.length === 0 || !srsServer || srsServer.length === 0)) {
+            console.log("🌐 [网页内核] kernelStartByMode: 流参数未就绪(stream=" + currentStream + " srs=" + srsServer + ")，等 CONFIG_STATE 再启动")
+            return
+        }
         // ⭐ §25.7e-附 去抖：2s 内重复重启直接忽略。双重启（CONFIG_ERROR 善后 + CONFIG_STATE
         //   开始推流）会让第二次 rebuildPC 拆掉第一次刚回完 Answer 的 RTCPeerConnection，
         //   而 iOS 把第二个 REQUEST 当重复忽略 → 会话空等 ICE 15s 超时才自愈。
