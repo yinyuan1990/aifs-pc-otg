@@ -4677,7 +4677,11 @@ void GstPlayer::sendOfferToSRS(const QString &sdp)
     m_pendingOfferSdp = sdp;
     
     // 构建 API URL
-    QString apiUrl = QString("http://%1:1985/rtc/v1/play/").arg(m_webrtcHost);
+    // ⭐ H265（第四十九章）：SRS 6.0 的 RTC H265 协商由 API 请求参数 codec=hevc 开启
+    //   （srs_app_rtc_api.cpp: r->query_get("codec")；不带则走 H264 分支，H265 Offer 会被拒）
+    QString apiUrl = m_useH265
+        ? QString("http://%1:1985/rtc/v1/play/?codec=hevc").arg(m_webrtcHost)
+        : QString("http://%1:1985/rtc/v1/play/").arg(m_webrtcHost);
     
     // SRS streamurl 格式：webrtc://host/app/stream?vhost=xxx&eip=xxx
     // 与 Java 版本保持一致
