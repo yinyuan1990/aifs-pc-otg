@@ -3251,9 +3251,11 @@ void GstPlayer::connectWebRTC(const QString &host, const QString &app, const QSt
 {
     qDebug() << "🌐 WebRTC 连接:" << host << "/" << app << "/" << stream;
 
-    // ⭐ H265 仅 P2P 支持：SRS/WHEP 链路永远 H264 管线（iOS 端同样约束）
-    m_useH265 = false;
-    H265Support::setActive(false);
+    // ⭐ H265（第四十九章）：SRS/WHEP 不再写死 H264。m_useH265 由 QML 在 connect 前 setVideoCodec(videoCodec)
+    //   按设备心跳上报的 codec 设定（H264 会话保持原样；H265 会话下方 add-transceiver 用 H265 caps + rtph265depay）。
+    H265Support::setActive(m_useH265);
+    qDebug() << (m_useH265 ? "🎬 [SRS] H265 拉流管线" : "🎬 [SRS] H264 拉流管线")
+             << " m_useH265=" << m_useH265;
 
     // [SRS诊断] 记录连接入口 + 进入时的熔断标志（用于定位「偶尔第一次画面出不来」）。
     srsLog(QString("==== connectWebRTC 入口 ===="));

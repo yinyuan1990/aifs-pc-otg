@@ -4951,7 +4951,11 @@ Rectangle {
         console.log("🎬 playWebRTC: 重置 GstPlayer 状态...")
         gstPlayer.reset()
         
-        console.log("🎬 playWebRTC: 连接 WebRTC...")
+        // ⭐ H265（第四十九章）：SRS/SRT 也按上报 codec 建解码管线（必须在 connectWebRTC 之前设，
+        //   否则 connectWebRTC 里 add-transceiver 已按旧 m_useH265 建好）。H264 会话等同旧行为。
+        gstPlayer.setVideoCodec(mainPage.videoCodec)
+        
+        console.log("🎬 playWebRTC: 连接 WebRTC(codec=" + mainPage.videoCodec + ")...")
         webrtcClient.connect(srsServer, "tenantA", currentStream)
     }
     
@@ -8821,16 +8825,16 @@ Rectangle {
                 mainPage.connectMode = connectstype
             }
 
-            // ⭐ H265：iOS 上报的 P2P 实际编码（"h264"/"h265"，登录页二级选项决定）。
-            //   PC 据此在 playP2P 前预建对应解码管线（H265 逻辑在 h265support.h/.cpp）。
+            // ⭐ H265：设备上报的实际编码（"h264"/"h265"，各端登录页选项决定）。
+            //   第四十九章：P2P/SRS/SRT 都可 H265，PC 按上报值预建解码管线（H265 逻辑在 h265support.h/.cpp）。
             var videoCodec = state.videoCodec || "h264"
             var codecChanged = (videoCodec !== mainPage.videoCodec)
             if (codecChanged) {
-                console.log("🎞️ P2P 视频编码变更: " + mainPage.videoCodec + " → " + videoCodec)
+                console.log("🎞️ 视频编码变更: " + mainPage.videoCodec + " → " + videoCodec + " (connectstype=" + connectstype + ")")
                 mainPage.videoCodec = videoCodec
             }
-            // 同步给 GstPlayer（非 P2P 强制 h264；网页内核的日志分流也依赖此标志）
-            gstPlayer.setVideoCodec(connectstype === 1 ? videoCodec : "h264")
+            // 同步给 GstPlayer——第四十九章：不再「非 P2P 强制 h264」，SRS/SRT 也按上报 codec 解码
+            gstPlayer.setVideoCodec(videoCodec)
 
             // ⭐ 2026-06-24：SRT 改走方案A（SRS 桥接 WebRTC），PC 不再用 GStreamer srtsrc 直拉，
             //   故不再预热 SRT 专用解码/编码（warmupSRT 已无意义，移除避免无谓冷启动开销）。
@@ -8861,10 +8865,10 @@ Rectangle {
                         console.log("🎬 使用 SRS/WHEP 模式拉流（含 SRT→SRS 桥接）")
                         playWebRTC()
                     }
-                } else if (modeChanged || (codecChanged && mainPage.connectMode === 1)) {
-                    // ⭐ 播放中 iOS 切换了连接方式（SRS↔P2P↔SRT）或 P2P 编码（H264↔H265）→ 重连
-                    //   SRT 走方案A（等同 SRS/WHEP），见上方说明。
-                    var modeName = mainPage.connectMode === 1 ? "P2P(" + mainPage.videoCodec + ")" : (mainPage.connectMode === 2 ? "SRT" : "SRS")
+                } else if (modeChanged || codecChanged) {
+                    // ⭐ 播放中 iOS 切换了连接方式（SRS↔P2P↔SRT）或编码（H264↔H265）→ 重连。
+                    //   第四十九章：SRS/SRT 也支持 H265，codecChanged 不再只在 P2P 触发。
+                    var modeName = mainPage.connectMode === 1 ? "P2P(" + mainPage.videoCodec + ")" : (mainPage.connectMode === 2 ? "SRT(" + mainPage.videoCodec + ")" : "SRS(" + mainPage.videoCodec + ")")
                     console.log("🔁 播放中连接方式/编码切换 → " + modeName + "，重连")
                     stopAll()
                     if (mainPage.connectMode === 1) {
