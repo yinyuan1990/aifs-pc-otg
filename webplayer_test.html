@@ -644,7 +644,10 @@
         logC('SRS offer 编码诊断: wantH265=' + wantH265 + ' offerHasH265=' + offerHasH265 + ' kernelSupportsH265=' + kernelH265);
         nhLog('>> SRS H265 CHECK want=' + wantH265 + ' offerHasH265=' + offerHasH265 + ' kernelSupportsH265=' + kernelH265);
         if (wantH265 && !offerHasH265) {
-          showErr('本内核 Offer 不含 H265（Chromium 未启用 H265 接收或无硬解），SRS H265 无法协商');
+          // Qt 6.10.3 的 WebEngine = Chromium 134，Qt 发行版编译期未启用 WebRTC H265 接收
+          //（getCapabilities 无 video/H265，且 Chromium H265 无软解），启动参数无法解锁。
+          showErr('网页内核(Chromium 134)不支持 H265 接收（Qt 发行版编译期限制）\n' +
+                  'H265 请使用 GStreamer 内核观看（已支持硬解），或将设备端编码改为 H264');
         }
       } catch(_){}
       const apiUrl = 'http://' + cfg.host + ':1985/rtc/v1/play/' + (wantH265 ? '?codec=hevc' : '');
