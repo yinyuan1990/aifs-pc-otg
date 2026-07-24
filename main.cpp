@@ -653,9 +653,15 @@ int main(int argc, char *argv[])
             "--enable-gpu-rasterization "
             "--enable-zero-copy "
             "--enable-accelerated-video-decode "
-            // ⭐ H265：WebRtcAllowH265Receive 允许 Chromium WebRTC 接收 H265（需 Chromium ≥M136 且
-            //   平台 HEVC 硬解可用；不满足时协商自动回落 H264，webplayer_test.html 有能力检测日志）
+            // ⭐ H265：Qt 6.10.3 的 WebEngine 是 Chromium 134（M136 才原生开 WebRTC H265）。
+            //   M135 及以下按官方说法必须「两个参数同时给」：
+            //   ① --enable-features=WebRtcAllowH265Receive（允许接收 H265）
+            //   ② --force-fieldtrials=WebRTC-Video-H26xPacketBuffer/Enabled（H26x 包缓冲 field trial，
+            //     缺它 H265 接收在 M134 不激活——2026-07-24 实测内核报「不支持 H265」的原因）。
+            //   另需平台 HEVC 硬解（PlatformHEVCDecoderSupport + GPU）；不满足时协商回落 H264，
+            //   webplayer_test.html 的 SRS H265 CHECK 日志可看 kernelSupportsH265 实际值。
             "--enable-features=D3D11VideoDecoder,AcceleratedVideoDecodeLinuxGL,PlatformHEVCDecoderSupport,WebRtcAllowH265Receive "
+            "--force-fieldtrials=WebRTC-Video-H26xPacketBuffer/Enabled "
             "--disable-features=WebRtcHideLocalIpsWithMdns");
     QtWebEngineQuick::initialize();
     earlyLog("[WebEngine] QtWebEngineQuick::initialize() done");
