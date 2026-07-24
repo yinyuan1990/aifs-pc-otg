@@ -634,7 +634,20 @@
       pc.addTransceiver('video', { direction: 'recvonly' });   // 本系统 SRS 纯视频无音频
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
-      const apiUrl = 'http://' + cfg.host + ':1985/rtc/v1/play/';
+      // [H265] 第四十九章：H265 会话时 play API 追加 ?codec=hevc（SRS 6.0 RTC H265 协商开关），
+      //   并诊断本内核 offer/能力里是否真带 H265（Chromium 需 WebRtcAllowH265Receive + 平台 HEVC 硬解）。
+      const wantH265 = (cfg.codec === 'h265');
+      try {
+        var offerHasH265 = /H265|HEVC/i.test(offer.sdp);
+        var rxCaps = (window.RTCRtpReceiver && RTCRtpReceiver.getCapabilities) ? RTCRtpReceiver.getCapabilities('video') : null;
+        var kernelH265 = !!(rxCaps && rxCaps.codecs && rxCaps.codecs.some(function(c){ return /H265|HEVC/i.test(c.mimeType||''); }));
+        logC('SRS offer 编码诊断: wantH265=' + wantH265 + ' offerHasH265=' + offerHasH265 + ' kernelSupportsH265=' + kernelH265);
+        nhLog('>> SRS H265 CHECK want=' + wantH265 + ' offerHasH265=' + offerHasH265 + ' kernelSupportsH265=' + kernelH265);
+        if (wantH265 && !offerHasH265) {
+          showErr('本内核 Offer 不含 H265（Chromium 未启用 H265 接收或无硬解），SRS H265 无法协商');
+        }
+      } catch(_){}
+      const apiUrl = 'http://' + cfg.host + ':1985/rtc/v1/play/' + (wantH265 ? '?codec=hevc' : '');
       const streamUrl = 'webrtc://' + cfg.host + '/' + cfg.app + '/' + cfg.stream + '?vhost=' + cfg.vhost + '&eip=' + cfg.host;
       const sdpCRLF = offer.sdp.replace(/\r\n/g,'\n').replace(/\n/g,'\r\n');
       const resp = await fetch(apiUrl, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({api:apiUrl, streamurl:streamUrl, sdp:sdpCRLF}) });

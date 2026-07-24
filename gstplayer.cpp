@@ -4552,13 +4552,16 @@ void GstPlayer::createWebRTCOffer()
         // ⭐ 移除 profile-level-id 限制，让 WebRTC 自动协商
         // 支持所有 Profile (Baseline/Main/High) 和 Level (3.1~5.2+)
         // 解决 iPhone 16 等新设备可能使用不同编码参数的问题
-        // ⭐ H265（第四十九章）：H265 会话 recvonly transceiver 用 H265 caps（与 H264 路径对称：
-        //   只给 add-transceiver caps、不再另设 codec-preferences——实测上一版多设 codec-preferences=H265
-        //   会让 webrtcbin 在 offerer 角色下建不出媒体、Offer 丢掉整条 m=video，SRS 报 "no media descriptions"）。
-        //   caps 用 rtph265depay 期望的标准 RTP 格式（不带固定 payload，PT 由 webrtcbin 动态分配）。
+        // ⭐ H265（第四十九章）：H265 会话 recvonly transceiver 用 H265 caps（与 H264 路径对称）。
+        //   ⭐⭐⭐ 2026-07-24 空 Offer 根因：add-transceiver 的 caps 必须「完整到能生成 SDP」
+        //   （GStreamer 官方 gstsdpmessage 的 caps→SDP 转换要求 payload 字段；官方示例均带 payload=96）。
+        //   上一版故意不带 payload（误以为 PT 会动态分配）→ webrtcbin 构不出 m=video → Offer 为空
+        //   （"v=0...a=group:BUNDLE" 无媒体行）→ SRS 400。补上 payload=106（动态 PT 区间，含义与
+        //   H264 路径的 payload=109 相同，SRS 应答会沿用我们 Offer 里的 PT）。
         GstCaps *videoCaps = m_useH265
             ? gst_caps_from_string(
-                "application/x-rtp,media=(string)video,clock-rate=(int)90000,encoding-name=(string)H265")
+                "application/x-rtp,media=(string)video,payload=(int)106,"
+                "encoding-name=(string)H265,clock-rate=(int)90000")
             : gst_caps_from_string(
                 "application/x-rtp,media=video,payload=109,encoding-name=H264,"
                 "clock-rate=90000,packetization-mode=(string)1,"

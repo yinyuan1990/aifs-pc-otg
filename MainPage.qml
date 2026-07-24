@@ -4824,7 +4824,8 @@ Rectangle {
         } else {
             // ⭐ SRS 与 SRT 都走 WHEP：SRT 由 SRS 桥接成 WebRTC（方案A），网页内核天然适配。
             //   （connectMode===2 不再显示「不支持 SRT」提示。）
-            view.startTest("srs", srsServer, "tenantA", currentStream, "vid-7gg4748")
+            //   ⭐ H265：把 codec 传给页面，startSRS 据此在 play API 上加 ?codec=hevc（第四十九章）。
+            view.startTest("srs", srsServer, "tenantA", currentStream, "vid-7gg4748", videoCodec)
         }
     }
 
@@ -15252,7 +15253,7 @@ Rectangle {
             onLoaded: {
                 if (item && item.startTest) {
                     var mode = (mainPage.connectMode === 1) ? "p2p" : "srs"
-                    item.startTest(mode, mainPage.srsServer, "tenantA", mainPage.currentStream, "vid-7gg4748")
+                    item.startTest(mode, mainPage.srsServer, "tenantA", mainPage.currentStream, "vid-7gg4748", mainPage.videoCodec)
                 }
             }
             onStatusChanged: {

@@ -24,14 +24,19 @@ Item {
     // ⭐ 顶部留白：作为「对比浮窗」时给标题栏留 34px；作为主播放器全屏时设 0。
     property int topInset: 34
 
-    // SRS 用：startTest(mode, host, app, stream, vhost)
+    // ⭐ H265（第四十九章）：会话编码 "h264"/"h265"。SRS 拉流时传给页面，
+    //   startSRS 据此在 play API 上追加 ?codec=hevc（SRS 6.0 的 RTC H265 协商开关）。
+    property string pendingCodec: "h264"
+
+    // SRS 用：startTest(mode, host, app, stream, vhost, codec)
     // SRT（网页内核不支持）：startTest("srt") → 显示提示、不播
-    function startTest(mode, host, app, stream, vhost) {
+    function startTest(mode, host, app, stream, vhost, codec) {
         testMode = mode || "srs"
         pendingHost = host || ""
         pendingApp = app || "tenantA"
         pendingStream = stream || ""
         pendingVhost = vhost || "vid-7gg4748"
+        pendingCodec = codec || "h264"
         if (pageReady) _injectAndPlay()
     }
 
@@ -82,7 +87,8 @@ Item {
             js = "if (window.showSrtUnsupported) window.showSrtUnsupported(false);" +
                  "if (window.startPlay) window.startPlay({" +
                  "mode:'srs', host:'" + pendingHost + "', app:'" + pendingApp +
-                 "', stream:'" + pendingStream + "', vhost:'" + pendingVhost + "'});"
+                 "', stream:'" + pendingStream + "', vhost:'" + pendingVhost +
+                 "', codec:'" + pendingCodec + "'});"
         }
         webView.runJavaScript(js)
         // 🔥 2026-07-02: 卡顿根因已定位（发送端周期 IDR 攒帧，见手册第二十一章），
