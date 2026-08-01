@@ -263,7 +263,7 @@ static void srsLogWrite(const QString& timestamp, const QString& msg) {
             *g_srsLogStream << "  1) [connect] 每次连接入口，含 host/stream + 进入时的熔断标志状态" << Qt::endl;
             *g_srsLogStream << "  2) [熔断] srsError/offerSent/offerInProgress 三标志 —— 若进入时已是 true 且没被重置 = 卡死根因" << Qt::endl;
             *g_srsLogStream << "  3) [offer] Offer 创建/发送；[http] SRS 返回 code（0=成功，400/404=流未就绪重试）" << Qt::endl;
-            *g_srsLogStream << "  4) [retry] 重试次数；达 5 次用尽 → srsError=true 禁用自动重连（之后必须切账号/重登才恢复）" << Qt::endl;
+            *g_srsLogStream << "  4) [retry] 重试次数；§54(2026-07-31)起 400/404 每 2s 常驻重试**永不放弃**（旧版 5 次即死已删除）" << Qt::endl;
             *g_srsLogStream << "  5) [answer]/[ice]/[首帧] 出现 = 链路打通；缺哪步就是卡在前一步" << Qt::endl;
             *g_srsLogStream << "==============================================" << Qt::endl << Qt::endl;
             g_srsLogStream->flush();
@@ -3556,6 +3556,10 @@ void GstPlayer::connectP2P(const QString &pairedIosDeviceId, const QJsonArray &i
     m_srsError.store(false);
     m_srsRetryCount.store(0);
     m_pendingOfferSdp.clear();
+    // ⭐ §53.24：新一轮 P2P 连接，清掉上一轮的 Offer 防抖残留（防旧 Offer 被误应用到新会话）
+    m_pendingP2POfferSdp.clear();
+    m_lastOfferAppliedMs = 0;
+    if (m_offerDebounceTimer) m_offerDebounceTimer->stop();
     m_noFpsSeconds.store(0);
     m_reconnectScheduled.store(false);
     m_offerSentForSession.store(false);
@@ -3563,9 +3567,22 @@ void GstPlayer::connectP2P(const QString &pairedIosDeviceId, const QJsonArray &i
     m_waitingForP2POffer.store(false);
     m_p2pViewRequestRetryCount.store(0);
     
+    // ⭐⭐ §53.25：会话 epoch——**一轮协商一个**（重发不换，重建 pipeline 才换新轮次）。
+    //   REQUEST 带出去，设备端该会话所有 Offer/ICE 回带；PC 只收当前 epoch 的信令。
+    //   幽灵会话/幽灵 Offer/Answer 错配整类问题从协议层根绝（时间窗/防抖降级为纯保险）。
+    m_p2pEpoch = QDateTime::currentMSecsSinceEpoch();
+    p2pLog(QString("[epoch] 新一轮协商 epoch=%1").arg(m_p2pEpoch));
+    
     m_webrtcStatus = "P2P Connecting...";
     emit webrtcStatusChanged(m_webrtcStatus);
-    
+
+    // ⭐ §54.6（2026-07-31 日志实锤）：新一轮连接必须清掉上一轮的"已连接"残留。
+    //   旧代码 disconnectP2P/connectP2P 都不复位 m_p2pConnected → 上一轮连通过之后，
+    //   新一轮的**首个** fresh Offer 会被 handleP2POffer 误判为"重协商 reoffer"
+    //   （判据 m_p2pConnected || ufrag 非空），把刚建好的 pipeline 又拆一遍重建，
+    //   白白撑大与 iOS trickle ICE 的竞态窗（21:22:28 轮实录）。
+    m_p2pConnected = false;
+
     if (m_pipeline) {
         stop();
         destroyPipeline();
@@ -3602,6 +3619,7 @@ void GstPlayer::disconnectP2P()
     destroyPipeline();
     
     m_webrtcConnected = false;
+    m_p2pConnected = false;   // §54.6：不复位会让下一轮首个 Offer 被误判成 reoffer（见 connectP2P 注释）
     m_useP2P = false;
     m_pairedIosDeviceId.clear();
     m_noFpsSeconds.store(0);
@@ -3645,6 +3663,18 @@ void GstPlayer::handleWebRTCSignaling(const QJsonObject &message)
     }
 
     QString type = message.value("type").toString();
+    
+    // ⭐⭐ §53.25：会话 epoch 校验——设备端回带的 epoch 与当前轮次不符 = 上一轮的过期信令
+    //  （幽灵 Offer / 迟到 ICE / 旧会话 HANGUP），直接丢弃。缺字段（老版本设备端）= 放行。
+    {
+        const qint64 msgEpoch = static_cast<qint64>(message.value("epoch").toDouble(0));
+        if (msgEpoch > 0 && m_p2pEpoch > 0 && msgEpoch != m_p2pEpoch
+            && (type == "WEBRTC_SDP" || type == "WEBRTC_ICE" || type == "WEBRTC_HANGUP")) {
+            p2pLog(QString("[epoch] 🗑 丢弃过期轮次信令 type=%1 msgEpoch=%2 当前=%3")
+                   .arg(type).arg(msgEpoch).arg(m_p2pEpoch));
+            return;
+        }
+    }
     
     if (type == "WEBRTC_SDP") {
         QString sdpType = message.value("sdpType").toString();
@@ -3693,6 +3723,13 @@ void GstPlayer::handleWebRTCSignaling(const QJsonObject &message)
         if (reason == "max_viewers_reached") {
             m_webrtcStatus = "P2P rejected: max viewers";
             emit error("该设备已达到最大观看人数上限");
+        } else if (reason == "single_mode_occupied") {
+            // ⭐ §53.20.3：设备处于 P2P 单人直连、已被先来的 PC 占用（先到先得）。
+            //   不自动重试——占线状态短时间不会变，重试只会刷屏；用户看提示自行决定。
+            // ⭐ 2026-08-01：改发专用信号，QML 弹框提示 + 置"单人占用"标记停掉 §54 自愈重连
+            //   （只 emit error 的话 QML 看门狗 8s 后又 playP2P 重连、又被拒 → 反复卡死）。
+            m_webrtcStatus = "P2P rejected: single mode occupied";
+            emit p2pRejectedSingleMode();
         } else if (reason == "not_ready") {
             m_webrtcStatus = "P2P rejected: not ready";
             emit error("设备未就绪，请稍后重试");
@@ -3709,6 +3746,35 @@ void GstPlayer::handleWebRTCSignaling(const QJsonObject &message)
 
 void GstPlayer::handleP2POffer(const QString &sdp)
 {
+    // ⭐⭐ §53.24：Offer 风暴防抖（2026-07-30 01:46 实测：700ms 内连收 4 个 Offer）。
+    //   设备端会话抖动（请求→断开→再请求）时可能连发多个 Offer（含被拆会话的过期 Offer），
+    //   每个新 ufrag 都触发下面的「整条 pipeline 重建」——重建风暴中两端互相打断永远连不通。
+    //   收敛策略 = 只应用最后一个：距上次应用 <800ms 的 Offer 先暂存（新的覆盖旧的），
+    //   300ms 无更新后统一应用最新那份。正常单发 Offer 完全不受影响（间隔远大于 800ms）。
+    {
+        qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+        if (m_lastOfferAppliedMs > 0 && nowMs - m_lastOfferAppliedMs < 800) {
+            m_pendingP2POfferSdp = sdp;   // 注意：与 SRS 路径的 m_pendingOfferSdp 无关，专用成员
+            if (!m_offerDebounceTimer) {
+                m_offerDebounceTimer = new QTimer(this);
+                m_offerDebounceTimer->setSingleShot(true);
+                connect(m_offerDebounceTimer, &QTimer::timeout, this, [this]() {
+                    if (m_pendingP2POfferSdp.isEmpty()) return;
+                    QString latest = m_pendingP2POfferSdp;
+                    m_pendingP2POfferSdp.clear();
+                    m_lastOfferAppliedMs = 0;   // 放行本次应用（防抖窗口只针对风暴期间）
+                    p2pLog("[offer] 防抖窗口结束 → 应用暂存的最新 Offer");
+                    handleP2POffer(latest);
+                });
+            }
+            m_offerDebounceTimer->start(300);
+            p2pLog(QString("[offer] 距上次应用仅 %1ms（Offer 风暴）→ 暂存最新、300ms 后统一应用")
+                   .arg(nowMs - m_lastOfferAppliedMs));
+            return;
+        }
+        m_lastOfferAppliedMs = nowMs;
+    }
+    
     if (!m_webrtcbin) {
         qWarning() << "[P2P] webrtcbin 未初始化，无法处理 Offer";
         return;
@@ -4030,21 +4096,21 @@ void GstPlayer::scheduleP2PViewRequestRetry()
         }
 
         int retry = m_p2pViewRequestRetryCount.fetch_add(1) + 1;
-        if (retry > P2P_VIEW_REQUEST_RETRY_MAX) {
-            m_waitingForP2POffer.store(false);
-            m_webrtcStatus = "P2P waiting offer timeout";
+        // ⭐ §54（2026-07-31）权威修复：等 Offer 改为**常驻循环，永不放弃**。
+        //   原来 5 次(7.5s)耗尽 → "waiting offer timeout" 终态，之后 iOS 心跳照来但流名不变
+        //   → 没有任何"边沿"再触发连接 → 两端都在线却永久黑屏（iOS 重进的就绪窗口正好
+        //   盖过这 7.5s = 客户现场黑屏的头号成因）。
+        //   现在：同 epoch 每 1.5s 重发（iOS 端幂等：正在服务同轮次则忽略，无会话则建新回 Offer），
+        //   停止条件只有：收到 Offer / HANGUP / REJECT / QML 主动断开（设备停推、心跳超时、用户操作）。
+        //   信令包几百字节，1.5s 一发零成本；设备真离线时 QML 心跳超时(6s)会 disconnectP2P 终止本循环。
+        if (retry % 10 == 0) {
+            m_webrtcStatus = QString("P2P 等待设备响应(%1s)...")
+                                 .arg(retry * P2P_VIEW_REQUEST_RETRY_INTERVAL_MS / 1000);
             emit webrtcStatusChanged(m_webrtcStatus);
-            qWarning() << "[P2P] 等待 iOS Offer 超时，停止重试";
-            p2pLog(QString("[request] ❌ 重发 %1 次仍未收到 iOS Offer，超时放弃。"
-                           "根因在信令层(不是 NAT)：iOS 设备不在线/没收到 WEBRTC_REQUEST/没回 Offer，"
-                           "与「手机热点」无关——若是热点问题应能收到 Offer 但卡在 [ice] FAILED")
-                   .arg(P2P_VIEW_REQUEST_RETRY_MAX));
-            emit error("P2P 连接超时：未收到 iOS Offer，请检查设备在线状态");
-            return;
+            p2pLog(QString("[request] 已重发 %1 次仍未收到 Offer，继续常驻重发"
+                           "（§54：设备在线则其就绪后的第一次重发即会得到 Offer）").arg(retry));
         }
-
-        qDebug() << "[P2P] 未收到 Offer，重发 WEBRTC_REQUEST (" << retry
-                 << "/" << P2P_VIEW_REQUEST_RETRY_MAX << ")";
+        qDebug() << "[P2P] 未收到 Offer，重发 WEBRTC_REQUEST (#" << retry << ")";
         emit sendViewRequest(m_pairedIosDeviceId);
         scheduleP2PViewRequestRetry();
     });
@@ -4075,27 +4141,22 @@ void GstPlayer::attemptP2PIceReconnect(const QString &reason)
         return;
     }
 
-    const int kMaxIceReconnect = 5;
-    if (m_iceRetryCount >= kMaxIceReconnect) {
-        qWarning() << "[P2P] ICE 重连已达上限(" << kMaxIceReconnect << ")，停止自动重连:" << reason;
-        p2pLog(QString("[reconnect] ❌ 已达重连上限(%1)，停止。候选者：%2 → 若始终无 relay，"
-                       "说明热点+缺TURN 无解，需切回 SRS 中转或修好 TURN")
-               .arg(kMaxIceReconnect).arg(p2pCandSummary()));
-        m_webrtcStatus = "P2P: 重连失败，请手动重试";
-        emit webrtcStatusChanged(m_webrtcStatus);
-        return;
-    }
-
+    // ⭐ §54（2026-07-31）：重连**无上限**——原 5 次耗尽后"请手动重试"是三条永久放弃终态之一
+    //   （另两条：等 Offer 5 次超时、SRS 400 重试用尽），命中即"两端都在线却永久黑屏"。
+    //   现在：只要 QML 还认为该看这台设备（设备心跳在、publishStatus=1），重连就一直进行；
+    //   设备真离线/停推时 QML 会 disconnectP2P，m_useP2P=false 自动终止。
+    //   节奏：首次立即、之后 1s → 2s 封顶（每次重建都换新 epoch，iOS 幂等拆旧建新，无风暴）。
     m_iceReconnecting = true;
     int attempt = ++m_iceRetryCount;
-    qWarning() << "[P2P] ICE 主动重连 (" << attempt << "/" << kMaxIceReconnect << ") 原因:" << reason;
-    p2pLog(QString("[reconnect] 主动重连 (%1/%2) 原因=%3（重发 WEBRTC_REQUEST 让 iOS 带新候选者重协商）")
-           .arg(attempt).arg(kMaxIceReconnect).arg(reason));
-    m_webrtcStatus = QString("P2P: 重连中(%1/%2)...").arg(attempt).arg(kMaxIceReconnect);
+    qWarning() << "[P2P] ICE 主动重连 (#" << attempt << ") 原因:" << reason;
+    p2pLog(QString("[reconnect] 主动重连 (#%1) 原因=%2（重发 WEBRTC_REQUEST 让 iOS 带新候选者重协商；"
+                   "§54 常驻重连，不再有次数上限）")
+           .arg(attempt).arg(reason));
+    m_webrtcStatus = QString("P2P: 重连中(#%1)...").arg(attempt);
     emit webrtcStatusChanged(m_webrtcStatus);
 
-    // 指数退避（首次立即，之后 1s/2s/4s...），重发 WEBRTC_REQUEST 让 iOS 重新发 Offer
-    int delayMs = (attempt <= 1) ? 0 : (500 << (attempt - 1));
+    // 节奏：首次立即，之后 1s、2s、2s...（封顶 2s，保证恢复窗口 ≤3s 目标）
+    int delayMs = (attempt <= 1) ? 0 : qMin(500 << qMin(attempt - 1, 2), 2000);
     QTimer::singleShot(delayMs, this, [this, reason]() {
         if (!m_useP2P || m_pairedIosDeviceId.isEmpty()) { m_iceReconnecting = false; return; }
         if (m_p2pConnected) { m_iceReconnecting = false; return; }
@@ -4121,10 +4182,13 @@ void GstPlayer::attemptP2PIceReconnect(const QString &reason)
         // 重置等待状态并重发观看请求；scheduleP2PViewRequestRetry 提供兜底重试
         m_waitingForP2POffer.store(true);
         m_p2pViewRequestRetryCount.store(0);
+        // ⭐ §53.25：重建 pipeline = 新一轮协商 → 换新 epoch（旧轮次的 Offer/ICE 自动作废）
+        m_p2pEpoch = QDateTime::currentMSecsSinceEpoch();
+        p2pLog(QString("[epoch] 重建重连，新轮次 epoch=%1").arg(m_p2pEpoch));
         emit sendViewRequest(m_pairedIosDeviceId);
         qWarning() << "[P2P] 已重建 pipeline 并重发 WEBRTC_REQUEST 触发 iOS 重新协商:" << reason;
         scheduleP2PViewRequestRetry();
-        m_iceReconnecting = false;  // 允许后续 ICE 事件再次触发（次数仍受 m_iceRetryCount 限制）
+        m_iceReconnecting = false;  // 允许后续 ICE 事件再次触发（§54：无次数上限，计数仅用于日志/节奏）
     });
 }
 
@@ -4706,7 +4770,7 @@ void GstPlayer::sendOfferToSRS(const QString &sdp)
     sdpCRLF.replace("\n", "\r\n");  // 再转为 CRLF
     
     int retryCount = m_srsRetryCount.load();
-    qDebug() << "📤 API URL:" << apiUrl << "(重试:" << retryCount << "/5)";
+    qDebug() << "📤 API URL:" << apiUrl << "(已重试:" << retryCount << ")";
     qDebug() << "📤 Stream URL:" << streamUrl;
     
     // 调试：检查 SDP 是否包含视频 m-line
@@ -4732,16 +4796,23 @@ void GstPlayer::sendOfferToSRS(const QString &sdp)
     
     QNetworkReply *reply = m_networkManager->post(request, jsonData);
     
-    srsLog(QString("[http] POST Offer 到 SRS（重试 %1/5）").arg(retryCount));
+    srsLog(QString("[http] POST Offer 到 SRS（已重试 %1 次，§54 常驻重试无上限）").arg(retryCount));
     connect(reply, &QNetworkReply::finished, this, [this, reply]() {
         if (reply->error() != QNetworkReply::NoError) {
-            qWarning() << "❌ HTTP 请求失败:" << reply->errorString();
-            srsLog(QString("[http] ❌ HTTP 请求失败: %1 → 画面出不来（offerInProgress 回退，但 offerSent 仍 true，无自动重连）")
+            // ⭐ §54：HTTP 传输失败（网络抖动/服务器瞬断）不再一次失败即死，2s 后常驻重试。
+            //   设备停推/离线时 QML 会 disconnectWebRTC → m_useWebRTC=false 自动终止循环。
+            qWarning() << "❌ HTTP 请求失败:" << reply->errorString() << "→ 2s 后重试";
+            srsLog(QString("[http] ❌ HTTP 请求失败: %1 → 2s 后重试（§54 常驻重试）")
                    .arg(reply->errorString()));
-            m_webrtcStatus = "HTTP Error";
+            m_webrtcStatus = "HTTP Error, retrying...";
             emit webrtcStatusChanged(m_webrtcStatus);
-            emit error(reply->errorString());
             m_offerInProgress.store(false);
+            QTimer::singleShot(2000, this, [this]() {
+                if (!m_pendingOfferSdp.isEmpty() && m_useWebRTC) {
+                    qDebug() << "🔄 HTTP 失败后重试发送 Offer 到 SRS...";
+                    sendOfferToSRS(m_pendingOfferSdp);
+                }
+            });
             reply->deleteLater();
             return;
         }
@@ -4760,35 +4831,49 @@ void GstPlayer::sendOfferToSRS(const QString &sdp)
                 QString errorMsg = responseObj["msg"].toString();
                 int retryCount = m_srsRetryCount.load();
                 
-                qWarning() << "❌ SRS 返回错误 code=" << errorCode << ":" << errorMsg << "(重试:" << retryCount << "/5)";
+                qWarning() << "❌ SRS 返回错误 code=" << errorCode << ":" << errorMsg << "(已重试:" << retryCount << ")";
                 
-                // 🔥 SRS 400/404 错误可能是流还没准备好，进行重试
-                if ((errorCode == 400 || errorCode == 404) && retryCount < 5) {
-                    m_srsRetryCount.fetch_add(1);
-                    qDebug() << "🔄 SRS 流可能未就绪，" << (retryCount + 1) << "秒后重试...";
-                    m_webrtcStatus = QString("Retrying... (%1/5)").arg(retryCount + 1);
+                // ⭐ §54（2026-07-31）权威修复：400/404（流未就绪/被拒）改为**固定 2s 常驻重试，永不放弃**。
+                //   原来 1~5s 递增×5 次（15s 窗口）耗尽 → m_srsError=true「必须切账号/重登才恢复」终态。
+                //   iOS 重进/重协商的"流名注册到 SRS"时刻只要落在这 15s 之外，就永久黑屏。
+                //   现在：设备心跳还说在推流，QML 就不会断开本会话，这里每 2s 一次 HTTP POST
+                //   （几百字节）直到 SRS 放行；设备真停推/离线时 QML 会 disconnectWebRTC，
+                //   m_useWebRTC=false 自动终止循环。§53.8 已把后端 on_play 改为"宁放行不误拒"，
+                //   正常情况下 1~2 次重试内必然放行。
+                if (errorCode == 400 || errorCode == 404) {
+                    int n = m_srsRetryCount.fetch_add(1) + 1;
+                    if (n <= 3 || n % 5 == 0) {
+                        qDebug() << "🔄 SRS 流未就绪/拒播(code=" << errorCode << ")，2s 后第" << (n + 1) << "次重试...";
+                        srsLog(QString("[retry] code=%1 第 %2 次，2s 后继续（§54 常驻重试，不再放弃）")
+                               .arg(errorCode).arg(n));
+                    }
+                    m_webrtcStatus = QString("等待流就绪(%1)...").arg(n);
                     emit webrtcStatusChanged(m_webrtcStatus);
-                    
-                    // 延迟重试（1秒后）
-                    QTimer::singleShot(1000 * (retryCount + 1), this, [this]() {
+                    QTimer::singleShot(2000, this, [this]() {
                         if (!m_pendingOfferSdp.isEmpty() && m_useWebRTC) {
-                            qDebug() << "🔄 重试发送 Offer 到 SRS...";
                             sendOfferToSRS(m_pendingOfferSdp);
                         }
                     });
-                    
                     m_offerInProgress.store(false);
                     reply->deleteLater();
                     return;
                 }
                 
-                // 重试次数用尽，放弃
+                // 非 400/404 的硬错误（token 无效等）：保留终态提示；QML §54 看门狗仍会整会话重建再试
                 m_webrtcStatus = "SRS Error";
                 emit webrtcStatusChanged(m_webrtcStatus);
                 m_srsError.store(true);
-                qDebug() << "⚠️ SRS 错误（重试用尽），禁用自动重连";
-                
-                emit error(errorMsg);
+                qDebug() << "⚠️ SRS 硬错误 code=" << errorCode;
+
+                // ⭐ §53.3②：把拒播翻译成人话。SRS 不会把 on_play 钩子的原因回传给客户端，
+                //   403 最常见的成因是鉴权/后端拒绝，给现场一个可读原因。
+                if (errorCode == 403) {
+                    emit error(QString("服务器拒绝播放(code=%1)。常见原因：该设备的观看人数已满"
+                                       "（含上一次未正常退出的残留观看者），或鉴权失败。"
+                                       "可让设备重新推流一次，或联系后台清理观看者。").arg(errorCode));
+                } else {
+                    emit error(errorMsg.isEmpty() ? QString("SRS 错误 code=%1").arg(errorCode) : errorMsg);
+                }
                 m_offerInProgress.store(false);
                 reply->deleteLater();
                 return;

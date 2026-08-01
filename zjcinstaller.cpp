@@ -150,6 +150,20 @@ bool serviceInstalled() {
     return installed;
 }
 
+// ⭐ 2026-08-01：语义版本比较——a 是否严格低于 b（"1.0.0" < "1.0.1"）。
+//   逐段数字比较，缺段按 0；非数字/空按 0。用于把"字符串不等就重装"改成"只在真的更旧才升级"，
+//   从根上消灭"老子进程无版本号(空串) != 服务器版本 → 每次登录都重装"的抖动。
+bool versionOlder(const QString &a, const QString &b) {
+    const QStringList pa = a.split('.'); const QStringList pb = b.split('.');
+    const int n = qMax(pa.size(), pb.size());
+    for (int i = 0; i < n; ++i) {
+        const int va = (i < pa.size()) ? pa[i].trimmed().toInt() : 0;
+        const int vb = (i < pb.size()) ? pb[i].trimmed().toInt() : 0;
+        if (va != vb) return va < vb;
+    }
+    return false; // 相等
+}
+
 // 提权运行 dl\zjc_worker.exe --install，等待其写出 version 文件确认
 bool runInstall(const QString &exePath, const QString &expectVersion) {
     const std::wstring wExe = QDir::toNativeSeparators(exePath).toStdWString();
@@ -372,16 +386,30 @@ void worker(QString baseUrl, QString pcDeviceId) {
     }
 
     // 2) 与本地已装版本比对
+    // ⭐⭐ 2026-08-01 根治"子进程反复被停/重装"（用户实测每天十几次"莫名断"）：
+    //   旧逻辑是**字符串相等**判定——`installed && localVer == serverVersion` 才跳过。
+    //   但**大量老子进程根本不写 zjc_worker.version 文件，localVer 恒为空**，空串永远 != 服务器版本，
+    //   于是每次 Phoenix 登录都判"需要重装"→ sc stop→重装→sc start → 服务反复停起。
+    //   新逻辑：服务已安装时，只有"**本地版本真的更旧**"或"总后台**强制重装**"才升级；
+    //   老子进程(空版本)一律视为可用、跳过重装（服务在跑就别折腾）。要强推新版走 forceReinstall。
     const QString localVer = localInstalledVersion();
     const bool installed = serviceInstalled();
-    if (installed && localVer == serverVersion) {
-        zjcLog(QString("已是最新版本 %1，无需重装").arg(localVer));
-        // 已最新也上报一次（总后台能看到该 PC 在线且版本正确）
-        reportStatus(baseUrl, pcDeviceId, localVer, true, QString());
-        return;
+    const bool forceReinstall = root.value("forceReinstall").toBool(false);
+    if (installed && !forceReinstall) {
+        if (localVer.isEmpty()) {
+            // 老子进程无版本号：服务在跑就认为可用，**绝不重装**（这正是反复断的元凶）。
+            zjcLog("服务已安装但无本地版本号(老子进程)→ 视为可用，跳过重装（避免每次登录反复停/装服务）");
+            reportStatus(baseUrl, pcDeviceId, localVer, true, QString());
+            return;
+        }
+        if (!versionOlder(localVer, serverVersion)) {
+            zjcLog(QString("本地版本 %1 不低于服务器 %2，无需重装").arg(localVer, serverVersion));
+            reportStatus(baseUrl, pcDeviceId, localVer, true, QString());
+            return;
+        }
     }
-    zjcLog(QString("需要安装/更新: 本地已装=%1(ver=%2) 服务器ver=%3")
-           .arg(installed).arg(localVer.isEmpty() ? "无" : localVer, serverVersion));
+    zjcLog(QString("需要安装/更新: 本地已装=%1(ver=%2) 服务器ver=%3 强制=%4")
+           .arg(installed).arg(localVer.isEmpty() ? "无" : localVer, serverVersion).arg(forceReinstall));
 
     // 3) 下载文件到 %ProgramData%\zjc_worker\dl 目录
     const QString dlDir = programDataZjcDir() + "/dl";

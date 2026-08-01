@@ -127,6 +127,9 @@ QNetworkReply* HttpClient::post(const QString &endpoint, const QJsonObject &body
     request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json; charset=utf-8");
     request.setRawHeader("Accept", "application/json");
     request.setRawHeader("User-Agent", "Aifs/1.0 (Windows; Qt)");
+    // ⭐ §53.22-附：所有 API 都是小 JSON，15s 还没完成 = 连接已死（实测登录曾干等 19.5s
+    //   才报"连接已关闭"）。快速失败，把恢复动作交给上层重试。
+    request.setTransferTimeout(15000);
     
     // 非免认证接口附加 Token
     if (!isAuthExemptEndpoint(endpoint) && !m_authToken.isEmpty()) {
@@ -149,6 +152,7 @@ QNetworkReply* HttpClient::get(const QString &endpoint)
     QNetworkRequest request(url);
     request.setRawHeader("Accept", "application/json");
     request.setRawHeader("User-Agent", "Aifs/1.0 (Windows; Qt)");
+    request.setTransferTimeout(15000);   // §53.22-附：小 JSON API，15s 未完成=连接已死，快速失败
     
     // 非免认证接口附加 Token
     if (!isAuthExemptEndpoint(endpoint) && !m_authToken.isEmpty()) {
@@ -159,8 +163,16 @@ QNetworkReply* HttpClient::get(const QString &endpoint)
     return m_manager->get(request);
 }
 
-void HttpClient::login(const QString &username, const QString &password, int pcLevel, const QString &deviceUsername)
+void HttpClient::login(const QString &username, const QString &password, int pcLevel, const QString &deviceUsername,
+                       bool fallbackOnUnboundDevice)
 {
+    // ⭐ 本次会话密码（仅内存，不落盘）：用户取消「记住密码」时本地不存密码，
+    //   但「切换账号」需要重新 login、必须有密码——否则弹「账号密码已失效」。
+    //   在这里记一份，getAccountPassword 找不到落盘密码时回退它，
+    //   使「不记住密码」只影响下次启动的自动填充，不影响本次登录期间的切换功能。
+    m_sessionUsername = username;
+    m_sessionPassword = password;
+
     // 生成/获取PC设备唯一标识
     m_pcDeviceId = generatePcDeviceId();
     
@@ -179,10 +191,20 @@ void HttpClient::login(const QString &username, const QString &password, int pcL
     
     qDebug() << "[Login] pcDeviceId:" << m_pcDeviceId << "pcLevel:" << pcLevel;
     
+    // ⭐ §53.23-附：登录请求代数。12s 兜底恢复按钮后用户可能再点一次 → 新旧两个 POST 并发，
+    //   迟到的旧回调会跟新请求抢 loginFailed/重试标记（2026-07-30 01:32 实测：旧回调把重试
+    //   机会消耗掉直接报失败，新回调又触发重试，行为混乱）。只认最新一代，旧响应直接丢弃。
+    const int gen = ++m_loginGeneration;
+    
     QNetworkReply *reply = post("/api/auth/login/control", body);
     
-    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, gen, username, password, pcLevel, deviceUsername, fallbackOnUnboundDevice]() {
         reply->deleteLater();
+        
+        if (gen != m_loginGeneration) {
+            qDebug() << "[Login] 过期登录响应(第" << gen << "代，当前第" << m_loginGeneration << "代) → 忽略";
+            return;
+        }
         
         int httpCode = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         QByteArray responseData = reply->readAll();
@@ -196,6 +218,23 @@ void HttpClient::login(const QString &username, const QString &password, int pcL
             // 网络错误
             QString errorMsg = reply->errorString();
             qDebug() << "[Login] Network error:" << errorMsg;
+            
+            // ⭐ §53.22-附：传输层失败（HTTP 状态码 0 = 没拿到任何 HTTP 响应，典型是
+            //   复用了被 nginx/后端掐掉的旧 keep-alive 连接 → "连接已关闭"，POST 不会
+            //   自动重试）→ 自动补一次重试：新请求会开新 TCP 连接，几乎必然成功。
+            //   只重试一次，防服务器真宕机时无限循环。
+            if (httpCode == 0 && !m_loginNetRetried) {
+                m_loginNetRetried = true;
+                qDebug() << "[Login] 传输层错误(" << errorMsg << ") → 800ms 后自动重试一次";
+                QTimer::singleShot(800, this, [this, username, password, pcLevel, deviceUsername]() {
+                    login(username, password, pcLevel, deviceUsername);
+                });
+                return;   // 不发 loginFailed，重试结果说了算
+            }
+            if (httpCode == 0) {
+                m_loginNetRetried = false;                  // 重试也失败：复位标记，用户手动再试仍可自动重试
+                errorMsg = "网络连接异常，请重试";           // "连接已关闭"对用户没有信息量
+            }
             
             // 尝试解析服务器返回的错误信息
             QJsonDocument doc = QJsonDocument::fromJson(responseData);
@@ -215,6 +254,20 @@ void HttpClient::login(const QString &username, const QString &password, int pcL
                     qDebug() << "[Login] 需要更新版本, downloadUrl:" << downloadUrl;
                     emit loginNeedUpdate(errorMsg, downloadUrl);
                     return;
+                }
+                // ⭐ 2026-08-01：code=1004「未绑定该设备」自动回退（登录页路径专用）。
+                //   成因：iOS 端改密/改绑定码后，后端会解绑全部 PC；PC 本地还记着上次选中的设备账号
+                //   （§53.18 登录直接带它），下次登录就带着一个已失效的设备去登 → 1004 直接失败，
+                //   用户只看到"登录失败"却无从修复。
+                //   处理：清掉本地记住的设备 → 不带设备自动重登一次（后端默认绑第一个绑定设备）。
+                //   仅登录页启用（fallbackOnUnboundDevice=true）；「切换设备」路径不启用——那里的
+                //   目标设备是用户刚刚点选的，失败必须如实报错，静默换设备反而误导。
+                if (obj["code"].toInt(0) == 1004 && fallbackOnUnboundDevice && !deviceUsername.isEmpty()) {
+                    qDebug() << "[Login] 本地记住的设备已解绑(code=1004) → 清除设备记忆，回退默认绑定设备重登";
+                    clearAccountDevice(username);
+                    m_deviceAutoFallback = true;   // 供 onLoginSuccess 弹一次"已切换到当前绑定设备"提示
+                    login(username, password, pcLevel, QString(), false);
+                    return;   // 不发 loginFailed，重登结果说了算
                 }
             }
             
@@ -301,8 +354,16 @@ void HttpClient::login(const QString &username, const QString &password, int pcL
         }
         
         // 保存 Token 和登录信息
+        m_loginNetRetried = false;   // §53.22-附：登录成功，复位传输层重试标记
         setAuthToken(token);
         m_loggedInUsername = obj["username"].toString();
+        // ⭐ §53.20.2：本机公网出口 IP（后端按请求来源回填）。随 PC_PRESENCE 上报给设备端，
+        //   与设备自己的出口 IP 比对，防 /24 网段号撞车（两地都是 192.168.1.x）误判同 WiFi。
+        //   老后端无此字段 → 空，设备端跳过该校验。
+        m_publicIp = obj["clientIp"].toString();
+        // ⭐ 需求#13（2026-07-31）：三端最新版本号（总后台可配，登录响应下发）。
+        //   MainPage 登录成功后与 PHOENIX_VERSION_STR 比对，不一致提示更新（软提示）。
+        m_latestPcVersion = obj["latestVersions"].toObject().value("pc").toString();
         m_currentDeviceId = deviceId;
         m_currentDeviceUsername = deviceUser;  // ⭐ 本次登录实际绑定的设备账号（未指定时=后端默认第一个绑定）
         m_pcActivationLevel = pcLevelResp;
@@ -333,6 +394,12 @@ void HttpClient::login(const QString &username, const QString &password, int pcL
         // 登录成功后获取相机设定缓存
         getThinConfig();
     });
+}
+
+// ⭐ 需求#13：本机版本号（单一来源=CMakeLists.txt 的 PHOENIX_APP_VERSION）
+QString HttpClient::currentAppVersion() const
+{
+    return QStringLiteral(PHOENIX_VERSION_STR);
 }
 
 // §44.3 获取最新版 PC 客户端下载地址（公开接口，无需登录）
@@ -683,7 +750,35 @@ QString HttpClient::getAccountPassword(const QString &username) const
     settings.beginGroup(QString("account/%1").arg(username));
     QString password = settings.value("password", "").toString();
     settings.endGroup();
+    // ⭐ 落盘密码为空（用户没勾「记住密码」）时，回退本次会话内存里的密码，
+    //   让「切换账号」在当前登录期间仍可用。仅限当前登录账号，且仅内存有效。
+    if (password.isEmpty() && !m_sessionPassword.isEmpty() && username == m_sessionUsername) {
+        return m_sessionPassword;
+    }
     return password;
+}
+
+// ⭐ 2026-08-01：清除某账号本地记住的设备（iOS 改密解绑后旧设备记忆失效，登录 1004 自动回退时调用）
+void HttpClient::clearAccountDevice(const QString &username)
+{
+    QSettings settings("Aifs", "Login");
+    settings.beginGroup(QString("account/%1").arg(username));
+    settings.setValue("deviceUsername", "");
+    settings.setValue("deviceDisplay", "");
+    settings.endGroup();
+    qDebug() << "[Login] 已清除账号" << username << "的本地设备记忆";
+}
+
+// ⭐ 2026-08-01：只更新账号的设备记忆（不动密码），登录成功后把服务器实际绑定设备写回，保持一致
+void HttpClient::updateAccountDevice(const QString &username, const QString &deviceUsername, const QString &deviceDisplay)
+{
+    if (username.isEmpty()) return;
+    QSettings settings("Aifs", "Login");
+    settings.beginGroup(QString("account/%1").arg(username));
+    settings.setValue("deviceUsername", deviceUsername);
+    settings.setValue("deviceDisplay", deviceDisplay);
+    settings.endGroup();
+    qDebug() << "[Login] 已同步账号" << username << "本地设备记忆 →" << deviceUsername << deviceDisplay;
 }
 
 QString HttpClient::getAccountDeviceUsername(const QString &username) const

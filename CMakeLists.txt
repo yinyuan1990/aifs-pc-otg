@@ -5,7 +5,7 @@ project(Phoenix VERSION 0.1 LANGUAGES C CXX)
 # ⭐ §43 版本号单一来源：发版只改这一行！
 #   - autoupdater.cpp 经宏 PHOENIX_VERSION_STR 得到当前版本（不再硬编码）
 #   - pack.bat 解析本行生成 manifest.json / yqlversion_new.json
-set(PHOENIX_APP_VERSION "8.2.3")
+set(PHOENIX_APP_VERSION "8.3.1")
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -201,10 +201,20 @@ set(PHOENIX_QML_FILES
     Main.qml
     LoginPage.qml
     MainPage.qml
+    # ⭐ 第五十章 OTG 自适配：新东西一律独立成文件，不再往 MainPage.qml 里堆
+    CameraCapsStore.qml      # 能力仓库（单例）
+    CameraControlRow.qml     # 公用：滑条/开关/分段 三合一的一行控件
+    OtgCameraPanel.qml       # OTG 完整设定面板（按能力动态生成）
+    LiveBarButton.qml        # 公用：实时流底部按钮
+    LiveBarMenu.qml          # 公用：实时流底部下拉
+    OtgLiveControlBar.qml    # OTG 版实时流底部按钮栏
 )
 if(HAVE_KERNEL_TEST)
     list(APPEND PHOENIX_QML_FILES KernelTestView.qml)
 endif()
+
+# CameraCapsStore 是 QML 单例（pragma Singleton），需显式标记，否则 qmlcachegen 不认
+set_source_files_properties(CameraCapsStore.qml PROPERTIES QT_QML_SINGLETON_TYPE TRUE)
 
 qt_add_qml_module(Phoenix
     URI Aifs

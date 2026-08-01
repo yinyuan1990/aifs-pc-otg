@@ -34,6 +34,28 @@ Rectangle {
     property string pendingLoginUsername: ""  // 注册成功后待填充的用户名
     property bool toastSwitchToLogin: false   // Toast 消失后是否切换到登录页
     property bool rememberPassword: true       // 是否记住密码（取消勾选则不保存/不自动填充密码）
+
+    // ⭐ §53.19：isLoggingIn 卡死兜底。登录/取设备列表把 isLoggingIn 置 true 后，
+    //   全靠回调（loginSuccess/loginFailed/bindingDevicesReceived/Failed）复位；
+    //   任何一次回调没来（网络挂/进程态异常），按钮 enabled:!isLoggingIn 就**永久点不动**。
+    //   12s 兜底复位（HTTP 超时之外仍没消息=真挂了），用户至少能重试。
+    onIsLoggingInChanged: {
+        if (isLoggingIn) loggingInWatchdog.restart()
+        else loggingInWatchdog.stop()
+    }
+    Timer {
+        id: loggingInWatchdog
+        interval: 12000
+        repeat: false
+        onTriggered: {
+            if (loginPage.isLoggingIn) {
+                console.log("⚠️ [登录兜底] isLoggingIn 卡住 12s 无回调 → 强制复位（按钮恢复可点）")
+                loginPage.isLoggingIn = false
+                loginPage.loggingInLevel = 0
+                loginPage.loginError = "连接超时，请重试"
+            }
+        }
+    }
     
     // 生成唯一用户名（V开头，共9位）
     function generateUsername() {
@@ -89,13 +111,35 @@ Rectangle {
             }
             var typedUsername = loginUsername.text.trim()
 
+            // ⭐⭐ 2026-08-01 修「在线灯显示已移除设备、画面却是另一台」根因：
+            //   一律保存【服务器本次实际绑定的设备】(deviceUsername 参数 = currentDeviceUsername)，
+            //   而不是界面选中的设备(selectedDeviceUsername)。
+            //   否则 iOS 改密解绑后，登录带着已解绑的选中设备 → 后端 1004 → httpclient 自动回退到默认
+            //   设备并清掉本地记忆，但这里又把界面选中的那台【已解绑设备】存回去 → 主页 §53.18「自动切换」
+            //   不停想切回一台不存在的设备、在线灯也显示这台已移除设备（画面却是回退后的默认设备）。
+            //   存服务器实际绑定的设备后：saved==bound，§53.18 判定一致直接跳过，显示与画面永远同一台。
+            var actualDeviceUser = deviceUsername || ""
+            var actualDeviceDisplay = actualDeviceUser
+            if (bindingList && bindingList.length > 0 && actualDeviceUser.length > 0) {
+                for (var bi = 0; bi < bindingList.length; bi++) {
+                    if ((bindingList[bi].deviceUsername || "") === actualDeviceUser) {
+                        actualDeviceDisplay = bindingList[bi].deviceNickname || bindingList[bi].remark || actualDeviceUser
+                        break
+                    }
+                }
+            }
             // 保存账号和设备信息；密码仅在勾选「记住密码」时保存（用真实账号做 key）
             HttpClient.saveAccount(
                 canonicalUsername,
                 loginPage.rememberPassword ? loginPassword.text.trim() : "",
-                monitorAccountColumn.selectedDeviceUsername,
-                monitorAccountColumn.selectedAccount
+                actualDeviceUser,
+                actualDeviceDisplay
             )
+            // ⭐ saveAccount 在设备名为空时不写入（保留旧值），无绑定设备时必须显式清掉，
+            //   否则已解绑的旧设备会残留并被主页 §53.18 误判/显示。
+            if (actualDeviceUser.length === 0) {
+                HttpClient.clearAccountDevice(canonicalUsername)
+            }
 
             // 清掉历史上可能存过的"短账号"条目，避免切换账号弹窗里出现查不到设备的幽灵账号
             if (typedUsername.length > 0 && typedUsername !== canonicalUsername) {
@@ -1020,13 +1064,25 @@ Rectangle {
                         onClicked: {
                             if (isLoggingIn) return
                             if (loginUsername.text.trim() === "" || loginPassword.text.trim() === "") {
-                                loginError = "请输入用户名和密码"
+                                // ⭐ §53.19：没勾「记住密码」时密码不会自动填，点登录像"没反应"——
+                                //   把焦点放进空的那个框，提示也说清楚。
+                                loginError = loginPassword.text.trim() === ""
+                                        ? "未记住密码，请输入密码后登录" : "请输入用户名和密码"
+                                if (loginPassword.text.trim() === "") loginPassword.forceActiveFocus()
+                                else loginUsername.forceActiveFocus()
                                 return
                             }
                             isLoggingIn = true
                             loggingInLevel = 1
                             loginError = ""
-                            HttpClient.login(loginUsername.text.trim(), loginPassword.text.trim(), 1, "")  // ⭐ 2026-07-09：登录不带 iOS 设备，传空；进主页后「切换账号」自选
+                            // ⭐ §53.18：登录直接带上「上次选中的设备」，后端一次绑对——
+                            //   否则默认绑第一个设备、进主页再触发「自动切换」停流重连（"等很久"根因）。
+                            //   仅当登录账号 == 上次账号时带（换账号登录不误带别人的设备）；无选中设备则传空=旧行为。
+                            //   ⭐ 2026-08-01 末参数 true：记住的设备已被解绑（iOS 改密会解绑全部 PC，code=1004）
+                            //   时自动清除记忆并回退默认绑定设备重登，不再"登录失败"卡死。
+                            HttpClient.login(loginUsername.text.trim(), loginPassword.text.trim(), 1,
+                                loginUsername.text.trim() === HttpClient.getSavedUsername() ? HttpClient.getSavedDeviceUsername() : "",
+                                true)
                         }
                     }
                 }
@@ -1071,13 +1127,21 @@ Rectangle {
                         onClicked: {
                             if (isLoggingIn) return
                             if (loginUsername.text.trim() === "" || loginPassword.text.trim() === "") {
-                                loginError = "请输入用户名和密码"
+                                // ⭐ §53.19：同上——没记住密码时把焦点放进密码框，提示说清楚
+                                loginError = loginPassword.text.trim() === ""
+                                        ? "未记住密码，请输入密码后登录" : "请输入用户名和密码"
+                                if (loginPassword.text.trim() === "") loginPassword.forceActiveFocus()
+                                else loginUsername.forceActiveFocus()
                                 return
                             }
                             isLoggingIn = true
                             loggingInLevel = 2
                             loginError = ""
-                            HttpClient.login(loginUsername.text.trim(), loginPassword.text.trim(), 2, "")  // ⭐ 2026-07-09：登录不带 iOS 设备，传空；进主页后「切换账号」自选
+                            // ⭐ §53.18：同上——登录直接带上次选中的设备，避免进主页后自动切换绕一圈
+                            //   ⭐ 2026-08-01 末参数 true：设备已解绑(1004)自动回退默认绑定设备（同上）
+                            HttpClient.login(loginUsername.text.trim(), loginPassword.text.trim(), 2,
+                                loginUsername.text.trim() === HttpClient.getSavedUsername() ? HttpClient.getSavedDeviceUsername() : "",
+                                true)
                         }
                     }
                 }

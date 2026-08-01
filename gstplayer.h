@@ -114,6 +114,8 @@ public:
     Q_INVOKABLE void disconnectP2P();
     Q_INVOKABLE void handleWebRTCSignaling(const QJsonObject &message);
     Q_INVOKABLE bool isP2PMode() const { return m_useP2P; }
+    // ⭐ §53.25：当前协商轮次 epoch（QML 桥接发信令时带上，0=非 P2P 会话）
+    Q_INVOKABLE qlonglong p2pEpoch() const { return m_p2pEpoch; }
 
     // ⭐ H265：CONFIG_STATE.videoCodec 下发（"h264"/"h265"），QML 在 playP2P 前调用。
     //   仅 P2P 生效；具体 H265 逻辑全部在 h265support.h/.cpp（与 H264 主链路解耦）。
@@ -232,6 +234,9 @@ signals:
     void webrtcConnected();
     void webrtcDisconnected();
     void webrtcStatusChanged(const QString &status);
+    // ⭐ 2026-08-01：P2P 被设备端以"单人直连已占用"拒绝——QML 据此弹框提示 + 停止自愈重连
+    //   （否则 §54 看门狗每 8s 又重连一次、又被拒 → 反复卡死，第二/三台 PC 都进不来）。
+    void p2pRejectedSingleMode();
     void naluReady(const QByteArray &nalu, bool isKeyFrame);  // 兼容旧接口
     void h264FrameStored(qint64 frameIndex);
     void h264FrameMissing(qint64 frameIndex);
@@ -404,7 +409,8 @@ private:
     // ICE 断线主动重连：epoch 让“DISCONNECTED 延迟检查”在期间状态已恢复时自动失效
     std::atomic<int> m_iceReconnectEpoch{0};
     bool m_iceReconnecting = false;                 // 是否正在主动重连（防重复触发）
-    static constexpr int P2P_VIEW_REQUEST_RETRY_MAX = 5;
+    // §54：等 Offer 重发**无上限**（常驻循环，停止条件=收到 Offer/HANGUP/REJECT/QML 主动断开），
+    //   原 P2P_VIEW_REQUEST_RETRY_MAX=5 的"7.5s 耗尽即永久放弃"终态已删除。
     static constexpr int P2P_VIEW_REQUEST_RETRY_INTERVAL_MS = 1500;
     std::atomic<bool> m_offerInProgress{false};  // 防止重复创建 Offer
     std::atomic<bool> m_offerSentForSession{false};  // 🔥 本次连接已发送过 Offer（防止 timer 和 on-negotiation-needed 双重触发）
@@ -412,6 +418,13 @@ private:
     std::atomic<bool> m_srsError{false};  // 🔥 SRS错误标志（防止无效重连）
     std::atomic<int> m_srsRetryCount{0};  // 🔥 SRS 400错误重试计数
     QString m_pendingOfferSdp;  // 🔥 待重试的 Offer SDP
+    // ⭐ §53.24：P2P Offer 风暴防抖（设备端会话抖动时连发多个 Offer，只应用最后一个）
+    qint64 m_lastOfferAppliedMs = 0;      // 上次真正应用 Offer 的时刻
+    QString m_pendingP2POfferSdp;         // 风暴期间暂存的最新 Offer（与 SRS 的 m_pendingOfferSdp 无关）
+    QTimer *m_offerDebounceTimer = nullptr;
+    // ⭐ §53.25：会话 epoch——一轮协商一个（connectP2P/重建重连时更新，重发不换）。
+    //   REQUEST 带出、设备端回带、PC 校验；不匹配的信令 = 过期轮次，直接丢弃。
+    qint64 m_p2pEpoch = 0;
     std::atomic<int> m_noFpsSeconds{0};   // 🔥 连续0fps秒数（5秒自动断开）
     // ⭐ B 档面板统计快照（每秒在统计定时器里刷新；atomic 供 QML 线程安全读取）
     std::atomic<int> m_statJitterMs{0};

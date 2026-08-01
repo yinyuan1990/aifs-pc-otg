@@ -80,6 +80,12 @@ public:
     
     // 登录信息
     Q_INVOKABLE QString loggedInUsername() const { return m_loggedInUsername; }
+    // ⭐ §53.20.2：本机公网出口 IP（登录响应 clientIp）。随 PC_PRESENCE 上报，
+    //   设备端与自己的出口比对，防 /24 网段号撞车误判同 WiFi。老后端 → 空。
+    Q_INVOKABLE QString publicIp() const { return m_publicIp; }
+    // ⭐ 需求#13：登录响应下发的 PC 最新版本号（空=后台未配置，跳过提示）与本机版本
+    Q_INVOKABLE QString latestPcVersion() const { return m_latestPcVersion; }
+    Q_INVOKABLE QString currentAppVersion() const;
     Q_INVOKABLE QString currentDeviceId() const { return m_currentDeviceId; }
     // ⭐ 2026-07-15：本次登录实际绑定的设备账号（未传 deviceUsername 时后端默认取第一个绑定），
     //   区别于 getSavedDeviceUsername()（用户上次在「切换账号」里选中、希望使用的设备）。
@@ -112,7 +118,12 @@ public:
     Q_INVOKABLE bool currentIsAndroid() const { return isAndroidDeviceId(m_currentDeviceId); }
     
     // 登录接口（pcLevel: 1=豪华版, 2=至尊版）
-    Q_INVOKABLE void login(const QString &username, const QString &password, int pcLevel, const QString &deviceUsername = QString());
+    // ⭐ 2026-08-01 fallbackOnUnboundDevice：登录页路径置 true——带的设备账号已被解绑（iOS 改密
+    //   会解绑全部 PC，code=1004）时自动清除本地设备记忆并不带设备重登一次（后端默认绑第一个绑定设备）。
+    //   「切换设备」路径保持 false：目标设备是用户刚点选的，失败必须如实报错。
+    Q_INVOKABLE void login(const QString &username, const QString &password, int pcLevel,
+                           const QString &deviceUsername = QString(),
+                           bool fallbackOnUnboundDevice = false);
 
     // §44.3 获取最新版 PC 客户端下载地址（公开接口，无需登录）；结果经 latestDownloadUrlReceived 返回
     Q_INVOKABLE void fetchLatestDownloadUrl();
@@ -221,6 +232,13 @@ public:
     // 获取指定账号的设备信息
     Q_INVOKABLE QString getAccountDeviceUsername(const QString &username) const;
     Q_INVOKABLE QString getAccountDeviceDisplay(const QString &username) const;
+    // ⭐ 2026-08-01：清除某账号本地记住的设备（iOS 改密解绑后旧记忆失效，登录 1004 自动回退时用）
+    Q_INVOKABLE void clearAccountDevice(const QString &username);
+    // ⭐ 2026-08-01：只更新某账号本地记住的设备（不动密码）。登录成功后把"服务器实际绑定的设备"
+    //   写回本地，保证在线灯设备名与画面设备一致、且下次启动不再带着已解绑的旧设备去登（避免再次 1004）。
+    Q_INVOKABLE void updateAccountDevice(const QString &username, const QString &deviceUsername, const QString &deviceDisplay);
+    // ⭐ 2026-08-01：读取并清除"本次登录发生过设备自动回退"标记（QML 据此弹一次提示）
+    Q_INVOKABLE bool consumeDeviceAutoFallback() { bool v = m_deviceAutoFallback; m_deviceAutoFallback = false; return v; }
     
     // 读取上次登录的账号（兼容旧接口）
     Q_INVOKABLE QString getSavedUsername() const;
@@ -352,6 +370,17 @@ private:
     QString m_baseUrl;
     QString m_authToken;
     QString m_loggedInUsername;
+    // ⭐ 本次会话密码（仅内存，不落盘）：取消「记住密码」时切换账号仍可用，见 getAccountPassword
+    QString m_sessionUsername;
+    QString m_sessionPassword;
+    QString m_publicIp;               // ⭐ §53.20.2：登录响应回填的公网出口 IP
+    QString m_latestPcVersion;        // ⭐ 需求#13：登录响应下发的 PC 最新版本号
+    // ⭐ §53.22-附：登录传输层失败（状态码 0，如复用了被掐的 keep-alive 连接）自动重试一次的标记
+    bool m_loginNetRetried = false;
+    // ⭐ 2026-08-01：本次登录发生过"设备已解绑(1004)→清本地设备→回退默认设备"自动重登，供 QML 弹提示
+    bool m_deviceAutoFallback = false;
+    // ⭐ §53.23-附：登录请求代数——并发的旧登录请求迟到回调直接丢弃，只认最新一代
+    int m_loginGeneration = 0;
     QString m_currentDeviceId;
     QString m_currentDeviceUsername;  // ⭐ 本次登录实际绑定的设备账号
     int m_pcActivationLevel = 0;  // PC端等级，1=豪华版，2=至尊版

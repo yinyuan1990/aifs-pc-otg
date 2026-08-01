@@ -49,6 +49,8 @@ Rectangle {
     property int connectMode: 0                        // 0=SRS模式, 1=P2P直连模式, 2=SRT模式（来自CONFIG_STATE.state.connectstype）
     property string videoCodec: "h264"                 // ⭐ H265：P2P 实际编码（来自CONFIG_STATE.state.videoCodec，iOS 登录页二级选项）
     property string pairedIosDeviceId: ""              // 配对的 iOS 设备 ID
+    property string pairedIosDisplay: ""               // ⭐ 当前设备的显示名（昵称/账号），顶部在线灯下显示
+    property double _lastCfgMismatchLogMs: 0           // ⭐ 「非本设备 CONFIG_STATE」诊断日志节流
     property double _lastKeyframeWsMs: 0                // P0-1: WebSocket 关键帧兜底限流时间戳
     property double _lastSpaceCaptureMs: 0              // 2026-07-19: 空格连拍节流时间戳（按住=键盘自动重复~30次/s，低端机被顶死）
     property var iceServers: []                        // 从登录接口获取的 ICE 服务器列表
@@ -381,6 +383,7 @@ Rectangle {
         ignoreUnknownSignals: true
         function onViewerFpsChanged(fps) {
             mainPage.kernelViewerFps = fps
+            mainPage.lastKernelFpsMs = Date.now()   // 记到达时刻，供断线判定识别"陈旧的 fps 读数"
         }
         // ⭐ 网页内核滚轮缩放：webview 把 wheel 转发上来（DOM deltaY<0=上滚=放大，
         //   与 QML angleDelta 相反），这里复用 GStreamer 同款聚焦缩放数学。
@@ -390,7 +393,21 @@ Rectangle {
         }
     }
 
-    // 拉流心跳：每秒通知 iOS"我在看"（基于画面是否显示）
+    // ⭐ §53.2：设备是否在线 —— **只看心跳新鲜度，与有没有画面、有没有推流无关**。
+    //   以前 PC 这边唯一的"设备状态"是 publishStatus（在不在推流），设备登录着但没推流
+    //   也显示「设备未上线」，把"没画面"和"没上线"混成一件事，排障时完全分不清。
+    //   设备端 sendDeviceStatus 是 1s 一条、无条件发的，拿它当在线判据最准。
+    property bool deviceOnline: false
+
+    // ⭐ §53.4.5：设备端上报的链路/编码决策原因（"与观看端同 WiFi，走单人直连" 等），顶栏 tooltip 显示
+    property string deviceConnectReason: ""
+
+    // ⭐ 2026-08-01：本设备处于 P2P 单人直连、已被其他 PC 占用（收到 WEBRTC_REJECT single_mode）。
+    //   置位后 §54 自愈对账不再自动重连（否则每 8s 重连又被拒 = 卡死）。仅在设备重推流(streamKey 变)
+    //   / 设备离线 / 连接模式变 时清除再试——那些是"先来者可能已走、轮次已变"的合理重试点。
+    property bool p2pSingleModeOccupied: false
+
+    // 拉流心跳 + 在线心跳（1s）
     Timer {
         id: viewerHeartbeatTimer
         interval: 1000
@@ -398,11 +415,41 @@ Rectangle {
         running: true
         onTriggered: {
             // ⭐ 内核模式用 webview 上报的 kernelViewerFps，GStreamer 模式用 gstPlayer.receiveFps。
-            //   只在画面实际显示时发送（fps > 0），iOS 收到心跳即显示「PC 已连接」。
             var fps = mainPage.useWebEngineKernel ? mainPage.kernelViewerFps : gstPlayer.receiveFps
+            var deviceId = HttpClient.currentDeviceId()
+
+            // ① 设备在线灯：最近 4s 内收到过 CONFIG_STATE 即在线（4s = 容忍 3 次丢包）
+            var hbAgeMs = mainPage.lastConfigStateMs > 0 ? (Date.now() - mainPage.lastConfigStateMs) : -1
+            mainPage.deviceOnline = (hbAgeMs >= 0 && hbAgeMs < 4000)
+
+            // ⭐ §53.10：**心跳超时也必须真的收口**，不能只把顶部灯点红。
+            //   设备被杀进程/断网/掉电时**一条消息都不会再来**，而清屏+复位原先只挂在
+            //   CONFIG_STATE(publishStatus=0) 与 CONFIG_ERROR 两条"收到消息"的路径上 →
+            //   于是出现「顶部已显示设备离线，画面还留着最后一帧，码率/电量/FPS 还是旧值」。
+            //   这正是 §50.D 说的"两套状态各走各的"，换了个入口又长了出来。
+            if (hbAgeMs >= 0 && !mainPage.deviceOnline) {
+                // (a) 心跳派生的读数立刻复位（过期即错值），与画面是否还在无关
+                if (mainPage.deviceKbps !== 0 || mainPage.deviceBattery !== -1
+                        || mainPage.deviceNetworkQuality !== "" || mainPage.deviceNetworkType !== "") {
+                    console.log("🔌 [心跳超时] " + hbAgeMs + "ms 无 CONFIG_STATE → 复位码率/电量/网络质量读数")
+                    mainPage.resetDeviceReportedStats()
+                    liveInfoFps.text = "FPS: --"
+                }
+                // (b) 画面确实停了 → 走统一收口（停流+清屏+改状态）。
+                //     ⚠️ 必须带 fps 条件：P2P 直连的媒体不经服务器，STOMP 抖一下断了
+                //     但画面还在正常播时不能把人家的画面清掉；那种情况只点灯、不清屏。
+                if (hbAgeMs > 6000 && currentPlayingFps() === 0
+                        && (publishState === 1 || videoSurfaceDirty)) {
+                    markDeviceOffline("心跳超时 " + hbAgeMs + "ms 且无画面帧", "设备已离线")
+                }
+            }
+
+            if (!deviceId) return
+
+            var destination = "/topic/device/" + deviceId + "/config"
+
+            // ② 拉流心跳（旧协议，保持不变）：只在画面实际显示时发，设备端据此显示「在看」
             if (fps > 0) {
-                var deviceId = HttpClient.currentDeviceId()
-                if (!deviceId) return
                 var payload = {
                     "type": "VIEWER_HEARTBEAT",
                     "deviceId": deviceId,
@@ -411,9 +458,37 @@ Rectangle {
                     "fps": fps,
                     "timestamp": Date.now()
                 }
-                var destination = "/topic/device/" + deviceId + "/config"
                 WebSocketClient.sendMessageJson(destination, JSON.stringify(payload))
             }
+
+            // ③ ⭐ §53.2 在线心跳（新协议）：**不看 fps，一直发**。设备端据此把「PC在线」与
+            //   「PC在看」分成两个灯——正是本轮"两端都在线却没画面"的现场判别依据。
+            //   顺带把本机内核的 H265 接收能力告诉设备端（§53.5）：
+            //   网页内核(低端电脑)所用的 Qt WebEngine=Chromium 134，编译期没启用 WebRTC H265
+            //   接收、也没有 H265 软解 → 收 H265 必黑屏，设备端必须据此把 SRS 编码降到 H264。
+            // ④ ⭐ §54 拉流自愈对账（最后防线）：3 秒级恢复靠 gstplayer 信令层常驻循环；
+            //   这里只兜"循环卡死"的残余情形——设备心跳说在推流、PC 却 8s+ 无画面 →
+            //   整会话换 epoch 重建。正常情况本行永远不触发。
+            reconcilePlayback(currentPlayingFps())
+
+            var presence = {
+                "type": "PC_PRESENCE",
+                "deviceId": deviceId,
+                "fromDevice": HttpClient.pcDeviceId(),
+                "pcUsername": HttpClient.loggedInUsername() || "",
+                "kernel": mainPage.useWebEngineKernel ? "web" : "gst",
+                "h265Recv": !mainPage.useWebEngineKernel,
+                // ⭐ §53.4：本机局域网 IPv4。设备端**在推流前**用它比 /24 网段决定 P2P 还是 SRS，
+                //   不必先建 WebRTC 会话再看 ICE 选中的候选对（那要等几秒且必须先推流）。
+                "localIps": WebSocketClient.localIpv4List(),
+                // ⭐ §53.20.2：本机公网出口 IP（登录响应 clientIp）。设备端与自己的出口比对，
+                //   防 /24 网段号撞车（两地都是 192.168.1.x）误判同 WiFi。老后端 → 空=跳过校验。
+                "publicIp": HttpClient.publicIp(),
+                "viewing": fps > 0,
+                "fps": fps,
+                "timestamp": Date.now()
+            }
+            WebSocketClient.sendMessageJson(destination, JSON.stringify(presence))
         }
     }
 
@@ -466,6 +541,20 @@ Rectangle {
         
         onAccepted: Qt.quit()
     }
+
+    // ⭐ 2026-08-01：P2P 单人直连占用提示弹框（先到先得，另一台 PC 正在直连该设备）
+    Dialog {
+        id: singleModeDialog
+        title: "单人直连模式"
+        modal: true
+        anchors.centerIn: parent
+        standardButtons: Dialog.Ok
+        Label {
+            wrapMode: Text.WordWrap
+            width: 380
+            text: "该设备当前处于「单人直连(P2P)」模式，已被其他电脑连接占用。\n\n请等对方断开后重试，或让设备切换到多人线路。"
+        }
+    }
     
     // ⭐ WebRTCClient 已废弃，改用 GstPlayer.connectWebRTC()
     // WebRTC 功能现在集成在 GstPlayer 中，使用 GStreamer WebRTCBin
@@ -510,6 +599,18 @@ Rectangle {
             // 🔥 v14: 发生错误时清除连接中标志，允许重试
             isConnecting = false
         }
+        // ⭐ 2026-08-01：P2P 被设备端以"单人直连已占用"拒绝（先到先得，另一台 PC 正在直连）。
+        //   ① 弹框明确提示；② 置 p2pSingleModeOccupied 停掉 §54 自愈对账重连——否则看门狗每 8s
+        //   又 playP2P、又被拒，第二/三台 PC 反复卡死。标记只在"设备重推流/离线/切模式"时清除再试。
+        onP2pRejectedSingleMode: {
+            console.log("🚧 P2P 被拒：设备处于单人直连模式，已被其他电脑占用")
+            mainPage.p2pSingleModeOccupied = true
+            isConnecting = false
+            statusText.text = "该设备正被其他电脑单人直连占用"
+            stopAll()
+            clearVideoSurface()
+            singleModeDialog.open()
+        }
         // ⭐ WebRTC 信号（替代 WebRTCClient）
         onWebrtcConnected: {
             console.log("✅ WebRTC 已连接 (GStreamer WebRTCBin)")
@@ -521,10 +622,15 @@ Rectangle {
         onWebrtcDisconnected: {
             console.log("🔌 WebRTC 已断开")
             statusText.text = "WebRTC 已断开"
-            if (pairedIosDeviceId && pairedIosDeviceId.length > 0) {
-                WebSocketClient.sendWebRTCSignaling("VIEWER_DISCONNECTED", pairedIosDeviceId)
-                console.log("📤 通知 iOS PC 已断开: " + pairedIosDeviceId)
-            }
+            // ⭐⭐ §54.6（2026-07-31 日志实锤）：这里**不再发 VIEWER_DISCONNECTED**。
+            //   旧代码对"每一次会话断开"都广播它——包括 PC 自己拆会话重连（streamKeyChanged/
+            //   看门狗重建）。垂死 pipeline 的断开信号是队列化回调、会**迟到**：PC 已发出新一轮
+            //   REQUEST、iOS 已建好新会话发完 Offer，这条迟到的 VIEWER_DISCONNECTED 才到——
+            //   iOS 无条件拆会话（不带 epoch）→ 刚建的会话在 trickle ICE 之前被拆 → PC 收到
+            //   Offer 却永远等不到远端候选 → 看门狗再重建 → 再竞态……（21:22:28~21:23:28 四连败实录）。
+            //   语义修正：VIEWER_DISCONNECTED = "这台 PC 不再观看了"（退出登录/切设备/切账号），
+            //   只在 resetStreamStateForSwitch 的主动清场里发；内部重连根本不是"不看了"。
+            //   iOS 端幽灵会话的清理不依赖这条消息（PC_PRESENCE 4s 超时 + ICE 死亡检测 + §54 拆旧重发都在）。
             // 🔥 v14: 只在非连接过程中才重置 publishState（避免 stopAll 期间重置导致死循环）
             if (!isConnecting) {
                 publishState = 0
@@ -546,21 +652,22 @@ Rectangle {
         }
         
         // P2P 信令信号桥接 → WebSocket
+        // ⭐ §53.25：全部带上本轮协商 epoch（gstPlayer.p2pEpoch()），设备端回带、双方按它丢过期轮次
         onSendSdpAnswer: function(sdp, toDevice) {
             console.log("[P2P-QML] 发送 Answer SDP 给 " + toDevice)
-            WebSocketClient.sendWebRTCSignaling("WEBRTC_SDP", toDevice, "answer", sdp)
+            WebSocketClient.sendWebRTCSignaling("WEBRTC_SDP", toDevice, "answer", sdp, "", "", -1, "", gstPlayer.p2pEpoch())
         }
         onSendIceCandidate: function(candidate, sdpMid, sdpMLineIndex, toDevice) {
             console.log("[P2P-QML] 发送 ICE 候选者给 " + toDevice)
-            WebSocketClient.sendWebRTCSignaling("WEBRTC_ICE", toDevice, "", "", candidate, sdpMid, sdpMLineIndex)
+            WebSocketClient.sendWebRTCSignaling("WEBRTC_ICE", toDevice, "", "", candidate, sdpMid, sdpMLineIndex, "", gstPlayer.p2pEpoch())
         }
         onSendHangup: function(reason, toDevice) {
             console.log("[P2P-QML] 发送挂断给 " + toDevice)
-            WebSocketClient.sendWebRTCSignaling("WEBRTC_HANGUP", toDevice, "", "", "", "", -1, reason)
+            WebSocketClient.sendWebRTCSignaling("WEBRTC_HANGUP", toDevice, "", "", "", "", -1, reason, gstPlayer.p2pEpoch())
         }
         onSendViewRequest: function(toDevice) {
-            console.log("[P2P-QML] 发送观看请求给 " + toDevice)
-            WebSocketClient.sendWebRTCSignaling("WEBRTC_REQUEST", toDevice)
+            console.log("[P2P-QML] 发送观看请求给 " + toDevice + " epoch=" + gstPlayer.p2pEpoch())
+            WebSocketClient.sendWebRTCSignaling("WEBRTC_REQUEST", toDevice, "", "", "", "", -1, "", gstPlayer.p2pEpoch())
         }
         
         // ⭐⭐⭐ 第二道防线：收到降帧请求，通知前端iOS调整推流帧率
@@ -988,6 +1095,22 @@ Rectangle {
                         anchors.fill: parent
                         cursorShape: Qt.PointingHandCursor
                         onClicked: showIosCameraSettings()
+                    }
+                }
+
+                // ⭐ 第五十章：外接摄像头设定（只在连着 OTG 设备时出现；面板按设备上报能力动态生成）
+                Text {
+                    id: otgCameraSettingText
+                    visible: CameraCapsStore.isOtg
+                    text: "外接摄像头设定(O)"
+                    font.family: "PingFang HK"
+                    font.pixelSize: 14
+                    color: "#1B5E20"
+
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: toggleOtgCameraPanel()
                     }
                 }
 
@@ -1450,6 +1573,50 @@ Rectangle {
                     visible: false  // 跟随缓冲队列一起隐藏
                 }
                 
+                // ⭐ §53.2 设备在线灯：与「在不在推流 / 有没有画面」严格分开。
+                //   在线(绿) = 心跳新鲜；在线但没推流(橙) = 设备登录着但没开推流；离线(红) = 心跳断了。
+                //   排障口径：显示"在线"却没画面 → 问题在拉流/协商侧（本章 §53.3 两条根因），
+                //   不要再去查账号/绑定/网络是否登录。
+                Row {
+                    spacing: 4
+                    height: parent.height
+                    Rectangle {
+                        width: 7; height: 7; radius: 3.5
+                        anchors.verticalCenter: parent.verticalCenter
+                        color: !mainPage.deviceOnline ? "#dd0000"
+                               : (mainPage.publishState === 1 ? "#00bb00" : "#ff8800")
+                    }
+                    // ⭐ 状态 + iOS 设备昵称两行显示（用户要求：第一次切进来在「设备在线」下换行显示昵称）
+                    Column {
+                        spacing: 0
+                        anchors.verticalCenter: parent.verticalCenter
+                        Text {
+                            text: !mainPage.deviceOnline ? "设备离线"
+                                  : (mainPage.publishState === 1 ? "设备在线" : "在线·未推流")
+                            font.family: "PingFang HK"
+                            font.pixelSize: 10
+                            font.bold: true
+                            color: !mainPage.deviceOnline ? "#dd0000"
+                                   : (mainPage.publishState === 1 ? "#00bb00" : "#ff8800")
+                        }
+                        // 设备昵称（只在有值时占位；灰色小字，不喧宾夺主）
+                        Text {
+                            visible: mainPage.pairedIosDisplay.length > 0
+                            text: mainPage.pairedIosDisplay
+                            font.family: "PingFang HK"
+                            font.pixelSize: 9
+                            color: "#90A4AE"
+                            elide: Text.ElideRight
+                            width: Math.min(implicitWidth, 96)
+                        }
+                    }
+                }
+
+                Rectangle {
+                    width: 1; height: 14; color: "#A5D6A7"
+                    anchors.verticalCenter: parent.verticalCenter
+                }
+
                 // FPS 显示
                 Row {
                     spacing: 4
@@ -1461,6 +1628,10 @@ Rectangle {
                         font.bold: true
                         color: mainPage.connectMode === 1 ? "#4CAF50" : (mainPage.connectMode === 2 ? "#2196F3" : "#FF9800")
                         anchors.verticalCenter: parent.verticalCenter
+                        // ⭐ §53.4.5：鼠标悬停显示设备端为什么选了这条线路/这个编码
+                        ToolTip.visible: connectReasonHover.hovered && mainPage.deviceConnectReason.length > 0
+                        ToolTip.text: "设备端决策：" + mainPage.deviceConnectReason
+                        HoverHandler { id: connectReasonHover }
                     }
                     // ⭐ P2P 连接阶段（切网重连过程常驻可见）：只在非「已连接」的过渡/异常态显示，避免正常播放时刷屏
                     Text {
@@ -2903,6 +3074,8 @@ Rectangle {
             }
             
             // 底部控制栏（移到 livePanel 层级，不被覆盖层遮挡）
+            // ⭐ 第五十章：这一排是「自带摄像头」版（固定5档/倍数变倍/前后置）。
+            //   OTG 设备整排换成 OtgLiveControlBar（见下），这里不做逐按钮的 if-else。
             Row {
                 id: liveControlBar
                 anchors.left: parent.left
@@ -2911,7 +3084,7 @@ Rectangle {
                 anchors.margins: 10
                 spacing: 8
                 z: 100  // 确保在覆盖层之上
-                visible: livePanel.isHovering
+                visible: livePanel.isHovering && !CameraCapsStore.isOtg
                 opacity: livePanel.isHovering ? 1.0 : 0.0
                 Behavior on opacity { NumberAnimation { duration: 200 } }
                 // onVisibleChanged: console.log("🎮 liveControlBar visible:", visible)
@@ -3347,6 +3520,53 @@ Rectangle {
                 }
             }
             
+            // ⭐ 第五十章：OTG 版底部按钮栏（独立文件 OtgLiveControlBar.qml）。
+            //   设备侧的三个按钮（分辨率档位/推送帧率/码率/变焦）全走 otg_ 独立通道；
+            //   右半边镜像/缩放/旋转/睡眠/工作与镜头无关，只发信号复用下面既有实现。
+            OtgLiveControlBar {
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.bottom: parent.bottom
+                anchors.margins: 10
+                z: 100
+                visible: livePanel.isHovering && CameraCapsStore.isOtg
+                opacity: visible ? 1.0 : 0.0
+                Behavior on opacity { NumberAnimation { duration: 200 } }
+
+                mirrorMode: mainPage.videoMirrorMode
+                localZoom: mainPage.videoZoom
+                videoRotation: mainPage.videoRotation
+
+                onSendOtg: function(ptype, payload) {
+                    console.log("🔗 [OTG链路|PC下发] " + ptype + " " + JSON.stringify(payload))
+                    sendConfigUpdate(ptype, payload)
+                }
+                onOpenPanelRequested: toggleOtgCameraPanel()
+                onMirrorModeRequested: function(mode) { mainPage.videoMirrorMode = mode }
+                onLocalZoomResetRequested: {
+                    mainPage.videoZoom = 1.0
+                    mainPage.videoOffsetX = 0
+                    mainPage.videoOffsetY = 0
+                    sendLocalViewUpdate(1.0, 0, 0)
+                }
+                onRotateRequested: function(step) {
+                    mainPage.videoRotation = (mainPage.videoRotation + step * 90 + 360) % 360
+                }
+                onSleepRequested: {
+                    mainPage.deviceStatus = "sleeping"
+                    if (publishState === 1) stopAll()
+                    publishState = 0
+                    sendDeviceCommand("shuimian")
+                }
+                onWorkRequested: {
+                    mainPage.deviceStatus = "waking"
+                    if (publishState === 1) stopAll()
+                    publishState = 0
+                    isConnecting = false
+                    sendDeviceCommand("gongzuo")
+                }
+            }
+
             // 全局 hover 检测层（放在最上层，不拦截点击）
             MouseArea {
                 id: livePanelHover
@@ -4770,6 +4990,13 @@ Rectangle {
         }
     }
 
+    // ⭐ 第五十章 O键：打开/关闭「外接摄像头设定」（OTG 专用面板，与 R 的自带摄像头面板互不干扰）
+    Shortcut {
+        sequence: "O"
+        context: Qt.ApplicationShortcut
+        onActivated: toggleOtgCameraPanel()
+    }
+
     // L键：打开/关闭 iOS 采集颜色调节（冷暖/绿紫/RGB/黑/白 → 硬件白平衡）
     Shortcut {
         sequence: "L"
@@ -4937,6 +5164,8 @@ Rectangle {
     }
 
     function playWebRTC() {
+        lastPlayAttemptMs = Date.now()   // §54 自愈对账：记录本次发起时刻（退避基准）
+        videoSurfaceDirty = true   // 起播即标脏，断线时据此保证一定清屏
         // ⭐ 网页内核模式：不走 GStreamer，改驱动 webview
         if (useWebEngineKernel) {
             console.log("🌐 [网页内核] playWebRTC → kernelStartByMode")
@@ -4970,11 +5199,13 @@ Rectangle {
     
     // P2P 直连模式拉流（不经过 SRS）
     function playP2P() {
+        lastPlayAttemptMs = Date.now()   // §54 自愈对账：记录本次发起时刻（退避基准）
         if (!pairedIosDeviceId || pairedIosDeviceId.length === 0) {
             console.log("❌ playP2P: pairedIosDeviceId 为空，无法建立 P2P 连接")
             statusText.text = "等待 iOS 设备连接..."
             return
         }
+        videoSurfaceDirty = true   // 起播即标脏，断线时据此保证一定清屏
 
         // ⭐ 网页内核模式：P2P 走 webview（QWebChannel kernelBridge 信令）
         if (useWebEngineKernel) {
@@ -5036,6 +5267,136 @@ Rectangle {
         console.log("🛑 stopAll: 完成")
     }
     
+    // ⭐ 第五十章：kernelViewerFps 最近一次上报的时刻。
+    //   webview 卡死/崩掉时不会再上报，kernelViewerFps 会**停在最后一个非零值**上；
+    //   断线判定若直接信它，就会把真断线当成"画面还在放"而忽略掉 → 顶部断线、画面残留。
+    property real lastKernelFpsMs: 0
+
+    // ⭐ 第五十章：画面是否"脏"（起过播放、还没清过屏）。
+    //   不用 publishState 判断有没有画面——它是"设备是否在推流"的状态，
+    //   跟"PC 这块屏上还留没留着一帧"是两码事，两者一旦不同步就出现
+    //   「顶部已显示断线、画面还在」。这个标志只描述屏幕本身。
+    property bool videoSurfaceDirty: false
+
+    // 清屏：两个内核都清一遍（切过内核时另一边可能还留着最后一帧）
+    function clearVideoSurface() {
+        gstPlayer.stop()          // 内部会清 m_lastValidSample 并给 videoSink 送空帧 → 黑屏
+        if (useWebEngineKernel) kernelStop()   // §45：webview 侧 srcObject=null + load() 才真清
+        videoSurfaceDirty = false
+        console.log("🧹 [清屏] 已清除残留画面")
+    }
+
+    // ⭐ 第五十章：设备下线的**唯一收口**。
+    //   以前"顶部改文字"和"停流清屏"各写各的分支，停流那步还被 publishState===1 挡着；
+    //   只要这个标志与实际播放状态不同步，就会出现「顶部说断线了，画面还留在最后一帧」。
+    //   现在任何一处判定下线都必须走这里：两件事一起做，杜绝两套状态打架。
+    function markDeviceOffline(reason, topText) {
+        console.log("🔌 [设备下线] " + reason + " → 停流+清屏+改状态")
+        stopAll()
+        clearVideoSurface()
+        publishState = 0
+        isConnecting = false
+        statusText.text = topText
+        deviceStatusText.text = "📱 " + topText
+        deviceStatusText.color = "#f44336"
+        liveInfoFps.text = "FPS: --"
+        playRecoverStreak = 0   // §54：设备下线 = 一段会话结束，下段会话退避从头算
+        p2pSingleModeOccupied = false   // ⭐ 2026-08-01：设备下线，单人占用作废，回来后重新判定
+        resetDeviceReportedStats()
+    }
+
+    // ⭐ §53.10：把「心跳派生的读数」复位单独抽出来。
+    //   码率/电量/网络质量/网络类型/采集fps 全都只来自 CONFIG_STATE 心跳，
+    //   心跳一停这些值就是**过期的错值**，必须归零，而不是把最后一次读数一直挂在顶栏上。
+    function resetDeviceReportedStats() {
+        mainPage.deviceKbps = 0
+        mainPage.deviceBattery = -1
+        mainPage.deviceNetworkQuality = ""
+        mainPage.deviceNetworkType = ""
+        mainPage.deviceCaptureFps = 0
+        mainPage.deviceLowPowerCapture = false
+    }
+
+    // ⭐ §53.10：切设备 / 切账号 / 退登录 / 被改密踢下线时的统一清场。
+    //   与 markDeviceOffline 的区别：这不是"判定对方离线"，而是"我主动不看了"，所以不写离线文案。
+    //   ⚠️ `lastConfigStateMs` 必须清零——它记的是**上一台设备**的心跳时刻，留着会让
+    //     心跳超时判定拿旧设备的时间戳去判新设备，切过去的头几秒就被误判成"设备已离线"。
+    function resetStreamStateForSwitch(reason) {
+        console.log("🔄 [清场] " + reason)
+        // ⭐ §54.6：主动离开（退出登录/切设备/切账号）才通知设备"这台 PC 不看了"。
+        //   必须在 stopAll 之前发——stopAll 后 pairedIosDeviceId 语境即将失效。
+        //   内部重连路径（onWebrtcDisconnected）不再发这条，防迟到消息拆掉新会话（详见该处注释）。
+        if (pairedIosDeviceId && pairedIosDeviceId.length > 0) {
+            WebSocketClient.sendWebRTCSignaling("VIEWER_DISCONNECTED", pairedIosDeviceId)
+            console.log("📤 [清场] 通知设备 PC 停止观看: " + pairedIosDeviceId)
+        }
+        stopAll()
+        clearVideoSurface()
+        publishState = 0
+        isConnecting = false
+        currentStream = ""
+        lastConfigStateMs = 0
+        deviceOnline = false
+        pairedIosDisplay = ""   // 切设备/退登录清昵称，新登录时重设，避免残留上一台
+        playRecoverStreak = 0   // §54：主动清场 = 会话结束，自愈退避从头算
+        lastPlayAttemptMs = 0
+        p2pSingleModeOccupied = false   // ⭐ 2026-08-01：切设备/退登录，单人占用作废
+        resetDeviceReportedStats()
+        liveInfoFps.text = "FPS: --"
+    }
+
+    // ⭐ §53.10：当前"真的在出画面"的帧率（0 = 没画面）。
+    //   网页内核的 fps 是 webview 主动上报的，卡死/崩掉就不再上报、值会停在最后一个非零数上，
+    //   所以必须连"这个读数是不是新的"一起判（§50.D 的教训），否则真断线会被当成"还在放"。
+    function currentPlayingFps() {
+        if (mainPage.useWebEngineKernel) {
+            var fresh = mainPage.lastKernelFpsMs > 0 && (Date.now() - mainPage.lastKernelFpsMs) < 5000
+            return fresh ? mainPage.kernelViewerFps : 0
+        }
+        return gstPlayer.receiveFps
+    }
+
+    // ⭐ §54（2026-07-31）拉流「期望状态对账」——**最后防线**，正常情况永远轮不到它。
+    //   3 秒级恢复靠信令层常驻循环（gstplayer.cpp：P2P REQUEST 1.5s 常驻重发 / SRS WHEP 2s 常驻
+    //   重试 / ICE 重连无上限，三条"有限重试后永久放弃"的终态已全部删除）。
+    //   本对账只兜"循环本身卡死"的残余情形（如 iOS 幽灵会话把同 epoch 的 REQUEST 全幂等忽略）：
+    //   事实源 = 设备端 1s 一条的 CONFIG_STATE（publishState 是它的镜像）；实际 = currentPlayingFps()。
+    //   期望在播、实际黑屏超过退避间隔 → 全量重建会话（换新 epoch → iOS 拆旧建新，
+    //   playP2P/playWebRTC 入口复位全部内核状态）。
+    //   一次性快速路径（publishState 0→1、mode/codec/streamKey 变化）全部保留，对账只兜异常。
+    property double lastPlayAttemptMs: 0   // 最近一次发起拉流的时刻（playP2P/playWebRTC 入口更新）
+    property int playRecoverStreak: 0      // 连续自愈重建次数（出画面即清零），驱动退避
+
+    function reconcilePlayback(fps) {
+        if (fps > 0) {
+            if (playRecoverStreak !== 0) {
+                console.log("✅ [自愈对账] 画面已恢复（自愈重建 " + playRecoverStreak + " 次后出画）")
+                playRecoverStreak = 0
+            }
+            return
+        }
+        if (publishState !== 1) return      // 设备没在推流 → 没有对账目标（等 CONFIG_STATE 0→1 起播）
+        if (!deviceOnline) return           // 连心跳都没有 → 交给心跳超时收口，别对着空气重连
+        if (deviceStatus !== "") return     // 睡眠/唤醒过渡态不介入
+        if (p2pSingleModeOccupied) return   // ⭐ 2026-08-01：被单人模式拒绝，不自动重连（否则反复被拒卡死）
+        var now = Date.now()
+        if (lastPlayAttemptMs <= 0) { lastPlayAttemptMs = now; return }
+        // 退避：首次 8s（信令层常驻循环没在 8s 内连上 = 循环卡死，整会话换 epoch 重建），
+        // 之后逐次 +4s，封顶 30s——防重建风暴，同时保证异常也能自动收敛。
+        var waitMs = Math.min(8000 + playRecoverStreak * 4000, 30000)
+        if (now - lastPlayAttemptMs < waitMs) return
+        playRecoverStreak++
+        console.log("🔁 [自愈对账] 设备在推流但 " + Math.round((now - lastPlayAttemptMs) / 1000)
+                    + "s 无画面 → 第 " + playRecoverStreak + " 次整会话重建（mode="
+                    + (connectMode === 1 ? "P2P" : "SRS") + " stream=" + currentStream + "）")
+        stopAll()
+        if (connectMode === 1) {
+            playP2P()
+        } else {
+            playWebRTC()
+        }
+    }
+
     function toggleFullscreen() {
         // 保存当前比例
         var topH = rightTopHolder.height
@@ -5847,7 +6208,11 @@ Rectangle {
                         Layout.fillWidth: true
                         // ⭐ 范围/步进走后台快门配置（按 iOS/Android 分组，见 shutterCfg），onMoved 仍按会员上限钳制
                         from: shutterCfg.min
-                        to: shutterCfg.max
+                        // ⭐ 2026-08-01 修「超级帧率卡 600」：滑块物理上限原来只认 shutterCfg.max（快门配置，
+                        //   默认 600），与「曝光FPS 会员上限」是两套配置，导致后台把曝光FPS 设到 1000、
+                        //   滑块却滑不过 600。改为取两者较大值——会员实际上限(getMaxFlickerValue，含曝光FPS+PC等级)
+                        //   高于快门配置时，直接把滑块顶到会员上限；onMoved/onWheel 仍按会员上限二次钳制，安全。
+                        to: Math.max(shutterCfg.max, getMaxFlickerValue())
                         stepSize: shutterCfg.step
                         value: iosCameraSettingsPopup.flickerValue
                         onMoved: {
@@ -6580,6 +6945,35 @@ Rectangle {
         }  // 关闭 Rectangle
     }  // 关闭 Window (相机设定)
     
+    // ============ ⭐ 第五十章：OTG 外接摄像头设定面板（独立文件 OtgCameraPanel.qml）============
+    //   这里只做接线：面板不认识 STOMP，发 sendOtg 信号，由这里转成 CONFIG_UPDATE。
+    //   下发一律 otg_ 前缀，与自带摄像头那套 ptype 分家（Android 侧 OtgConfigRouter 独立消费）。
+    OtgCameraPanel {
+        id: otgCameraPanel
+        onSendOtg: function(ptype, payload) {
+            // ⭐ 全链路日志锚点⓪（PC 侧，进 qlgx.txt）：面板每次点击/拖动实际发了什么。
+            //   qlgx 里有这行而 OTG 日志里没有「🔗 [OTG链路|收到]」= 信令没到手机；
+            //   qlgx 里没这行 = PC 面板没发（点击没触发）。
+            console.log("🔗 [OTG链路|PC下发] " + ptype + " " + JSON.stringify(payload))
+            sendConfigUpdate(ptype, payload)
+        }
+    }
+
+    function toggleOtgCameraPanel() {
+        if (otgCameraPanel.visible) {
+            otgCameraPanel.close()
+            return
+        }
+        if (!CameraCapsStore.isOtg) {
+            showToast("当前设备不是外接OTG摄像头")
+            return
+        }
+        var globalPos = cameraSettingText.mapToGlobal(0, cameraSettingText.height + 5)
+        otgCameraPanel.x = globalPos.x
+        otgCameraPanel.y = globalPos.y
+        otgCameraPanel.open()
+    }
+
     // 显示 iOS 相机设定
     function showIosCameraSettings() {
         // ⭐ 不再每次打开都从服务器获取配置，使用本地缓存值
@@ -7475,6 +7869,7 @@ Rectangle {
                 ShortcutItem { key: "C"; desc: "抓拍清空" }
                 ShortcutItem { key: "D"; desc: "删除最后抓拍" }
                 ShortcutItem { key: "R"; desc: "相机设定" }
+                ShortcutItem { key: "O"; desc: "外接摄像头设定(OTG)" }
                 ShortcutItem { key: "P"; desc: "相机参数精调" }
                 ShortcutItem { key: "L"; desc: "iOS采集颜色调节" }
                 ShortcutItem { key: "F1"; desc: "行数增加" }
@@ -7925,7 +8320,8 @@ Rectangle {
         console.log("📊 getMaxFlickerForQuality: type=" + qualityType + " level=" + level + " levelExposureFps=" + JSON.stringify(efps) + " iosMaxFlicker=" + iosMaxFlicker)
         
         // ⭐ PC端等级额外限制：豪华版(1)及以下最大240，至尊版(2)不限制
-        var pcMaxFlicker = (mainPage.pcActivationLevel >= 2) ? 999 : 240
+        //   需求#10（2026-07-31）：999 → 1000（后台曝光FPS上限已放宽到 1000，999 会把 1000 压回去）
+        var pcMaxFlicker = (mainPage.pcActivationLevel >= 2) ? 1000 : 240
         
         // 取两者较小值
         return Math.min(iosMaxFlicker, pcMaxFlicker)
@@ -8400,9 +8796,55 @@ Rectangle {
             mainPage.pairedIosDeviceId = deviceId
             console.log("📱 initWebSocket: 从缓存设置 pairedIosDeviceId=" + deviceId)
         }
+        // ⭐ 自动登录/初次登录不走 onLoginSuccess，这里补一次设备昵称（供顶部在线灯下显示）。
+        //   ⭐⭐ 2026-08-01：昵称必须对应【实际绑定设备】。只有"保存的设备==实际绑定设备"时才用
+        //   保存的昵称，否则（如 iOS 改密解绑后回退默认设备）保存的昵称是另一台设备的，会与画面对不上——
+        //   此时直接用实际绑定设备账号名，宁可显示账号也不显示错设备。
+        if (mainPage.pairedIosDisplay.length === 0) {
+            var savedDev = HttpClient.getSavedDeviceUsername()
+            var boundDev = HttpClient.currentDeviceUsername()
+            mainPage.pairedIosDisplay = (savedDev === boundDev && HttpClient.getSavedDeviceDisplay().length > 0)
+                    ? HttpClient.getSavedDeviceDisplay()
+                    : (boundDev || "")
+        }
+        // ⭐ 2026-08-01：若本次登录发生过"原设备已解绑→自动回退默认设备"，提示用户（问题#1）
+        if (HttpClient.consumeDeviceAutoFallback()) {
+            showToast("原绑定设备已解绑，已自动切换到当前绑定设备" + (mainPage.pairedIosDisplay.length > 0 ? "：" + mainPage.pairedIosDisplay : ""))
+        }
         
         WebSocketClient.setConnectionParams(wsUrl, token, username, pcDevId)
         WebSocketClient.connectToServer()
+        // ⭐ §53.23：信号丢失兜底——如果 STOMP 已经连着（stompConnected 信号可能在
+        //   MainPage 还没加载完时就发过了，Connections 没建立=信号丢失），直接补订阅。
+        //   subscribe() 有本地缓存幂等，多调无副作用。
+        if (WebSocketClient.connected) {
+            console.log("📡 initWebSocket: STOMP 已在连接状态 → 直接补订阅（防信号丢失）")
+            ensureStompSubscriptions()
+        }
+    }
+    
+    // ⭐ §53.23：订阅逻辑收口成一个函数——onStompConnected（每次连接/重连成功）与
+    //   initWebSocket 的"已连接兜底"共用，保证任何路径下订阅都会被执行。
+    function ensureStompSubscriptions() {
+        // 1. 始终订阅绑定消息频道（等待 iOS 扫码绑定）
+        WebSocketClient.subscribe("/user/queue/binding")
+        
+        // 2. 只有有设备时才订阅设备配置频道
+        var deviceId = HttpClient.currentDeviceId()
+        if (deviceId && deviceId !== "") {
+            WebSocketClient.subscribe("/topic/device/" + deviceId + "/config")
+            
+            // 确保 pairedIosDeviceId 有值
+            if (!mainPage.pairedIosDeviceId || mainPage.pairedIosDeviceId.length === 0) {
+                mainPage.pairedIosDeviceId = deviceId
+                console.log("📱 ensureStompSubscriptions: 设置 pairedIosDeviceId=" + deviceId)
+            }
+        } else {
+            statusText.text = "等待绑定设备..."
+        }
+        
+        // 3. 订阅 WebRTC 信令频道（P2P 模式需要）
+        WebSocketClient.subscribeWebRTCSignaling()
     }
     
     // WebSocket 状态监听
@@ -8412,25 +8854,10 @@ Rectangle {
         function onStompConnected() {
             statusText.text = "STOMP 已连接"
             
-            // 1. 始终订阅绑定消息频道（等待 iOS 扫码绑定）
-            WebSocketClient.subscribe("/user/queue/binding")
-            
-            // 2. 只有有设备时才订阅设备配置频道
+            // ⭐ §53.23：订阅收口到 ensureStompSubscriptions（断线重连后 broker 侧订阅
+            //   已全部消失，onDisconnected 现在会清本地缓存，这里重连成功必然重新 SUBSCRIBE）
+            ensureStompSubscriptions()
             var deviceId = HttpClient.currentDeviceId()
-            if (deviceId && deviceId !== "") {
-                WebSocketClient.subscribe("/topic/device/" + deviceId + "/config")
-                
-                // 确保 pairedIosDeviceId 有值
-                if (!mainPage.pairedIosDeviceId || mainPage.pairedIosDeviceId.length === 0) {
-                    mainPage.pairedIosDeviceId = deviceId
-                    console.log("📱 onStompConnected: 设置 pairedIosDeviceId=" + deviceId)
-                }
-            } else {
-                statusText.text = "等待绑定设备..."
-            }
-            
-            // 3. 订阅 WebRTC 信令频道（P2P 模式需要）
-            WebSocketClient.subscribeWebRTCSignaling()
 
             // ⭐ 4. STOMP 连上后立即把当前 iOS 滤镜参数推给 iOS — 不再依赖按 P
             //    场景: 客户开机 → 自动登录 → STOMP 连上 → 此处一发, iOS 立刻应用滤镜默认值.
@@ -8472,19 +8899,39 @@ Rectangle {
         
         function onStompDisconnected(reason) {
             statusText.text = "STOMP 断开: " + reason
-            
-            // WebSocket 断线时，停止拉流
-            if (publishState === 1) {
+
+            // ⭐⭐ 需求#9 第一步（2026-07-31）：P2P 媒体是局域网 host↔host 直连、**不经服务器**。
+            //   公网断开/服务器重启时 WS 必断，但直连画面物理上还活着——旧代码在这里无条件
+            //   stopAll+清屏，等于亲手把活画面掐灭（"断网画面熄火"的元凶，PC 侧）。
+            //   现在：P2P 且画面仍有帧 → 只降级状态显示（在线灯灰 + 心跳派生读数复位），
+            //   **不停流不清屏**。WS 自动重连(§53.23)恢复后心跳回来一切照旧；断网期间
+            //   参数下发自然不可用（用户口径：第一步只保画面）。ICE 若真死了，§54 常驻循环兜底。
+            //   SRS 模式媒体走服务器，服务器断了画面必死 → 维持原收口不变。
+            //   ⚠️ 必须带 publishState===1：所有**主动**断开路径（切换账号/切设备/退出登录/
+            //   睡眠/被踢）都是「先 resetStreamStateForSwitch/stopAll（其中 publishState 已置 0）、
+            //   后断 WS」——publishState 条件保证这些"必须断"的场景绝不会误入保画面分支
+            //  （fps 统计有 ~1s 时效，单靠它可能撞上停流后的陈旧读数）。
+            if (connectMode === 1 && publishState === 1 && currentPlayingFps() > 0) {
+                console.log("🔌 STOMP 断开但 P2P 画面仍在(" + currentPlayingFps() + "fps) → 保画面，只降级状态显示（需求#9）")
+                statusText.text = "信令已断开（P2P 画面直连中，等待重连）"
+                mainPage.deviceOnline = false
+                mainPage.resetDeviceReportedStats()
+                liveInfoFps.text = "FPS: --"
+                return
+            }
+
+            // ⭐ §53.10：这里既然已经停了拉流，就必须**连屏一起清**——
+            //   停流后残留的最后一帧正是「顶部显示离线、画面还在」的来源之一。
+            if (publishState === 1 || videoSurfaceDirty) {
                 stopAll()
+                clearVideoSurface()
             }
             publishState = 0
+            mainPage.deviceOnline = false
             
-            // ⭐ 重置右上角状态显示（码率、电量、网络质量）
-            // FPS 自动从 gstPlayer.receiveFps 获取（stop 时自动归零）
-            mainPage.deviceKbps = 0
-            mainPage.deviceBattery = -1
-            mainPage.deviceNetworkQuality = ""
-            mainPage.deviceNetworkType = ""
+            // ⭐ 重置右上角状态显示（码率/电量/网络质量/采集fps，全是心跳派生值）
+            mainPage.resetDeviceReportedStats()
+            liveInfoFps.text = "FPS: --"
         }
         
         function onStompError(error) {
@@ -8514,6 +8961,20 @@ Rectangle {
         var controlNickname = message.controlNickname || ""
         
         console.log("📩 绑定消息解析: type=" + msgType + ", state=" + state + ", deviceId=" + newDeviceId + ", iosUsername=" + iosUsername)
+
+        // ⭐ 需求#12（2026-07-31）：设备上/下线推送（后端在 Redis 在线状态**跳变**时，
+        //   向绑定该设备的 PC 账号推一条 DEVICE_PRESENCE，走本绑定专属通道，与拉流/信令完全隔离）。
+        //   处理只有一件事：切换账号弹框开着就**静默**重拉一次在线快照（不置 isLoading，不闪遮罩），
+        //   圆点自动变化。弹框没开则忽略——绝不触碰任何出画面/推流逻辑。
+        if (msgType === "DEVICE_PRESENCE") {
+            console.log("📡 [在线推送] 设备 " + (message.deviceUsername || newDeviceId)
+                        + (message.online ? " 上线" : " 下线"))
+            if (switchAccountDialog.visible && switchAccountDialog.accountList.length > 0
+                    && !switchAccountDialog.isLoading) {
+                HttpClient.getOnlineStatus(switchAccountDialog.accountList)
+            }
+            return
+        }
         
         // 只处理 IOSBD 类型且状态为 ACTIVE 的消息
         if (msgType !== "IOSBD" || state !== "ACTIVE") {
@@ -8593,6 +9054,16 @@ Rectangle {
         target: HttpClient
         
         function onLoginSuccess(token, deviceId, deviceUsername, bindingList, pcActivationLevel, pcLevelName, pcExpireAt, deviceLevel, levelFps, levelExposureFps, iceServersFromLogin) {
+            // ⭐ 需求#13（2026-07-31）：登录响应带三端最新版本号，与本机版本比对，不一致提示更新。
+            //   软提示（toast + 状态栏），不拦截使用；后台未配置（空串）则跳过。
+            var latestPc = HttpClient.latestPcVersion()
+            var localVer = HttpClient.currentAppVersion()
+            if (latestPc && latestPc.length > 0 && latestPc !== localVer) {
+                console.log("🆕 [版本检查] 本机 v" + localVer + " ≠ 最新 v" + latestPc + " → 提示更新")
+                showToast("发现新版本 v" + latestPc + "（当前 v" + localVer + "），请更新 PC 端")
+                statusText.text = "发现新版本 v" + latestPc + "，请更新 PC 端"
+                statusText.color = "#ff9800"
+            }
             // ⭐ 2026-07-15：每次登录默认切回「高功率」采集（不沿用上次退出前的低功率状态）。
             //   下面的 pushAllStomp 批量下发（登录后自动触发）会读到这个新值并下发给 iOS。
             if (appSettings.iosLowPowerCapture) {
@@ -8633,6 +9104,37 @@ Rectangle {
             if (deviceId && deviceId.length > 0) {
                 mainPage.pairedIosDeviceId = deviceId
                 console.log("📱 onLoginSuccess: pairedIosDeviceId=" + deviceId)
+            }
+
+            // ⭐ 顶部在线灯下显示的设备昵称。
+            //   ⭐⭐ 2026-08-01 修「在线灯显示已解绑设备、画面却是另一台」：设备名一律以
+            //   【本次服务器实际绑定的设备】(currentDeviceUsername/deviceUsername) 为准，从 bindingList
+            //   取其昵称——绝不能再优先读本地保存的显示名（iOS 改密解绑后回退默认设备时，本地存的还是
+            //   旧设备名 → 名字是旧设备、画面是新默认设备，对不上）。
+            var actualDeviceUser = HttpClient.currentDeviceUsername() || deviceUsername || ""
+            var actualDisplay = ""
+            if (bindingList && bindingList.length > 0 && actualDeviceUser.length > 0) {
+                for (var bi = 0; bi < bindingList.length; bi++) {
+                    if (bindingList[bi].deviceUsername === actualDeviceUser) {
+                        actualDisplay = bindingList[bi].deviceNickname || bindingList[bi].remark || actualDeviceUser
+                        break
+                    }
+                }
+            }
+            mainPage.pairedIosDisplay = (isSwitchingDevice && switchingDeviceDisplay.length > 0)
+                    ? switchingDeviceDisplay
+                    : (actualDisplay || actualDeviceUser || "")
+
+            // ⭐ 2026-08-01：把服务器实际绑定的设备写回本地（非切设备路径；切设备路径下面另存）。
+            //   这样下次启动直接用对的设备，不再带着已解绑的旧设备去登（杜绝再次 1004 + 名称错位）。
+            if (!isSwitchingDevice && actualDeviceUser.length > 0) {
+                HttpClient.updateAccountDevice(HttpClient.loggedInUsername() || HttpClient.getSavedUsername(),
+                                               actualDeviceUser, actualDisplay)
+            }
+
+            // ⭐ 2026-08-01：若本次登录发生过"原设备已解绑→自动回退默认设备"，提示用户（问题#1）
+            if (HttpClient.consumeDeviceAutoFallback()) {
+                showToast("原绑定设备已解绑，已自动切换到当前绑定设备" + (actualDisplay.length > 0 ? "：" + actualDisplay : ""))
             }
 
             // ⭐ 切设备/登录后刷新滤镜落点：iOS→PC 本地复位中性(滤镜在设备端做)；
@@ -8749,12 +9251,36 @@ Rectangle {
         if (msgType === "CONFIG_STATE") {
             // 验证 deviceId
             if (!expectedDeviceId || expectedDeviceId !== msgDeviceId) {
+                // ⭐ 诊断「PC 显示设备离线」：在线灯只认本设备的 CONFIG_STATE。
+                //   收到了别的 deviceId（或本机 expected 为空）→ 心跳永远不刷新 → 一直显示离线。
+                //   常见于「切账号(无设备)」登录没带 deviceUsername、后端默认绑到另一台设备。
+                //   3s 节流打印一次，暴露 expected vs 实收，便于现场核对是不是订阅/绑定错了设备。
+                var nowDrop = Date.now()
+                if (nowDrop - (mainPage._lastCfgMismatchLogMs || 0) > 3000) {
+                    mainPage._lastCfgMismatchLogMs = nowDrop
+                    console.log("⚠️ [在线灯] 丢弃非本设备 CONFIG_STATE：expected=" + expectedDeviceId
+                                + " 实收=" + msgDeviceId + "（PC 会一直显示设备离线，检查是否登录/切换到了正确的设备）")
+                }
                 return
             }
             // ⭐ §25.7e-附：记录心跳时间，供 CONFIG_ERROR 陈旧性校验
             lastConfigStateMs = Date.now()
             
             var state = message.state || {}
+
+            // ⭐ 第五十章 OTG 自适配：心跳只带 cameraMode + otgCapsVersion（几字节），
+            //   版本变了才索要一次完整能力快照；面板由 OtgCameraPanel.qml 按快照动态生成。
+            if (CameraCapsStore.onConfigState(state)) {
+                sendConfigUpdate("otg_get_caps", {})
+            }
+
+
+            // ⭐ 第五十章：OTG 自适配。心跳只带 cameraMode + otgCapsVersion（几字节），
+            //   版本变了才去要一次完整能力快照，面板由 OtgCameraPanel.qml 按快照动态生成。
+            if (CameraCapsStore.onConfigState(state)) {
+                sendConfigUpdate("otg_get_caps", {})
+            }
+
             var publishStatus = state.publishStatus !== undefined ? state.publishStatus : 0
             var streamKey = state.streamKey || ""
             var streamPushIp = state.streamPushIp || ""
@@ -8832,6 +9358,8 @@ Rectangle {
             if (modeChanged) {
                 console.log("🔄 连接模式变更: " + mainPage.connectMode + " → " + connectstype)
                 mainPage.connectMode = connectstype
+                // ⭐ 2026-08-01：连接模式变了（如切到 SRS 多人）→ 单人占用不再成立，清除标记允许重连
+                mainPage.p2pSingleModeOccupied = false
             }
 
             // ⭐ H265：设备上报的实际编码（"h264"/"h265"，各端登录页选项决定）。
@@ -8845,18 +9373,50 @@ Rectangle {
             // 同步给 GstPlayer——第四十九章：不再「非 P2P 强制 h264」，SRS/SRT 也按上报 codec 解码
             gstPlayer.setVideoCodec(videoCodec)
 
+            // ⭐ §53.4.5「互相监督」：设备端上报的**决策原因**（人话）。线路/编码现在由设备端在
+            //   推流前自动定案（同 WiFi→P2P、否则 SRS；编码取总后台默认并按最弱观看端回退），
+            //   有了这行，现场看到"走了多人线路"或"降成 H264"时不用再猜是谁决定、为什么。
+            if (state.connectReason !== undefined && state.connectReason !== mainPage.deviceConnectReason) {
+                mainPage.deviceConnectReason = state.connectReason
+                if (state.connectReason.length > 0) {
+                    console.log("🧭 设备端链路决策: " + state.connectReason)
+                }
+            }
+
             // ⭐ 2026-06-24：SRT 改走方案A（SRS 桥接 WebRTC），PC 不再用 GStreamer srtsrc 直拉，
             //   故不再预热 SRT 专用解码/编码（warmupSRT 已无意义，移除避免无谓冷启动开销）。
             
             // ⭐ 推流状态处理
             if (publishStatus === 1 && streamKey && streamKey.length > 0) {
+                // ⭐⭐ §53.8（2026-07-28 服务器日志实锤）：**流名变化必须重连**。
+                //   以前这里只更新 currentStream，却只有 modeChanged/codecChanged 才重连 →
+                //   设备重新推流（streamKey 带时间戳、每次都是新的）时，PC 仍在拉**上一条已经
+                //   不存在的流**：SRS 的 on_play 回调问后端，后端答 code=2「流不存在或未开始推流」，
+                //   SRS 拒播 → PC 重试 5 次（1/2/3/4/5s）全失败 → 黑屏，而两端"都在线"。
+                //   生产 SRS 日志里这类拒播累计 6096 次（占全部 on_play 失败的 60%），天天发生。
+                var streamKeyChanged = (currentStream !== streamKey)
+                if (streamKeyChanged && currentStream && currentStream.length > 0) {
+                    console.log("🔄 推流ID变更: " + currentStream + " → " + streamKey + "（设备重新推流，需重连拉流）")
+                    // ⭐ 2026-08-01：设备重推流=新一轮，先来者可能已走，清除单人占用标记允许再试一次
+                    mainPage.p2pSingleModeOccupied = false
+                }
                 lastStreamKey = streamKey
                 currentStream = streamKey
                 // ⭐ P2P诊断日志上报：按推流ID分流（总后台开关打开才真正上传）
                 P2PLogUploader.setStreamId(streamKey)
                 P2PLogUploader.activate()
+                // ⭐⭐ 2026-08-01：P2P 单人直连已被其他 PC 占用 → **绝不再自动发起拉流**。
+                //   否则：单人拒绝→stopAll→onWebrtcDisconnected 把 publishState 拉回 0 →
+                //   下一条心跳(publishStatus=1)看到 publishState=0 又 playP2P → 又被拒 → 每秒一轮，
+                //   顶栏「设备在线↔在线·未推流」来回跳（用户实测）。这里挡住起播，让 publishState
+                //   停在 1（设备确实在推），顶栏稳定显示"设备在线"，状态栏另有"被单人直连占用"提示。
+                //   占用标记在 设备重推流(streamKey变)/切模式/离线 时清除，届时自然恢复正常拉流。
+                if (mainPage.p2pSingleModeOccupied && mainPage.connectMode === 1) {
+                    publishState = 1   // 设备在推流，只是本机被占线不拉；保持 1 防止反复起播/闪烁
+                    if (mainPage.deviceStatus === "") statusText.text = "该设备正被其他电脑单人直连占用"
+                }
                 // 开始推流
-                if (publishState === 0) {
+                else if (publishState === 0) {
                     console.log("📥 设备开始推流，推流ID: " + streamKey)
                     HttpClient.copyToClipboard(streamKey)
                     publishState = 1
@@ -8874,11 +9434,12 @@ Rectangle {
                         console.log("🎬 使用 SRS/WHEP 模式拉流（含 SRT→SRS 桥接）")
                         playWebRTC()
                     }
-                } else if (modeChanged || codecChanged) {
-                    // ⭐ 播放中 iOS 切换了连接方式（SRS↔P2P↔SRT）或编码（H264↔H265）→ 重连。
-                    //   第四十九章：SRS/SRT 也支持 H265，codecChanged 不再只在 P2P 触发。
+                } else if (modeChanged || codecChanged || streamKeyChanged) {
+                    // ⭐ 播放中 iOS 切换了连接方式（SRS↔P2P）或编码（H264↔H265）→ 重连。
+                    //   ⭐⭐ §53.8 新增 streamKeyChanged：设备重新推流（新流名）时也必须重连，
+                    //   否则 PC 死拉旧流名 → SRS on_play 回 code=2 拒播 → 重试 5 次全废 → 黑屏。
                     var modeName = mainPage.connectMode === 1 ? "P2P(" + mainPage.videoCodec + ")" : (mainPage.connectMode === 2 ? "SRT(" + mainPage.videoCodec + ")" : "SRS(" + mainPage.videoCodec + ")")
-                    console.log("🔁 播放中连接方式/编码切换 → " + modeName + "，重连")
+                    console.log("🔁 播放中" + (streamKeyChanged ? "推流ID" : "连接方式/编码") + "变化 → " + modeName + "，重连")
                     stopAll()
                     if (mainPage.connectMode === 1) {
                         playP2P()
@@ -8888,20 +9449,15 @@ Rectangle {
                 }
             } else {
                 // iOS 停止推流（publishStatus = 0 或没有 streamKey）
-                if (publishState === 1) {
-                    console.log("📥 设备停止推流，停止拉流...")
-                    stopAll()
-                    statusText.text = "设备未上线"
+                // ⭐ 第五十章：判据从 publishState===1 改成「还有没有画面没清」——
+                //   publishState 可能已被别的路径提前置 0，那时这里就不停流、画面永远留着。
+                //   videoSurfaceDirty 只描述屏幕本身，清过一次就为 false，重复心跳不会空转。
+                if (publishState === 1 || videoSurfaceDirty) {
+                    markDeviceOffline("CONFIG_STATE publishStatus=0（设备已停止推流）", "设备未上线")
                     // ⭐ P2P诊断日志上报：推流结束，冲刷剩余日志并停止
                     P2PLogUploader.deactivate()
                 }
                 publishState = 0
-                // 重置设备状态
-                // FPS 自动从 gstPlayer.receiveFps 获取
-                mainPage.deviceKbps = 0
-                mainPage.deviceBattery = -1
-                mainPage.deviceNetworkQuality = ""
-                mainPage.deviceNetworkType = ""
             }
             
             // 更新状态栏信息
@@ -9166,31 +9722,18 @@ Rectangle {
                 //   （2026-07-04 实测：CONFIG_ERROR 到达时 fps=100 正常播放、1s 前刚收过心跳，
                 //     误信导致拆会话 + 双重启竞态，内核黑屏 17s。）
                 var freshHeartbeat = lastConfigStateMs > 0 && (Date.now() - lastConfigStateMs) < 5000
-                var playingFps = mainPage.useWebEngineKernel ? mainPage.kernelViewerFps : gstPlayer.receiveFps
+                // ⭐ 第五十章的 fps 新鲜度判定已抽成 currentPlayingFps()（§53.10），
+                //   与心跳超时收口共用同一份，避免两处判据再次跑偏。
+                var playingFps = currentPlayingFps()
                 if (freshHeartbeat || playingFps > 0) {
                     console.log("📥 CONFIG_ERROR: ⚠️陈旧断线事件，忽略（" +
                                 (freshHeartbeat ? ("心跳" + (Date.now() - lastConfigStateMs) + "ms前") : "") +
                                 (playingFps > 0 ? (" 画面fps=" + playingFps) : "") + "）")
                     return
                 }
-                console.log("📥 CONFIG_ERROR: 设备匹配，正在停止拉流并重置状态...")
-                
-                // 停止拉流
-                if (publishState === 1) {
-                    stopAll()
-                }
-                publishState = 0
-                statusText.text = "iOS 设备已断线"
-                deviceStatusText.text = "📱 设备已断线"
-                deviceStatusText.color = "#f44336"  // 红色
-                liveInfoFps.text = "FPS: --"
-                
-                // ⭐ 重置右上角状态（码率、电量、网络质量）
-                // FPS 自动从 gstPlayer.receiveFps 获取
-                mainPage.deviceKbps = 0
-                mainPage.deviceBattery = -1
-                mainPage.deviceNetworkQuality = ""
-                mainPage.deviceNetworkType = ""
+                // ⭐ 第五十章：走统一收口——停流、清屏、改状态一起做。
+                //   原来这里的 stopAll() 被 publishState===1 挡着，判断为断线却可能不清屏。
+                markDeviceOffline("CONFIG_ERROR（服务器判定设备断线）", "iOS 设备已断线")
                 
                 // ⭐ 如果切换账号弹框正在显示，刷新设备在线状态
                 if (switchAccountDialog.visible) {
@@ -9236,10 +9779,8 @@ Rectangle {
             if (loggedInUsername === controlUsername) {
                 console.log("🚪 设备端密码已更新，需要断开推流并重新登录...")
                 
-                // 1. 停止拉流
-                stopAll()
-                publishState = 0
-                currentStream = ""  // 清空 streamKey
+                // 1. 停止拉流（§53.10 统一清场：停流+清屏+清心跳时钟+复位读数）
+                resetStreamStateForSwitch("设备端密码已更新，断开重登")
                 
                 // 2. 清理 frames 目录和抓拍列表
                 gstPlayer.clearJpegFiles()
@@ -9254,6 +9795,12 @@ Rectangle {
                 // 5. 弹出提示并返回登录页
                 showToast("设备端账号密码已更新，请重新登录")
                 logoutRequested()
+            }
+        }
+        // ============ OTG_CAPS：外接摄像头能力快照（第五十章）============
+        else if (msgType === "OTG_CAPS") {
+            if (expectedDeviceId && expectedDeviceId === msgDeviceId) {
+                CameraCapsStore.applyCaps(message.caps)
             }
         }
         // ============ RESET_PUBLISH / TryDisconnect：忽略 ============
@@ -11472,7 +12019,7 @@ Rectangle {
         property string currentDeviceUsername: ""
         property bool isLoading: false
         property var currentDevices: deviceMap[currentUsername] || []
-        
+
         background: Rectangle {
             color: "#FFFFFF"
             radius: 8
@@ -12009,14 +12556,8 @@ Rectangle {
             
             if (unbindedDeviceUsername && currentDeviceUsername && unbindedDeviceUsername === currentDeviceUsername) {
                 console.log("⚠️ 解绑的是当前正在拉流的设备，停止拉流...")
-                stopAll()
-                publishState = 0
-                mainPage.deviceKbps = 0
-                mainPage.deviceBattery = -1
-                mainPage.deviceNetworkQuality = ""
-                mainPage.deviceNetworkType = ""
-                // FPS 自动从 gstPlayer.receiveFps 获取
-                statusText.text = "设备已解绑"
+                // ⭐ §53.10：走统一收口（停流+清屏+复位读数），别再各写一份
+                markDeviceOffline("当前拉流设备被解绑", "设备已解绑")
             }
             
             refreshOnlineStatus()
@@ -12313,7 +12854,7 @@ Rectangle {
                 width: parent.width - 40
                 
                 Text {
-                    text: "新登录密码 (1-20位)"
+                    text: "新登录密码（留空=不修改）"
                     font.family: "PingFang HK"
                     font.pixelSize: 13
                     color: "#333333"
@@ -12339,7 +12880,7 @@ Rectangle {
                         
                         Text {
                             anchors.verticalCenter: parent.verticalCenter
-                            text: "请输入新登录密码"
+                            text: "不填 = 登录密码保持不变"
                             color: "#AAAAAA"
                             font.family: "PingFang HK"
                             font.pixelSize: 14
@@ -12355,7 +12896,7 @@ Rectangle {
                 width: parent.width - 40
                 
                 Text {
-                    text: "新绑定码 (1-20位)"
+                    text: "新绑定码（留空=保持当前）"
                     font.family: "PingFang HK"
                     font.pixelSize: 13
                     color: "#333333"
@@ -12381,7 +12922,7 @@ Rectangle {
                         
                         Text {
                             anchors.verticalCenter: parent.verticalCenter
-                            text: "请输入新绑定码"
+                            text: "不填 = 绑定码保持当前"
                             color: "#AAAAAA"
                             font.family: "PingFang HK"
                             font.pixelSize: 14
@@ -12452,13 +12993,21 @@ Rectangle {
                                 return
                             }
                             
-                            if (newLoginPwd.length < 1 || newLoginPwd.length > 20) {
-                                showToast("新登录密码长度需为1-20位")
+                            // 两个"新"字段都可留空 = 该项不修改（后端 changeDevicePasswordByControl 对空值直接跳过）
+                            if (newLoginPwd.length > 20) {
+                                showToast("新登录密码最长20位")
                                 return
                             }
-                            
-                            if (newSecondaryPwd.length < 1 || newSecondaryPwd.length > 20) {
-                                showToast("新绑定码长度需为1-20位")
+                            if (newSecondaryPwd.length > 20) {
+                                showToast("新绑定码最长20位")
+                                return
+                            }
+                            // 两项都留空 = 什么都不改。此时不能调接口空跑：后端一旦成功就会
+                            // 解绑其他所有 PC 端（changeDevicePasswordByControl 第 8 步），
+                            // 没改密码却把别人踢下线属于误伤。
+                            if (newLoginPwd.length === 0 && newSecondaryPwd.length === 0) {
+                                changePasswordDialog.close()
+                                showToast("未填写新密码，登录密码与绑定码保持不变")
                                 return
                             }
                             
@@ -12800,7 +13349,9 @@ Rectangle {
             
             Text {
                 width: parent.width - 40
-                text: "确定要清空所有抓拍内容吗？"
+                // ⭐ 需求#8：红字标注空格键
+                text: "确定要清空所有抓拍内容吗？<br><font color='#E53935'>提示：按 空格键 可直接确认清空</font>"
+                textFormat: Text.RichText
                 font.family: "PingFang HK"
                 font.pixelSize: 14
                 color: "#333333"
@@ -12842,7 +13393,8 @@ Rectangle {
                     
                     Text {
                         anchors.centerIn: parent
-                        text: "确认清空"
+                        // ⭐ 需求#8（2026-07-31）：标注空格键快捷方式（Space 快捷键早已支持，见 Shortcut "Space"）
+                        text: "确认清空(空格键)"
                         font.family: "PingFang HK"
                         font.pixelSize: 14
                         color: "#FFFFFF"
@@ -13082,10 +13634,8 @@ Rectangle {
         switchAccountDialog.close()
         showToast("正在切换账号...")
         
-        // 停止当前流
-        stopAll()
-        publishState = 0
-        currentStream = ""  // 清空 streamKey
+        // 停止当前流（§53.10 统一清场）
+        resetStreamStateForSwitch("切换账号")
         
         // ⭐ 清理 frames 目录和抓拍列表
         gstPlayer.clearJpegFiles()
@@ -13094,6 +13644,10 @@ Rectangle {
         // ⭐ 重置档位显示（避免残留上一账号的档位）
         iosCameraSettingsPopup.qualityType = "high"
         qualityButtonText.text = "超清"
+
+        // ⭐ 第五十章：相机能力跟着设备走，切账号一律清空重拉
+        CameraCapsStore.clear()
+        otgCameraPanel.close()
         
         // 断开 WebSocket
         WebSocketClient.disconnectFromServer()
@@ -13136,10 +13690,8 @@ Rectangle {
         showToast("正在切换到 " + (device.deviceNickname || deviceUsername) + "...")
         
         console.log("🔄 切换账号: 停止当前流...")
-        // 停止当前流、清空慢放、清空抓拍
-        stopAll()
-        publishState = 0
-        currentStream = ""  // 清空 streamKey
+        // 停止当前流、清空慢放、清空抓拍（§53.10 统一清场）
+        resetStreamStateForSwitch("切换到指定设备")
         
         // ⭐ 清理 frames 目录和抓拍列表
         console.log("🔄 切换账号: 清理 frames 目录和抓拍列表...")
@@ -13149,6 +13701,11 @@ Rectangle {
         // ⭐ 重置档位显示（避免残留上一账号的档位）
         iosCameraSettingsPopup.qualityType = "high"
         qualityButtonText.text = "超清"
+
+        // ⭐ 第五十章：相机能力跟着设备走——切设备必须清空并关掉 OTG 面板，
+        //   新设备的 CONFIG_STATE 一到（cameraMode/capsVersion）会自动重新索要
+        CameraCapsStore.clear()
+        otgCameraPanel.close()
         
         console.log("🔄 切换账号: 断开 WebSocket...")
         // 断开 WebSocket (STOMP)
@@ -13170,16 +13727,18 @@ Rectangle {
     function handleLogout() {
         console.log("🚪 退出登录: 开始...")
         
-        // 停止当前流
-        stopAll()
-        publishState = 0
-        currentStream = ""  // 清空 streamKey
+        // 停止当前流（§53.10 统一清场）
+        resetStreamStateForSwitch("退出登录")
         
         // ⭐ 清理 frames 目录和抓拍列表
         console.log("🚪 退出登录: 清理 frames 目录和抓拍列表...")
         gstPlayer.clearJpegFiles()
         captureManager.clearAll()
         
+        // ⭐ 第五十章：清空相机能力 + 关掉 OTG 面板
+        CameraCapsStore.clear()
+        otgCameraPanel.close()
+
         console.log("🚪 退出登录: 断开 WebSocket...")
         // 断开 WebSocket
         WebSocketClient.disconnectFromServer()

@@ -50,14 +50,22 @@ public:
     void setDeviceId(const QString &deviceId);
 
     // P2P WebRTC 信令发送
+    // ⭐ §53.25：epoch = 本轮协商标识（GstPlayer.p2pEpoch()，一轮一个）。>0 时写入 payload，
+    //   设备端会话回带、双方按它丢弃过期轮次信令。0 = 不带（老行为）。
     Q_INVOKABLE void sendWebRTCSignaling(const QString &type, const QString &toDevice,
                                           const QString &sdpType = QString(), const QString &sdp = QString(),
                                           const QString &candidate = QString(), const QString &sdpMid = QString(),
-                                          int sdpMLineIndex = -1, const QString &reason = QString());
+                                          int sdpMLineIndex = -1, const QString &reason = QString(),
+                                          qlonglong epoch = 0);
     
     // P2P WebRTC 信令频道订阅
     Q_INVOKABLE void subscribeWebRTCSignaling();
     Q_INVOKABLE void unsubscribeWebRTCSignaling();
+
+    // ⭐ §53.4：本机全部局域网 IPv4（逗号分隔）。设备端拿它与自己比 /24 网段，
+    //   **在推流前**就能判定"同不同 WiFi"，据此决定走 P2P 还是 SRS（不必先建 WebRTC 会话再看 ICE）。
+    //   与 WEBRTC_REQUEST 里带的 localIps 同一份数据，抽出来供 PC_PRESENCE 心跳复用。
+    Q_INVOKABLE QString localIpv4List() const;
 
 signals:
     void connectedChanged();
@@ -83,6 +91,7 @@ private slots:
     void onError(QAbstractSocket::SocketError error);
     void onHeartbeatTimeout();
     void onReconnectTimeout();
+    void onConnectWatchdogTimeout();   // §53.23：连接看门狗（发起→STOMP CONNECTED 限时）
 
 private:
     explicit WebSocketClient(QObject *parent = nullptr);
@@ -107,11 +116,18 @@ private:
     
     // 构建 WebSocket URL
     QString buildWebSocketUrl() const;
+    
+    // ⭐ §53.23.6：每次连接用全新 QWebSocket（复用 abort 过的对象会卡死在 ConnectingState）
+    void recreateSocket();
 
 private:
     QWebSocket *m_socket;
     QTimer *m_heartbeatTimer;
     QTimer *m_reconnectTimer;
+    // ⭐ §53.23：连接看门狗。连接路径原本**没有任何超时**——CONNECT 发出后若 CONNECTED
+    //   迟迟不来，m_connecting=true 会把 connectToServer/重连定时器全部闸死，挂起无解。
+    //   看门狗保证任何一次连接尝试要么 10s 内建立会话，要么被强拆立刻重试。
+    QTimer *m_connectWatchdog;
     
     // 连接参数
     QString m_wsBaseUrl;
@@ -122,6 +138,11 @@ private:
     // 状态
     bool m_connected = false;
     bool m_connecting = false;
+    // ⭐ §53.22：手动断开标记（退出登录/解绑）。置位期间迟到的 disconnected/error
+    //   不触发自动重连；下次 connectToServer() 时清除。
+    bool m_manualClose = false;
+    // ⭐ §53.23：本次连接尝试的发起时刻（挂起判定：重连定时器触发时若尝试超 20s 无结果则强拆重试）
+    qint64 m_connectStartedAtMs = 0;
     QString m_statusMessage;
     
     // 订阅管理
