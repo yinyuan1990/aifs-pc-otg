@@ -356,11 +356,15 @@ Rectangle {
         }
     }
     
-    // FPS 显示（来自 GstPlayer 统计的实际接收帧率，已 x4）
+    // FPS 显示（来自 GstPlayer 统计的实际接收帧率；自带摄像头 ×4，OTG 真实值）
     //   ⭐ 网页内核作主播放器时改用 webview 上报的 kernelViewerFps（GStreamer receiveFps 此时恒为 0）。
+    //   ⭐ 2026-08-02：网页内核在 html 里统一 ×4（对齐 GStreamer 口径），OTG 源在这里除回去显示真实值。
     Item {
         id: fpsRow
-        property int displayFps: mainPage.useWebEngineKernel ? mainPage.kernelViewerFps : gstPlayer.receiveFps
+        property int displayFps: mainPage.useWebEngineKernel
+                                 ? (CameraCapsStore.isOtg ? Math.round(mainPage.kernelViewerFps / 4)
+                                                          : mainPage.kernelViewerFps)
+                                 : gstPlayer.receiveFps
     }
 
     // ⭐ 网页内核作主播放器时 webview 上报的接收帧率（GStreamer receiveFps 此时恒为 0）。
@@ -583,6 +587,8 @@ Rectangle {
     // GStreamer 播放器（d3d11h264dec 硬解 + WebRTCBin，所有 Windows PC 兼容）
     GstPlayer {
         id: gstPlayer
+        // ⭐ 2026-08-02：OTG 外接摄像头 fps 显示真实值（自带摄像头保持 ×4 口径）
+        otgSource: CameraCapsStore.isOtg
         onFirstFrameReceived: {
             console.log("🎬 GstPlayer 首帧已接收")
             if (pairedIosDeviceId && pairedIosDeviceId.length > 0) {
@@ -1083,9 +1089,10 @@ Rectangle {
                     }
                 }
                 
-                // 相机设定
+                // 相机设定（OTG 外接时隐藏：自带摄像头设定不可用，避免菜单栏占位却点不动）
                 Text {
                     id: cameraSettingText
+                    visible: !CameraCapsStore.isOtg
                     text: "相机设定(R)"
                     font.family: "PingFang HK"
                     font.pixelSize: 14
@@ -3540,6 +3547,14 @@ Rectangle {
                 onSendOtg: function(ptype, payload) {
                     console.log("🔗 [OTG链路|PC下发] " + ptype + " " + JSON.stringify(payload))
                     sendConfigUpdate(ptype, payload)
+                    // ⭐ 2026-08-03 修「OTG 切档卡死」：分辨率中途变化，解码器必须等到新关键帧才能
+                    //   继续出画面。自带摄像头切档有 300/500/1000/1500ms 四连 PLI（防绿幕/卡帧），
+                    //   OTG 通道此前漏了这一套——补上同一个定时器序列。
+                    // ⭐ 2026-08-04：otg_fps 也要——改帧率会让部分硬件编码器重置（华为实锤绿屏），
+                    //   周期 IDR 已摘除，解码器坏了只能靠 PLI/设备补帧自愈。
+                    if (ptype === "otg_resolution" || ptype === "otg_fps") {
+                        pliAfterQualitySwitchTimer.restart()
+                    }
                 }
                 onOpenPanelRequested: toggleOtgCameraPanel()
                 onMirrorModeRequested: function(mode) { mainPage.videoMirrorMode = mode }
@@ -4977,10 +4992,11 @@ Rectangle {
         }
     }
     
-    // R键：打开/关闭相机设定弹窗（切换功能）
+    // R键：打开/关闭相机设定弹窗（切换功能；OTG 外接时禁用，改用 O 键外接设定）
     Shortcut {
         sequence: "R"
         context: Qt.ApplicationShortcut
+        enabled: !CameraCapsStore.isOtg
         onActivated: {
             if (iosCameraSettingsPopup.visible) {
                 iosCameraSettingsPopup.close()
@@ -4995,6 +5011,15 @@ Rectangle {
         sequence: "O"
         context: Qt.ApplicationShortcut
         onActivated: toggleOtgCameraPanel()
+    }
+
+    // OTG 切入时关掉自带「相机设定」，避免菜单隐藏后弹窗仍挂着
+    Connections {
+        target: CameraCapsStore
+        function onIsOtgChanged() {
+            if (CameraCapsStore.isOtg && iosCameraSettingsPopup.visible)
+                iosCameraSettingsPopup.close()
+        }
     }
 
     // L键：打开/关闭 iOS 采集颜色调节（冷暖/绿紫/RGB/黑/白 → 硬件白平衡）
@@ -6956,6 +6981,12 @@ Rectangle {
             //   qlgx 里没这行 = PC 面板没发（点击没触发）。
             console.log("🔗 [OTG链路|PC下发] " + ptype + " " + JSON.stringify(payload))
             sendConfigUpdate(ptype, payload)
+            // ⭐ 2026-08-03 修「OTG 切档卡死」：与底部快捷栏同款——切档后四连 PLI 要关键帧
+            //  （自带摄像头切档一直有这套，OTG 通道此前漏了）。
+            // ⭐ 2026-08-04：otg_fps 也要（改帧率触发编码器重置 → 绿屏，华为实锤）。
+            if (ptype === "otg_resolution" || ptype === "otg_fps") {
+                pliAfterQualitySwitchTimer.restart()
+            }
         }
     }
 
@@ -6968,7 +6999,9 @@ Rectangle {
             showToast("当前设备不是外接OTG摄像头")
             return
         }
-        var globalPos = cameraSettingText.mapToGlobal(0, cameraSettingText.height + 5)
+        // 锚定「外接摄像头设定」菜单项（相机设定在 OTG 下已隐藏）
+        var anchor = otgCameraSettingText.visible ? otgCameraSettingText : cameraSettingText
+        var globalPos = anchor.mapToGlobal(0, anchor.height + 5)
         otgCameraPanel.x = globalPos.x
         otgCameraPanel.y = globalPos.y
         otgCameraPanel.open()
@@ -6976,6 +7009,9 @@ Rectangle {
 
     // 显示 iOS 相机设定
     function showIosCameraSettings() {
+        if (CameraCapsStore.isOtg) {
+            return
+        }
         // ⭐ 不再每次打开都从服务器获取配置，使用本地缓存值
         // 用户修改后的值保持在 iosCameraSettingsPopup 的属性中
         // 登录时已通过 getThinConfig() 获取过初始值
@@ -12829,10 +12865,13 @@ Rectangle {
                         id: currentPasswordInput
                         anchors.fill: parent
                         anchors.margins: 10
+                        anchors.rightMargin: 36   // §56.8 给眼睛按钮留位
                         font.family: "PingFang HK"
                         font.pixelSize: 14
                         color: "#263238"
-                        echoMode: TextInput.Password
+                        // §56.8 需求：默认明文显示，点眼睛可切换隐藏
+                        property bool showPlain: true
+                        echoMode: showPlain ? TextInput.Normal : TextInput.Password
                         clip: true
                         verticalAlignment: TextInput.AlignVCenter
                         
@@ -12843,6 +12882,19 @@ Rectangle {
                             font.family: "PingFang HK"
                             font.pixelSize: 14
                             visible: parent.text.length === 0 && !parent.activeFocus
+                        }
+                    }
+                    // §56.8 明/密文切换眼睛
+                    Text {
+                        anchors.right: parent.right
+                        anchors.rightMargin: 10
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: currentPasswordInput.showPlain ? "👁" : "🙈"
+                        font.pixelSize: 16
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: currentPasswordInput.showPlain = !currentPasswordInput.showPlain
                         }
                     }
                 }
@@ -12871,10 +12923,13 @@ Rectangle {
                         id: newLoginPasswordInput
                         anchors.fill: parent
                         anchors.margins: 10
+                        anchors.rightMargin: 36
                         font.family: "PingFang HK"
                         font.pixelSize: 14
                         color: "#263238"
-                        echoMode: TextInput.Password
+                        // §56.8 默认明文，点眼睛切换
+                        property bool showPlain: true
+                        echoMode: showPlain ? TextInput.Normal : TextInput.Password
                         clip: true
                         verticalAlignment: TextInput.AlignVCenter
                         
@@ -12885,6 +12940,18 @@ Rectangle {
                             font.family: "PingFang HK"
                             font.pixelSize: 14
                             visible: parent.text.length === 0 && !parent.activeFocus
+                        }
+                    }
+                    Text {
+                        anchors.right: parent.right
+                        anchors.rightMargin: 10
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: newLoginPasswordInput.showPlain ? "👁" : "🙈"
+                        font.pixelSize: 16
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: newLoginPasswordInput.showPlain = !newLoginPasswordInput.showPlain
                         }
                     }
                 }
@@ -12913,10 +12980,13 @@ Rectangle {
                         id: newPasswordInput
                         anchors.fill: parent
                         anchors.margins: 10
+                        anchors.rightMargin: 36
                         font.family: "PingFang HK"
                         font.pixelSize: 14
                         color: "#263238"
-                        echoMode: TextInput.Password
+                        // §56.8 默认明文，点眼睛切换
+                        property bool showPlain: true
+                        echoMode: showPlain ? TextInput.Normal : TextInput.Password
                         clip: true
                         verticalAlignment: TextInput.AlignVCenter
                         
@@ -12927,6 +12997,18 @@ Rectangle {
                             font.family: "PingFang HK"
                             font.pixelSize: 14
                             visible: parent.text.length === 0 && !parent.activeFocus
+                        }
+                    }
+                    Text {
+                        anchors.right: parent.right
+                        anchors.rightMargin: 10
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: newPasswordInput.showPlain ? "👁" : "🙈"
+                        font.pixelSize: 16
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: newPasswordInput.showPlain = !newPasswordInput.showPlain
                         }
                     }
                 }
@@ -13106,10 +13188,13 @@ Rectangle {
                         id: oldLoginPwdInput
                         anchors.fill: parent
                         anchors.margins: 10
+                        anchors.rightMargin: 36
                         font.family: "PingFang HK"
                         font.pixelSize: 14
                         color: "#263238"
-                        echoMode: TextInput.Password
+                        // §56.8 默认明文，点眼睛切换
+                        property bool showPlain: true
+                        echoMode: showPlain ? TextInput.Normal : TextInput.Password
                         clip: true
                         verticalAlignment: TextInput.AlignVCenter
                         Text {
@@ -13119,6 +13204,18 @@ Rectangle {
                             font.family: "PingFang HK"
                             font.pixelSize: 14
                             visible: parent.text.length === 0 && !parent.activeFocus
+                        }
+                    }
+                    Text {
+                        anchors.right: parent.right
+                        anchors.rightMargin: 10
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: oldLoginPwdInput.showPlain ? "👁" : "🙈"
+                        font.pixelSize: 16
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: oldLoginPwdInput.showPlain = !oldLoginPwdInput.showPlain
                         }
                     }
                 }
@@ -13144,10 +13241,13 @@ Rectangle {
                         id: newLoginPwdInput2
                         anchors.fill: parent
                         anchors.margins: 10
+                        anchors.rightMargin: 36
                         font.family: "PingFang HK"
                         font.pixelSize: 14
                         color: "#263238"
-                        echoMode: TextInput.Password
+                        // §56.8 默认明文，点眼睛切换
+                        property bool showPlain: true
+                        echoMode: showPlain ? TextInput.Normal : TextInput.Password
                         clip: true
                         verticalAlignment: TextInput.AlignVCenter
                         Text {
@@ -13157,6 +13257,18 @@ Rectangle {
                             font.family: "PingFang HK"
                             font.pixelSize: 14
                             visible: parent.text.length === 0 && !parent.activeFocus
+                        }
+                    }
+                    Text {
+                        anchors.right: parent.right
+                        anchors.rightMargin: 10
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: newLoginPwdInput2.showPlain ? "👁" : "🙈"
+                        font.pixelSize: 16
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: newLoginPwdInput2.showPlain = !newLoginPwdInput2.showPlain
                         }
                     }
                 }
@@ -13182,10 +13294,13 @@ Rectangle {
                         id: confirmLoginPwdInput
                         anchors.fill: parent
                         anchors.margins: 10
+                        anchors.rightMargin: 36
                         font.family: "PingFang HK"
                         font.pixelSize: 14
                         color: "#263238"
-                        echoMode: TextInput.Password
+                        // §56.8 默认明文，点眼睛切换
+                        property bool showPlain: true
+                        echoMode: showPlain ? TextInput.Normal : TextInput.Password
                         clip: true
                         verticalAlignment: TextInput.AlignVCenter
                         Text {
@@ -13195,6 +13310,18 @@ Rectangle {
                             font.family: "PingFang HK"
                             font.pixelSize: 14
                             visible: parent.text.length === 0 && !parent.activeFocus
+                        }
+                    }
+                    Text {
+                        anchors.right: parent.right
+                        anchors.rightMargin: 10
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: confirmLoginPwdInput.showPlain ? "👁" : "🙈"
+                        font.pixelSize: 16
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: confirmLoginPwdInput.showPlain = !confirmLoginPwdInput.showPlain
                         }
                     }
                 }

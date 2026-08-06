@@ -104,7 +104,8 @@ RowLayout {
                 return v.width === CameraCapsStore.curWidth && v.height === CameraCapsStore.curHeight
             }
             onPicked: function(v) {
-                var fps = v.maxFps > 0 ? v.maxFps : 30
+                // ⭐ 2026-08-02：未知 fps 的档位按最大（120）请求，UVC 就近协商（原来兜底 30 会白压采集）
+                var fps = v.maxFps > 0 ? v.maxFps : 120
                 bar.sendOtg("otg_resolution", { "width": v.width, "height": v.height, "fps": fps })
                 CameraCapsStore.setLocalSize(v.width, v.height)
                 if (bar.pushFps > fps) {

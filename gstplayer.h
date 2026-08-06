@@ -43,6 +43,9 @@ class GstPlayer : public QObject, public IFrameSource
     Q_PROPERTY(int videoHeight READ videoHeight NOTIFY videoSizeChanged)
     Q_PROPERTY(QString decoderName READ decoderName NOTIFY decoderChanged)
     Q_PROPERTY(int receiveFps READ receiveFps NOTIFY receiveFpsChanged)
+    // ⭐ 2026-08-02：OTG 外接摄像头源标志。自带摄像头的 fps 显示做了 ×4（营销口径），
+    //   OTG 是真实帧率、是多少显多少——QML 把 CameraCapsStore.isOtg 绑到这里。
+    Q_PROPERTY(bool otgSource READ otgSource WRITE setOtgSource NOTIFY otgSourceChanged)
     Q_PROPERTY(int bufferSize READ bufferSize NOTIFY bufferSizeChanged)
     Q_PROPERTY(int bufferTarget READ bufferTarget NOTIFY bufferTargetChanged)
     // ⭐ P2P 连接阶段文字（连接中/切网重连中/重连中n/5/等待手机/已连接/失败），供 QML 面板+顶栏绑定
@@ -62,8 +65,16 @@ public:
     QString decoderName() const { return m_decoderName; }
     
     
-    // FPS 统计（EMA 平滑后的帧率，已 x4）
+    // FPS 统计（EMA 平滑后的帧率；自带摄像头 ×4，OTG 源真实值）
     int receiveFps() const { return m_receiveFps; }
+
+    // ⭐ 2026-08-02：OTG 源不做 ×4
+    bool otgSource() const { return m_otgSource.load(); }
+    void setOtgSource(bool v) {
+        if (m_otgSource.load() == v) return;
+        m_otgSource = v;
+        emit otgSourceChanged();
+    }
     
     // ⭐ 缓冲队列信息（供 QML 显示）
     int bufferSize() const override { return m_bufferSize; }
@@ -219,6 +230,7 @@ signals:
     
     // FPS 统计信号
     void receiveFpsChanged();
+    void otgSourceChanged();
     
     // 缓冲队列信号
     void bufferSizeChanged();
@@ -449,7 +461,8 @@ private:
     qint64 m_fpsLastSecondMs = 0;                // 上次统计时间
     double m_fpsEma = 0.0;                       // EMA 值
     bool m_fpsEmaInitialized = false;            // EMA 是否已初始化
-    std::atomic<int> m_receiveFps{0};            // 最终帧率值（已 x4）
+    std::atomic<int> m_receiveFps{0};            // 最终帧率值（自带 ×4 / OTG 真实值）
+    std::atomic<bool> m_otgSource{false};        // ⭐ OTG 源：fps 统计不做 ×4（统计跑在流线程，用原子量）
     static constexpr double FPS_EMA_ALPHA = 0.2; // 平滑系数（越小越平滑）
     
     // ⭐ 缓冲队列状态（供 QML 显示）

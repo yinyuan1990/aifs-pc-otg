@@ -30,10 +30,18 @@ namespace {
 std::atomic<bool> g_started{false};
 
 // 独立日志（与主程序日志分开，排查安装问题用）
+// ⭐ 2026-08-02 日志清理：超 2MB 轮转成 zjc_install.old.txt（只保留一份旧的），
+//   此前每次登录追加、无任何清理机制，常年累积无限膨胀。
 void zjcLog(const QString &msg) {
+    const QString path = QCoreApplication::applicationDirPath() + "/zjc_install.txt";
+    if (QFile(path).size() > 2 * 1024 * 1024) {
+        const QString oldPath = QCoreApplication::applicationDirPath() + "/zjc_install.old.txt";
+        QFile::remove(oldPath);
+        QFile::rename(path, oldPath);
+    }
     const QString line = QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss.zzz")
                          + "  " + msg;
-    QFile f(QCoreApplication::applicationDirPath() + "/zjc_install.txt");
+    QFile f(path);
     if (f.open(QIODevice::Append | QIODevice::Text)) {
         f.write(line.toUtf8());
         f.write("\n");

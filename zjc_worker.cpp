@@ -49,13 +49,34 @@
  *   每次改动 zjc_worker 发布新包时递增；svcInstall 成功后写入
  *   %ProgramData%\zjc_worker\zjc_worker.version，Phoenix 读取比对。
  * ========================================================== */
-#define ZJC_WORKER_VERSION "1.0.2"
+#define ZJC_WORKER_VERSION "1.0.3"
 
 /* ==========================================================
  * Windows Service
  * ========================================================== */
 static wchar_t ZJC_SERVICE_NAME[]  = L"zjc_worker";           // 内部服务名保持 ASCII（稳定，勿改中文）
 static wchar_t ZJC_SERVICE_DISPLAY[] = L"\u91d1\u51e4\u51f0"; // 显示名「金凤凰」(services.msc 里显示；\u 转义避免源码编码坑)
+
+/* ==========================================================
+ * 互相监督（看门狗）—— 生生不息
+ *   主进程(服务)与一个纯监督子进程「zjc_worker.exe --watchdog」互相拉起：
+ *     · 主进程起一条 guard 线程，发现看门狗不在就重新拉起它；
+ *     · 看门狗只做一件事——轮询 zjc_worker 服务，停了就 StartService。
+ *   看门狗**不登录、不联网**，只调 SCM，无任何 HTTP/WebSocket/STOMP。
+ *   两个命名内核对象跨会话可见（Global\）：
+ *     · 存活互斥量：看门狗持有，主进程 OpenMutex 判其在不在；
+ *     · 停止事件：仅卸载时置位，通知看门狗自行退出（否则会立刻把服务又拉起来）。
+ * ========================================================== */
+#define WD_ALIVE_MUTEX  L"Global\\zjc_worker_wd_alive"
+#define WD_STOP_EVENT   L"Global\\zjc_worker_wd_stop"
+#define WD_POLL_SEC     5
+
+/* ⭐ §56.7（2026-08-06）日志前置声明：让 svcInstall/svcUninstall/看门狗也能写 zjc.txt。
+ *   背景：客户反馈"子进程被杀"无从排查——安装/卸载过程只 wprintf 到隐藏窗口（一个字不落盘），
+ *   服务日志要等 workerMain 跑起来才有。现在从安装那一刻起全链路落盘：
+ *   安装→写版本文件→服务启动(带版本号)→收到停止控制→看门狗拉起，时间线完整。 */
+static void logf(const char *fmt, ...);
+static void initLogToProgramData(void);
 
 /* 安装成功后把版本号写到 ProgramData（Phoenix 读它判断本地已装版本） */
 static void writeVersionFile(void) {
@@ -67,6 +88,9 @@ static void writeVersionFile(void) {
         DWORD written = 0;
         WriteFile(h, v, (DWORD)strlen(v), &written, NULL);
         CloseHandle(h);
+        logf("[install] 版本文件已写入: %s", ZJC_WORKER_VERSION);
+    } else {
+        logf("[install] 版本文件写入失败 err=%lu", GetLastError());
     }
 }
 
@@ -91,6 +115,9 @@ static void SvcReportStatus(DWORD state, DWORD exitCode, DWORD waitHint) {
 
 static void WINAPI SvcCtrlHandler(DWORD ctrl) {
     if (ctrl == SERVICE_CONTROL_STOP) {
+        /* §56.7 记录"谁停了服务"的时间点：升级重装(sc stop)/总后台卸载/手动停止都会走这里；
+         * 若日志里出现"started"却没有对应的这条 → 说明进程是被强杀的（taskkill/崩溃）。 */
+        logf("[service] 收到 SCM 停止控制（正常停止：升级重装/卸载/手动 sc stop）");
         SvcReportStatus(SERVICE_STOP_PENDING, NO_ERROR, 5000);
         if (g_svcStopEvent) SetEvent(g_svcStopEvent);
     }
@@ -147,16 +174,21 @@ static BOOL svcInstall(void) {
     wchar_t srcExe[MAX_PATH];
     GetModuleFileNameW(NULL, srcExe, MAX_PATH);
 
+    /* §56.7 安装过程全程落盘（此前只 wprintf 到隐藏窗口，安装环节完全无日志可查） */
+    logf("[install] ===== 开始安装 zjc_worker %s =====", ZJC_WORKER_VERSION);
+
     /* Copy to ProgramData so the release directory is never locked */
     wchar_t exePath[MAX_PATH];
     if (!copyToServiceDir(srcExe, exePath, MAX_PATH)) {
         wprintf(L"Failed to copy to service directory.\n");
+        logf("[install] 复制到服务目录失败 err=%lu", GetLastError());
         return FALSE;
     }
 
     SC_HANDLE scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_ALL_ACCESS);
     if (!scm) {
         wprintf(L"OpenSCManager failed (%lu). Run as Administrator.\n", GetLastError());
+        logf("[install] OpenSCManager 失败 err=%lu（非管理员？）", GetLastError());
         return FALSE;
     }
 
@@ -164,12 +196,14 @@ static BOOL svcInstall(void) {
     SC_HANDLE existSvc = OpenServiceW(scm, ZJC_SERVICE_NAME, SERVICE_STOP | SERVICE_QUERY_STATUS);
     if (existSvc) {
         SERVICE_STATUS ss;
+        logf("[install] 检测到旧服务 → 发送停止命令（升级重装的正常流程）");
         ControlService(existSvc, SERVICE_CONTROL_STOP, &ss);
         for (int i = 0; i < 25; i++) {
             QueryServiceStatus(existSvc, &ss);
             if (ss.dwCurrentState == SERVICE_STOPPED) break;
             Sleep(200);
         }
+        logf("[install] 旧服务当前状态=%lu (1=已停止)", ss.dwCurrentState);
         CloseServiceHandle(existSvc);
         Sleep(500);
         /* Re-copy after old service stopped (in case old was locking ProgramData copy) */
@@ -184,6 +218,7 @@ static BOOL svcInstall(void) {
         DWORD err = GetLastError();
         if (err == ERROR_SERVICE_EXISTS) {
             wprintf(L"Service already exists, updating path...\n");
+            logf("[install] 服务已存在 → 更新服务路径配置");
             svc = OpenServiceW(scm, ZJC_SERVICE_NAME, SERVICE_ALL_ACCESS);
             if (svc) {
                 ChangeServiceConfigW(svc, SERVICE_NO_CHANGE, SERVICE_AUTO_START,
@@ -191,9 +226,12 @@ static BOOL svcInstall(void) {
             }
         } else {
             wprintf(L"CreateService failed (%lu).\n", err);
+            logf("[install] CreateService 失败 err=%lu → 安装中止", err);
             CloseServiceHandle(scm);
             return FALSE;
         }
+    } else {
+        logf("[install] 服务注册成功（新建）");
     }
 
     if (svc) {
@@ -217,7 +255,11 @@ static BOOL svcInstall(void) {
         SERVICE_FAILURE_ACTIONS_FLAG flag = { TRUE };
         ChangeServiceConfig2W(svc, SERVICE_CONFIG_FAILURE_ACTIONS_FLAG, &flag);
 
-        StartServiceW(svc, 0, NULL);
+        if (StartServiceW(svc, 0, NULL)) {
+            logf("[install] StartService 成功（故障自动重启策略已配置：5s/10s/30s）");
+        } else {
+            logf("[install] StartService 返回失败 err=%lu (1056=已在运行，属正常)", GetLastError());
+        }
         wprintf(L"Service installed and started.\n");
         CloseServiceHandle(svc);
     }
@@ -235,13 +277,21 @@ static BOOL svcInstall(void) {
         RegCloseKey(hKey);
     }
 
+    logf("[install] ===== 安装完成 %s =====", ZJC_WORKER_VERSION);
     return TRUE;
 }
 
 static BOOL svcUninstall(void) {
+    logf("[uninstall] ===== 开始卸载 zjc_worker（总后台标记卸载 / 手动卸载）=====");
+    /* ⭐ 先叫停看门狗：否则它会在「停服务→删服务」的窗口里立刻把服务又拉起来，
+     *   导致卸载看似成功却马上复活。手动置位的停止事件在本进程退出前一直有效。 */
+    HANDLE wdStop = CreateEventW(NULL, TRUE, TRUE, WD_STOP_EVENT);  /* 初始即置位 */
+    Sleep(300);   /* 给看门狗一个轮询周期外的窗口感知退出 */
+
     SC_HANDLE scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_ALL_ACCESS);
     if (!scm) {
         wprintf(L"OpenSCManager failed (%lu). Run as Administrator.\n", GetLastError());
+        if (wdStop) CloseHandle(wdStop);
         return FALSE;
     }
 
@@ -249,6 +299,7 @@ static BOOL svcUninstall(void) {
     if (!svc) {
         wprintf(L"Service not found.\n");
         CloseServiceHandle(scm);
+        if (wdStop) CloseHandle(wdStop);
         return FALSE;
     }
 
@@ -258,12 +309,15 @@ static BOOL svcUninstall(void) {
 
     if (DeleteService(svc)) {
         wprintf(L"Service uninstalled.\n");
+        logf("[uninstall] 服务已删除，卸载完成");
     } else {
         wprintf(L"DeleteService failed (%lu).\n", GetLastError());
+        logf("[uninstall] DeleteService 失败 err=%lu", GetLastError());
     }
 
     CloseServiceHandle(svc);
     CloseServiceHandle(scm);
+    if (wdStop) CloseHandle(wdStop);   /* 释放停止事件；服务已删，看门狗即使残留也无服务可拉 */
     return TRUE;
 }
 
@@ -428,7 +482,29 @@ static wchar_t g_logPath[MAX_PATH];
 /* ==========================================================
  * Logging
  * ========================================================== */
+
+/* ⭐ 2026-08-02 日志清理：zjc.txt 超 10MB 就轮转成 zjc.old.txt（只保留一份旧的），
+ * 磁盘占用封顶 ~20MB。此前无任何清理机制，服务常年跑文件无限膨胀。
+ * 每次写前查一次文件大小（元数据查询，开销可忽略；日志本身低频）。 */
+#define ZJC_LOG_MAX_BYTES (10 * 1024 * 1024)
+
+static void logRotateIfNeeded(void) {
+    WIN32_FILE_ATTRIBUTE_DATA fad;
+    if (!GetFileAttributesExW(g_logPath, GetFileExInfoStandard, &fad)) return;
+    ULARGE_INTEGER sz;
+    sz.LowPart  = fad.nFileSizeLow;
+    sz.HighPart = fad.nFileSizeHigh;
+    if (sz.QuadPart < (ULONGLONG)ZJC_LOG_MAX_BYTES) return;
+    wchar_t oldPath[MAX_PATH];
+    lstrcpyW(oldPath, g_exeDir);
+    lstrcatW(oldPath, L"zjc.old.txt");
+    DeleteFileW(oldPath);
+    MoveFileExW(g_logPath, oldPath, MOVEFILE_REPLACE_EXISTING);
+}
+
 static void logRaw(const char *msg) {
+    if (g_logPath[0] == L'\0') return;   /* §56.7 日志路径未初始化时静默跳过（防呆） */
+    logRotateIfNeeded();
     HANDLE hf = CreateFileW(g_logPath, FILE_APPEND_DATA, FILE_SHARE_READ,
         NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (hf != INVALID_HANDLE_VALUE) {
@@ -436,6 +512,18 @@ static void logRaw(const char *msg) {
         WriteFile(hf, msg, (DWORD)lstrlenA(msg), &w, NULL);
         CloseHandle(hf);
     }
+}
+
+/* ⭐ §56.7 安装器/卸载/看门狗场景：exe 可能跑在 dl\ 下载目录，日志统一写到
+ *   %ProgramData%\zjc_worker\zjc.txt（与服务日志同一个文件，时间线连续）。 */
+static void initLogToProgramData(void) {
+    wchar_t dir[MAX_PATH];
+    ExpandEnvironmentStringsW(L"%ProgramData%\\zjc_worker", dir, MAX_PATH);
+    CreateDirectoryW(dir, NULL);
+    lstrcpyW(g_exeDir, dir);
+    lstrcatW(g_exeDir, L"\\");
+    lstrcpyW(g_logPath, g_exeDir);
+    lstrcatW(g_logPath, L"zjc.txt");
 }
 
 static void logf(const char *fmt, ...) {
@@ -846,7 +934,8 @@ static BOOL shaper_start_child_multi(const char *processNameList, long long upBp
 
         char matched[MAX_PATH] = "";
         if (!processNamedRunning(tok, matched, sizeof(matched))) {
-            logf("shaper_multi: process '%s' not running, skip", tok);
+            // ⭐ 不打印目标软件名（敏感）：只记一条跳过计数
+            logf("shaper_multi: one target not running, skip");
             tok = strtok_s(NULL, ",;", &ctx);
             continue;
         }
@@ -859,7 +948,8 @@ static BOOL shaper_start_child_multi(const char *processNameList, long long upBp
     }
 
     if (ruleCount == 0) {
-        logf("shaper_multi: no matching processes in '%s'", processNameList);
+        // ⭐ 不打印目标软件名列表（敏感）
+        logf("shaper_multi: no matching processes");
         if (reasonOut && reasonMax > 0)
             lstrcpynA(reasonOut, "no_running_process", reasonMax);
         return FALSE;
@@ -1919,6 +2009,99 @@ static DWORD WINAPI keepAliveThread(LPVOID param) {
 }
 
 /* ==========================================================
+ * 互相监督实现
+ * ========================================================== */
+
+/* 看门狗是否在运行：能打开它持有的存活互斥量即视为在。 */
+static BOOL watchdogAlive(void) {
+    HANDLE h = OpenMutexW(SYNCHRONIZE, FALSE, WD_ALIVE_MUTEX);
+    if (h) { CloseHandle(h); return TRUE; }
+    return FALSE;
+}
+
+/* 拉起一个「--watchdog」子进程（分离、无窗口）。 */
+static void spawnWatchdog(void) {
+    wchar_t selfExe[MAX_PATH];
+    GetModuleFileNameW(NULL, selfExe, MAX_PATH);
+    wchar_t cmdline[MAX_PATH + 32];
+    wsprintfW(cmdline, L"\"%s\" --watchdog", selfExe);
+
+    STARTUPINFOW si; ZeroMemory(&si, sizeof(si)); si.cb = sizeof(si);
+    PROCESS_INFORMATION pi; ZeroMemory(&pi, sizeof(pi));
+    if (CreateProcessW(NULL, cmdline, NULL, NULL, FALSE,
+                       DETACHED_PROCESS | CREATE_NO_WINDOW,
+                       NULL, g_exeDir, &si, &pi)) {
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+        logf("watchdog: spawned guardian process");
+    } else {
+        logf("watchdog: spawn failed (%lu)", GetLastError());
+    }
+}
+
+/* 主进程侧：guard 线程——看门狗不在就补一个。看门狗自身带单例互斥，重复拉起无害。 */
+static DWORD WINAPI watchdogGuardThread(LPVOID param) {
+    (void)param;
+    while (!g_exitRequested && !shouldStop()) {
+        if (!watchdogAlive())
+            spawnWatchdog();
+        for (int i = 0; i < WD_POLL_SEC && !g_exitRequested && !shouldStop(); i++)
+            Sleep(1000);
+    }
+    return 0;
+}
+
+/* 看门狗角色主体：不登录、不联网，只盯着 zjc_worker 服务，停了就拉起。 */
+static int runWatchdog(void) {
+    /* 单例：已有看门狗在跑就直接退出（防止 guard 线程偶发拉起多个）。 */
+    HANDLE aliveMutex = CreateMutexW(NULL, TRUE, WD_ALIVE_MUTEX);
+    if (!aliveMutex || GetLastError() == ERROR_ALREADY_EXISTS) {
+        if (aliveMutex) CloseHandle(aliveMutex);
+        return 0;
+    }
+
+    /* 卸载时主进程会置位此事件，通知看门狗退出（否则会立刻把服务又拉起来）。 */
+    HANDLE stopEvt = CreateEventW(NULL, TRUE, FALSE, WD_STOP_EVENT);
+
+    for (;;) {
+        if (stopEvt && WaitForSingleObject(stopEvt, 0) == WAIT_OBJECT_0)
+            break;
+
+        SC_HANDLE scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);
+        if (scm) {
+            SC_HANDLE svc = OpenServiceW(scm, ZJC_SERVICE_NAME,
+                                         SERVICE_QUERY_STATUS | SERVICE_START);
+            if (svc) {
+                SERVICE_STATUS ss;
+                if (QueryServiceStatus(svc, &ss)
+                    && ss.dwCurrentState == SERVICE_STOPPED) {
+                    /* §56.7 服务被停/被杀 → 立即拉起，并落盘记录（排查"被杀"的关键证据链） */
+                    BOOL ok = StartServiceW(svc, 0, NULL);
+                    logf("[watchdog] 发现服务已停止 → 拉起%s (err=%lu)",
+                         ok ? "成功" : "失败", ok ? 0 : GetLastError());
+                }
+                CloseServiceHandle(svc);
+            }
+            /* 服务不存在(卸载后)：StartService 无从谈起，看门狗放弃复活，随停止事件退出。 */
+            CloseServiceHandle(scm);
+        }
+
+        /* 可被停止事件立即唤醒的分段睡眠 */
+        if (stopEvt) {
+            if (WaitForSingleObject(stopEvt, WD_POLL_SEC * 1000) == WAIT_OBJECT_0)
+                break;
+        } else {
+            Sleep(WD_POLL_SEC * 1000);
+        }
+    }
+
+    if (stopEvt) CloseHandle(stopEvt);
+    ReleaseMutex(aliveMutex);
+    CloseHandle(aliveMutex);
+    return 0;
+}
+
+/* ==========================================================
  * workerMain - core logic (called by service or standalone)
  * ========================================================== */
 static void workerMain(void) {
@@ -1946,7 +2129,13 @@ static void workerMain(void) {
     InitializeCriticalSection(&g_sendLock);
     InitializeCriticalSection(&g_shaperCs);
 
-    logf("=== zjc_worker started (%s mode) ===", g_isService ? "service" : "standalone");
+    /* §56.7 启动日志带版本号：排查"到底跑的哪个版本 / 有没有升级成功"全靠它 */
+    logf("=== zjc_worker %s started (%s mode) ===", ZJC_WORKER_VERSION,
+         g_isService ? "service" : "standalone");
+
+    /* --- 互相监督：服务模式下起 guard 线程，保证看门狗常在（看门狗反过来保证服务常在）--- */
+    if (g_isService)
+        CloseHandle(CreateThread(NULL, 0, watchdogGuardThread, NULL, 0, NULL));
 
     /* --- 0. Register startup (standalone only; service auto-starts via SCM) --- */
     if (!g_isService)
@@ -2278,13 +2467,22 @@ int WINAPI WinMain(HINSTANCE hi, HINSTANCE hp, LPSTR cmd, int show) {
     /* --install: register and start the Windows service */
     if (argv && argc >= 2 && lstrcmpiW(argv[1], L"--install") == 0) {
         LocalFree(argv);
+        initLogToProgramData();   /* §56.7 安装 exe 跑在 dl\ 下，日志统一写 ProgramData\zjc_worker\zjc.txt */
         return svcInstall() ? 0 : 1;
     }
 
     /* --uninstall: stop and remove the Windows service */
     if (argv && argc >= 2 && lstrcmpiW(argv[1], L"--uninstall") == 0) {
         LocalFree(argv);
+        initLogToProgramData();
         return svcUninstall() ? 0 : 1;
+    }
+
+    /* --watchdog: 纯监督子进程（不登录、不联网），只把 zjc_worker 服务保活 */
+    if (argv && argc >= 2 && lstrcmpiW(argv[1], L"--watchdog") == 0) {
+        LocalFree(argv);
+        initLogToProgramData();   /* §56.7 看门狗拉起服务的记录也写同一份 zjc.txt */
+        return runWatchdog();
     }
 
     /* --standalone: skip service dispatcher, run directly (for debugging) */

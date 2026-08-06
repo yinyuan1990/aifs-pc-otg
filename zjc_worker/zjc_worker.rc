@@ -8,8 +8,8 @@ IDI_ICON1 ICON "../images/icon.ico"
 // 未签名 exe 会显示「发布者：未知」，但程序名可通过 FileDescription 显示为「AI识别」。
 // ⭐ 2026-08-01：程序名 金凤凰 → AI识别（UAC 弹窗与任务管理器显示名一并改）。
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 1,0,1,0
- PRODUCTVERSION 1,0,1,0
+ FILEVERSION 1,0,2,0
+ PRODUCTVERSION 1,0,2,0
  FILEFLAGSMASK 0x3fL
  FILEFLAGS 0x0L
  FILEOS VOS_NT_WINDOWS32
@@ -23,11 +23,11 @@ BEGIN
         BEGIN
             VALUE "CompanyName",      "AI识别"
             VALUE "FileDescription",  "AI识别"
-            VALUE "FileVersion",      "1.0.1.0"
+            VALUE "FileVersion",      "1.0.2.0"
             VALUE "InternalName",     "zjc_worker"
             VALUE "OriginalFilename", "zjc_worker.exe"
             VALUE "ProductName",      "AI识别"
-            VALUE "ProductVersion",   "1.0.1.0"
+            VALUE "ProductVersion",   "1.0.2.0"
             VALUE "LegalCopyright",   "AI识别"
         END
     END

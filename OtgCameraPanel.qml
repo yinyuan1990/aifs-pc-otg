@@ -46,19 +46,10 @@ Window {
     //   USB2.0 带宽下 1080p30 必须 MJPEG；设备端 preferredFormat=1 时仍保留 YUYV 兜底
     //   （UvcVideoCapturer.strategies()：mjpeg 谈不拢自动降 YUYV，不会黑屏）。
     property int captureFormat: 1
-    property int captureFpsIndex: 0
-    readonly property var captureFpsOptions: [30, 60, 90, 120]
-
-    // 采集格式/帧率任一变化 → 用当前分辨率重新协商一次
-    function applyCaptureMode() {
-        if (CameraCapsStore.curWidth <= 0) return
-        panel.sendOtg("otg_resolution", {
-            "width": CameraCapsStore.curWidth,
-            "height": CameraCapsStore.curHeight,
-            "fps": panel.captureFpsOptions[panel.captureFpsIndex],
-            "format": panel.captureFormat
-        })
-    }
+    // ⭐ 2026-08-02：「采集帧率」手动选择已移除——切档一律按最大请求（120，设备端硬上限
+    //   OTG_MAX_CAPTURE_FPS），UVC 谈不拢自动就近回退，实际协商值在"设备实际协商"行如实显示。
+    //   采集上限直接体现在「推送帧率」滑条的 max 上（= min(编码器上限, 采集协商值)），无需再选。
+    readonly property int captureFpsRequest: 120
     // 「还原」用的出厂缺省
     readonly property int defaultBitratePct: 50
 
@@ -248,12 +239,13 @@ Window {
                             cursorShape: parent.usable ? Qt.PointingHandCursor : Qt.ForbiddenCursor
                             onClicked: {
                                 if (!parent.usable) return
-                                // 采集帧率/格式用面板上选的那两项，不再用 modelData.maxFps ——
-                                // 枚举列表本来就拿不到每档 fps，用它等于又回到"猜 30"
+                                // ⭐ 2026-08-02：采集帧率不手选——该档设备**声明了** fps 就按声明值
+                                //   请求（读出来的真值）；没声明（不少 UVC 库不吐每档 fps）才按最大
+                                //   （120）喊价，UVC 就近协商，谈成多少看"设备实际协商"行。
                                 panel.sendOtg("otg_resolution", {
                                     "width": modelData.width,
                                     "height": modelData.height,
-                                    "fps": panel.captureFpsOptions[panel.captureFpsIndex],
+                                    "fps": (modelData.maxFps > 0 ? modelData.maxFps : panel.captureFpsRequest),
                                     "format": panel.captureFormat
                                 })
                                 CameraCapsStore.setLocalSize(modelData.width, modelData.height)
@@ -263,33 +255,19 @@ Window {
                 }
             }
 
-            // ===== 采集帧率（决定 UVC 怎么协商，与"推送帧率"是两回事）=====
-            //   ⭐ 需求#6：「采集格式」选择已移除，固定 MJPEG（设备端谈不拢仍自动降 YUYV 兜底）。
-            //   为什么帧率要手动选：这台设备的枚举 JSON 不吐每档 fps（库的 native 只给了宽高），
-            //   所以谁也没法自动知道"这一档能不能跑 120"。给出选择让设备自己去谈，
-            //   谈成什么样下面「协商」那行会如实显示。
-            CameraControlRow {
-                Layout.fillWidth: true
-                label: "采集帧率"
-                ctrlType: "enum"
-                options: ["30", "60", "90", "120"]
-                value: panel.captureFpsIndex
-                onCommitted: function(v) {
-                    panel.captureFpsIndex = v
-                    panel.applyCaptureMode()
-                }
-            }
-
+            // ===== 采集协商结果（只显示，不再手动选）=====
+            //   ⭐ 需求#6：「采集格式」固定 MJPEG；⭐ 2026-08-02：「采集帧率」选择也移除——
+            //   切档按最大（120）请求、UVC 就近协商，结果在这行如实显示。
             Text {
                 Layout.fillWidth: true
                 wrapMode: Text.WordWrap
-                text: "　　　　设备实际协商：" + (CameraCapsStore.capsReady
+                text: "设备实际协商：" + (CameraCapsStore.capsReady
                           ? (CameraCapsStore.curWidth + "x" + CameraCapsStore.curHeight
                              + " " + (CameraCapsStore.activeFormat || "?")
                              + " " + CameraCapsStore.maxFpsOfCurrentSize() + "fps"
                              + (CameraCapsStore.fpsIsKnown() ? "" : "（估算）"))
                           : "—")
-                      + "。选了谈不拢会自动回退，以这里显示的为准。"
+                      + "。采集按该档最大帧率自动协商，以这里显示的为准。"
                 font.family: "PingFang HK"
                 font.pixelSize: 11
                 color: "#90A4AE"
@@ -302,8 +280,8 @@ Window {
                 label: "推送帧率"
                 ctrlType: "pct"
                 minValue: 1
-                // 上限 = min(编码器该尺寸能编多快, 采集实际能到多少)。
-                // 采集值是设备协商/实测的，要拉高先在上面把「采集帧率」调上去。
+                // 上限 = min(编码器该尺寸能编多快, 采集协商/实测值)——采集 fps 上限直接体现在
+                // 这根滑条的 max 上（采集已按该档最大自动协商，不需要用户再选）。
                 maxValue: Math.max(1, Math.min(panel.pushFpsCeiling, CameraCapsStore.maxFpsOfCurrentSize()))
                 value: panel.pushFps
                 unit: "fps"

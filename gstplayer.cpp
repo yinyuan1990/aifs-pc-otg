@@ -22,6 +22,7 @@
 #include <QList>
 #include <climits>
 #include <cmath>
+#include <thread>
 
 #ifdef Q_OS_WIN
 #include <windows.h>
@@ -1541,9 +1542,27 @@ void GstPlayer::destroyPipeline()
     m_srtSource.teardown(m_pipeline ? GST_BIN(m_pipeline) : nullptr);
 
     if (m_pipeline) {
-        gst_element_set_state(m_pipeline, GST_STATE_NULL);
-        gst_object_unref(m_pipeline);
-        m_pipeline = nullptr;
+        if (m_webrtcbin) {
+            // §56.7 WebRTC 管线改后台异步销毁（同步 NULL 会冻死 GUI 主线程，见 stop() 注释）。
+            //   移交前摘掉所有指回 this 的回调/总线处理器——旧管线在后台垂死期间
+            //   不得再回调进本对象，避免污染紧接着重建的新会话。
+            if (m_appsink)          g_signal_handlers_disconnect_by_data(m_appsink, this);
+            if (m_naluAppsink)      g_signal_handlers_disconnect_by_data(m_naluAppsink, this);
+            if (m_encodeAppsink)    g_signal_handlers_disconnect_by_data(m_encodeAppsink, this);
+            if (m_h264FrameAppsink) g_signal_handlers_disconnect_by_data(m_h264FrameAppsink, this);
+            g_signal_handlers_disconnect_by_data(m_webrtcbin, this);
+            GstBus *bus = gst_element_get_bus(m_pipeline);
+            if (bus) {
+                gst_bus_set_sync_handler(bus, nullptr, nullptr, nullptr);
+                gst_object_unref(bus);
+            }
+            asyncStopAndUnrefPipeline(m_pipeline, "destroy(webrtc)");  // 接管所有权
+            m_pipeline = nullptr;
+        } else {
+            gst_element_set_state(m_pipeline, GST_STATE_NULL);
+            gst_object_unref(m_pipeline);
+            m_pipeline = nullptr;
+        }
     }
     
     // 元素已经被 Pipeline 管理，不需要单独释放
@@ -1723,6 +1742,24 @@ void GstPlayer::start()
     emit playingChanged();
 }
 
+// ⭐⭐⭐ §56.7（2026-08-06）后台销毁管线 —— 治「退出登录/切换后主程序整个卡死」：
+//   客户实测 bk.txt：14:33:11 退出登录打印「⏹️ GstPlayer 停止播放」后主线程再无任何日志，
+//   81 秒后仅剩 GStreamer 回调线程一条「WebRTC 连接状态: Failed」→ 主线程冻死在
+//   gst_element_set_state(pipeline, GST_STATE_NULL) 里（webrtcbin 的 DTLS/ICE 拆除 +
+//   内部线程 join 可能无限期阻塞）。
+//   修法：WebRTC 管线的 NULL 切换 + unref 全部移交独立后台线程，GUI 主线程永不等待；
+//   线程自持引用，管线生命周期安全。SRT/普通管线保持原同步行为（多年验证无此问题）。
+static void asyncStopAndUnrefPipeline(GstElement *pipeline, const char *tag)
+{
+    if (!pipeline) return;
+    std::thread([pipeline, tag]() {
+        qDebug() << "🧹 [异步销毁]" << tag << ": 后台线程开始 set_state(NULL)...";
+        gst_element_set_state(pipeline, GST_STATE_NULL);
+        gst_object_unref(pipeline);
+        qDebug() << "🧹 [异步销毁]" << tag << ": 管线已停止并释放";
+    }).detach();
+}
+
 void GstPlayer::stop()
 {
     if (!m_playing) {
@@ -1732,7 +1769,14 @@ void GstPlayer::stop()
     qDebug() << "⏹️ GstPlayer 停止播放";
     
     if (m_pipeline) {
-        gst_element_set_state(m_pipeline, GST_STATE_NULL);
+        if (m_webrtcbin) {
+            // §56.7 WebRTC 管线：阻塞的 NULL 切换交给后台线程（成员指针保留，
+            //   随后 destroyPipeline() 移交所有权；这里取一个自己的引用保证安全）
+            gst_object_ref(m_pipeline);
+            asyncStopAndUnrefPipeline(m_pipeline, "stop(webrtc)");
+        } else {
+            gst_element_set_state(m_pipeline, GST_STATE_NULL);
+        }
     }
     
     m_playing = false;
@@ -2476,6 +2520,13 @@ GstFlowReturn GstPlayer::onNewSample(GstAppSink *sink, gpointer userData)
         return GST_FLOW_OK;
     }
     
+    // §56.7 停止后旧管线在后台异步销毁，销毁完成前可能还会吐几帧 —— 直接丢弃，
+    //   防止已清空的队列被重新填入陈旧帧
+    if (!self->m_playing) {
+        gst_sample_unref(sample);
+        return GST_FLOW_OK;
+    }
+    
     // 🔥🔥🔥 v12 简化：坏帧已在 probe 中被 DROP，这里收到的帧都是干净的！
     // probe 已处理：
     // 1. 坏帧统计 (m_corruptFrameCount)
@@ -2663,8 +2714,8 @@ GstFlowReturn GstPlayer::onNewSample(GstAppSink *sink, gpointer userData)
             poorNetworkCount = 0;
         }
         
-        // ⭐ x4 得到真实接收帧率，四舍五入
-        int newFps = qRound(self->m_fpsEma * 4);
+        // ⭐ 自带摄像头 ×4（营销口径）；OTG 外接摄像头是真实帧率、是多少显多少（2026-08-02）
+        int newFps = qRound(self->m_fpsEma * (self->m_otgSource.load() ? 1 : 4));
 
         // ⭐ 真实 ICE 线路（relay/直连）：异步 get-stats，回调里解析选中候选对的 local/remote candidate-type。
         if (self->m_useWebRTC && self->m_webrtcbin) {
