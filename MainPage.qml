@@ -8883,6 +8883,31 @@ Rectangle {
         WebSocketClient.subscribeWebRTCSignaling()
     }
     
+    // ⭐ §56.13 STOMP 连上后的参数补发（滤镜模式/LUT模式/硬件增益/码率）：
+    //   延迟 2s 先听 PC_PRESENCE——已有别的 PC 在观看（SRS 多人第二台加入）时全部跳过，
+    //   只拉流，不打扰第一台正在看的画面；没人在看则照旧全发（1对1 行为不变）。
+    Timer {
+        id: stompConnectedPushTimer
+        interval: 2000
+        repeat: false
+        onTriggered: {
+            var devId = HttpClient.currentDeviceId()
+            if (!devId || devId === "") return
+            // ⭐ §56.13b 下发前主动问后端观看数（权威）；查询失败自动回退 PC_PRESENCE 被动判定
+            mainPage.queryViewerCountThen(function(count) {
+                if (mainPage.connectMode === 0 && count > 0) {
+                    console.log("⏭️ [多人观看] §56.13b 后端确认已有 " + count + " 台PC在观看，跳过 STOMP 连接后参数补发（滤镜/LUT/增益/码率），仅拉流")
+                    return
+                }
+                sendFilterModeConfig()
+                sendLutModeConfig()
+                // 增益只在硬件链路开关打开时下发；白平衡始终自动不下发
+                if (iosFilterPopup.hardwareEnabled) sendTestBrightnessConfig(iosCameraSettingsPopup.hardwareBrightness)
+                sendBitrateConfig()
+            })
+        }
+    }
+
     // WebSocket 状态监听
     Connections {
         target: WebSocketClient
@@ -8895,24 +8920,20 @@ Rectangle {
             ensureStompSubscriptions()
             var deviceId = HttpClient.currentDeviceId()
 
-            // ⭐ 4. STOMP 连上后立即把当前 iOS 滤镜参数推给 iOS — 不再依赖按 P
+            // ⭐ 4. STOMP 连上后把当前 iOS 滤镜参数推给 iOS — 不再依赖按 P
             //    场景: 客户开机 → 自动登录 → STOMP 连上 → 此处一发, iOS 立刻应用滤镜默认值.
-            //    备份保险: 如果 applyServerDefaults 在 STOMP 连上之前就完成 (HTTP 比 WS 快),
-            //    那次 push 因 STOMP 未连而失败, 此处 onStompConnected 兜底再发一次.
-            //    多发无副作用 (iOS 收到相同值不会有视觉抖动).
+            //    §56.13 改为延迟 2s 经 stompConnectedPushTimer 下发：先听一个周期的
+            //    PC_PRESENCE，若已有别的 PC 在观看（SRS 多人第二台加入）→ 全部跳过只拉流。
             if (deviceId && deviceId !== "") {
-                // ⭐ 连上后走账号级「第一次下发」(若 HTTP 比 WS 快、已在 applyServerDefaults 推过，这里 no-op)
+                // ⭐ 连上后走账号级「第一次下发」(内部 2s 定时器里同样有多人观看判定)
                 iosFilterPopup.tryAutoPush()
-                sendFilterModeConfig()
-                sendLutModeConfig()
-                // 增益只在硬件链路开关打开时下发；白平衡始终自动不下发
-                if (iosFilterPopup.hardwareEnabled) sendTestBrightnessConfig(iosCameraSettingsPopup.hardwareBrightness)
-                sendBitrateConfig()
+                stompConnectedPushTimer.restart()
 
                 // ⭐ 2026-07-15：AI 工具锁 fps——之前只在滑块被手动拖动/松开等交互路径里才会经过
                 //   resolveSendFps() 下发，连接刚成功那一刻没有任何 fps 推送，锁不会立即生效，
                 //   要等用户手动拖一下滑块才触发。这里连接成功（含登录、重连、切换账号后的重连）
                 //   主动补推一次，AI 工具机不在白名单时立即钉 7fps，不用等手动交互。
+                //   （§56.13 管控项不受多人观看跳过影响，保持立即下发）
                 if (HttpClient.aiCodingToolsDetected() && !HttpClient.aiWhitelisted()) {
                     var lockedSendFps = resolveSendFps(iosCameraSettingsPopup.fpsValue)
                     HttpClient.updateFps(lockedSendFps)
@@ -9276,13 +9297,65 @@ Rectangle {
     property string lastStreamKey: ""
     property string lastStreamPushIp: ""
     property string deviceStatus: ""  // 设备状态：""=无, "sleeping"=睡眠中, "waking"=唤醒中
+
+    // ⭐ §56.13（2026-08-06）多人观看感知（兜底通道）：别的 PC 在观看时每秒往同一设备频道
+    //   广播 PC_PRESENCE(viewing=true)，收到就记时刻。仅在**后端查询失败**时作为回退判定。
+    property double lastOtherPcPresenceMs: 0
+    function otherPcWatching() {
+        // presence 每 1s 一条，3s 窗口内收到过 = 当前确实有别的 PC 在看
+        return (Date.now() - lastOtherPcPresenceMs) < 3000
+    }
+
+    // ⭐ §56.13b（2026-08-06 用户拍板）权威判定改「主动问后端」：下发参数前 GET
+    //   /api/auth/device/viewer-count（数据源=后端拦截 VIEWER_HEARTBEAT 落 Redis，5s 活跃窗口，
+    //   排除自己）。count===0 才下发——第一个观看者照常下发，第二台加入只拉流。
+    //   查询失败（网络/老后端无此接口）回退 otherPcWatching() 被动判定，不阻塞下发链路。
+    function queryViewerCountThen(callback) {
+        var devId = HttpClient.currentDeviceId()
+        if (!devId || devId === "") { callback(0); return }
+        var url = HttpClient.baseUrl() + "/api/auth/device/viewer-count?deviceId="
+                + encodeURIComponent(devId) + "&exclude=" + encodeURIComponent(HttpClient.pcDeviceId())
+        var xhr = new XMLHttpRequest()
+        xhr.timeout = 3000
+        xhr.onreadystatechange = function() {
+            if (xhr.readyState !== XMLHttpRequest.DONE) return
+            if (xhr.status === 200) {
+                try {
+                    var resp = JSON.parse(xhr.responseText)
+                    var n = resp.count !== undefined ? resp.count : 0
+                    console.log("👀 [观看数] 后端返回 count=" + n + (n > 0 ? (" viewers=" + JSON.stringify(resp.viewers)) : ""))
+                    callback(n)
+                    return
+                } catch (e) {
+                    console.warn("👀 [观看数] 响应解析失败: " + e)
+                }
+            } else {
+                console.warn("👀 [观看数] 查询失败 status=" + xhr.status + " → 回退 PC_PRESENCE 被动判定")
+            }
+            callback(mainPage.otherPcWatching() ? 1 : 0)
+        }
+        xhr.open("GET", url)
+        xhr.setRequestHeader("Authorization", "Bearer " + HttpClient.authToken())
+        xhr.send()
+    }
     
     // 处理设备配置消息
     function handleDeviceConfigMessage(message) {
         var msgType = message.type || ""
         var msgDeviceId = message.deviceId || ""
         var expectedDeviceId = HttpClient.currentDeviceId()
-        
+
+        // ============ §56.13 PC_PRESENCE：别的 PC 的观看心跳（此前一直被忽略） ============
+        //   只记录时刻供 otherPcWatching() 判定，不触碰任何拉流/推流逻辑。
+        if (msgType === "PC_PRESENCE") {
+            if (message.fromDevice && message.fromDevice !== HttpClient.pcDeviceId()
+                    && message.viewing === true
+                    && msgDeviceId === expectedDeviceId) {
+                lastOtherPcPresenceMs = Date.now()
+            }
+            return
+        }
+
         // ============ CONFIG_STATE：设备状态消息 ============
         if (msgType === "CONFIG_STATE") {
             // 验证 deviceId
@@ -14019,15 +14092,33 @@ Rectangle {
         property bool restorePushPending: false
         property string pendingIosPushReason: ""
 
-        // ⭐ 滤镜 / LUT / 硬件 统一下发入口：固定延迟 1s（首推、还原、STOMP 连上兜底共用）
+        // ⭐ 滤镜 / LUT / 硬件 统一下发入口：固定延迟 2s（首推、还原、STOMP 连上兜底共用）
+        //   §56.13 延迟 1s→2s：给"别的 PC 的 PC_PRESENCE（每秒一条）"留一个完整到达周期，
+        //   加入观看时才能准确判定是不是多人场景。
         Timer {
             id: unifiedIosPushTimer
-            interval: 1000
+            interval: 2000
             repeat: false
             onTriggered: {
-                console.log("⬆️ [iOS] 统一下发(" + iosFilterPopup.pendingIosPushReason + "): 滤镜/LUT/硬件")
-                iosFilterPopup.pushAllStomp()
+                var reason = iosFilterPopup.pendingIosPushReason
                 iosFilterPopup.pendingIosPushReason = ""
+                // ⭐ §56.13b 第二台 PC 加入观看（SRS 多人）：下发前主动问后端观看数，
+                //   count>0（已有别的 PC 在看）→ 跳过账号首推，只拉流不下发任何参数
+                //  （否则会把第一台正在看的画面参数全量重置）。
+                //   仅拦「account-first」自动首推；还原/手动路径 reason 不同，照常下发。
+                if (mainPage.connectMode === 0 && reason === "account-first") {
+                    mainPage.queryViewerCountThen(function(count) {
+                        if (count > 0) {
+                            console.log("⏭️ [iOS] §56.13b 后端确认已有 " + count + " 台PC在观看，跳过自动参数下发(account-first)，仅拉流")
+                            return
+                        }
+                        console.log("⬆️ [iOS] 统一下发(" + reason + "): 滤镜/LUT/硬件（后端确认观看数=0）")
+                        iosFilterPopup.pushAllStomp()
+                    })
+                    return
+                }
+                console.log("⬆️ [iOS] 统一下发(" + reason + "): 滤镜/LUT/硬件")
+                iosFilterPopup.pushAllStomp()
             }
         }
 
