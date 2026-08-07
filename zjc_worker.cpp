@@ -1268,17 +1268,19 @@ static BOOL getMacAddress(char *out, int maxLen) {
 
 /* ==========================================================
  * Generate pcDeviceId (same algorithm as Qt main app)
- *   MachineGuid + "|" + MAC -> SHA256 -> "PC_" + first16hex
+ *   MachineGuid + "|" + MAC -> SHA256 -> "PC_" + first16hex + "_OTG"
+ *   §56.22b OTG 变体：设备号带 _OTG 后缀（与 PhoenixOTG 主程序一致），
+ *   缓存读 PhoenixOTG 独立注册表分支，绝不误用主版 Phoenix 的无后缀设备号。
  * ========================================================== */
 static void generatePcDeviceIdW32(char *out, int maxLen) {
     out[0] = '\0';
 
     /* 1. Try reading cached ID from QSettings registry
-     *    QSettings("Phoenix","Phoenix") -> HKCU\Software\Phoenix\Phoenix */
+     *    QSettings("PhoenixOTG","PhoenixOTG") -> HKCU\Software\PhoenixOTG\PhoenixOTG */
     {
         HKEY hKey;
         if (RegOpenKeyExW(HKEY_CURRENT_USER,
-                L"Software\\Phoenix\\Phoenix", 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+                L"Software\\PhoenixOTG\\PhoenixOTG", 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
             wchar_t val[256] = {0};
             DWORD sz = sizeof(val);
             DWORD type = 0;
@@ -1286,9 +1288,15 @@ static void generatePcDeviceIdW32(char *out, int maxLen) {
                     (LPBYTE)val, &sz) == ERROR_SUCCESS && type == REG_SZ) {
                 WideCharToMultiByte(CP_UTF8, 0, val, -1, out, maxLen, NULL, NULL);
                 RegCloseKey(hKey);
-                if (out[0] != '\0') return;
+                /* 只认带 _OTG 后缀的缓存（防串用主版无后缀设备号） */
+                {
+                    int n = lstrlenA(out);
+                    if (n > 4 && lstrcmpA(out + n - 4, "_OTG") == 0) return;
+                    out[0] = '\0';
+                }
+            } else {
+                RegCloseKey(hKey);
             }
-            RegCloseKey(hKey);
         }
     }
 
@@ -1326,10 +1334,10 @@ static void generatePcDeviceIdW32(char *out, int maxLen) {
     sha256Hex(rawData, lstrlenA(rawData), hex, sizeof(hex));
     if (hex[0] == '\0') return;
 
-    /* 5. "PC_" + first 16 uppercase hex chars */
+    /* 5. "PC_" + first 16 uppercase hex chars + "_OTG"（§56.22b OTG 变体后缀） */
     char first16[17] = "";
     lstrcpynA(first16, hex, 17);
-    wsprintfA(out, "PC_%s", first16);
+    wsprintfA(out, "PC_%s_OTG", first16);
 }
 
 /* ==========================================================

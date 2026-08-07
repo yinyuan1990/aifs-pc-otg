@@ -422,11 +422,14 @@ void HttpClient::fetchLatestDownloadUrl()
 }
 
 // ⭐ 生成/获取PC设备唯一标识（基于Windows MachineGuid + MAC地址）
+// §56.22b OTG 专版：设备号带 _OTG 后缀 = 后端视为另一台 PC——与主版同机安装时
+// pc:online 不互顶、观看计数不误判、zjc 双套上报各归各。缓存也用独立注册表分支
+// （HKCU\Software\PhoenixOTG），绝不读/写主版 Phoenix 的缓存。
 QString HttpClient::generatePcDeviceId()
 {
-    QSettings appSettings("Phoenix", "Phoenix");
+    QSettings appSettings("PhoenixOTG", "PhoenixOTG");
     QString cachedId = appSettings.value("pcDeviceId").toString();
-    if (!cachedId.isEmpty()) {
+    if (!cachedId.isEmpty() && cachedId.endsWith("_OTG")) {
         qDebug() << "[PcDeviceId] 使用缓存:" << cachedId;
         return cachedId;
     }
@@ -467,9 +470,9 @@ QString HttpClient::generatePcDeviceId()
         }
     }
     
-    // SHA256 哈希取前16位作为设备ID
+    // SHA256 哈希取前16位作为设备ID（§56.22b OTG 专版加 _OTG 后缀）
     QByteArray hash = QCryptographicHash::hash(rawData.toUtf8(), QCryptographicHash::Sha256).toHex();
-    QString deviceId = "PC_" + QString(hash).left(16).toUpper();
+    QString deviceId = "PC_" + QString(hash).left(16).toUpper() + "_OTG";
     
     // 缓存到本地
     appSettings.setValue("pcDeviceId", deviceId);
