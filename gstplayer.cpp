@@ -1492,6 +1492,25 @@ QImage GstPlayer::grabCurrentFrame()
     return img;
 }
 
+// ⭐⭐⭐ §56.7（2026-08-06）后台销毁管线 —— 治「退出登录/切换后主程序整个卡死」：
+//   客户实测 bk.txt：14:33:11 退出登录打印「⏹️ GstPlayer 停止播放」后主线程再无任何日志，
+//   81 秒后仅剩 GStreamer 回调线程一条「WebRTC 连接状态: Failed」→ 主线程冻死在
+//   gst_element_set_state(pipeline, GST_STATE_NULL) 里（webrtcbin 的 DTLS/ICE 拆除 +
+//   内部线程 join 可能无限期阻塞）。
+//   修法：WebRTC 管线的 NULL 切换 + unref 全部移交独立后台线程，GUI 主线程永不等待；
+//   线程自持引用，管线生命周期安全。SRT/普通管线保持原同步行为（多年验证无此问题）。
+//  （定义必须在 destroyPipeline/stop 两个调用点之前，否则 C3861 找不到标识符）
+static void asyncStopAndUnrefPipeline(GstElement *pipeline, const char *tag)
+{
+    if (!pipeline) return;
+    std::thread([pipeline, tag]() {
+        qDebug() << "🧹 [异步销毁]" << tag << ": 后台线程开始 set_state(NULL)...";
+        gst_element_set_state(pipeline, GST_STATE_NULL);
+        gst_object_unref(pipeline);
+        qDebug() << "🧹 [异步销毁]" << tag << ": 管线已停止并释放";
+    }).detach();
+}
+
 void GstPlayer::destroyPipeline()
 {
     QMutexLocker lock(&m_mutex);
@@ -1740,24 +1759,6 @@ void GstPlayer::start()
     m_playing = true;
     qDebug() << "✅ GstPlayer 已启动, m_playing=true";
     emit playingChanged();
-}
-
-// ⭐⭐⭐ §56.7（2026-08-06）后台销毁管线 —— 治「退出登录/切换后主程序整个卡死」：
-//   客户实测 bk.txt：14:33:11 退出登录打印「⏹️ GstPlayer 停止播放」后主线程再无任何日志，
-//   81 秒后仅剩 GStreamer 回调线程一条「WebRTC 连接状态: Failed」→ 主线程冻死在
-//   gst_element_set_state(pipeline, GST_STATE_NULL) 里（webrtcbin 的 DTLS/ICE 拆除 +
-//   内部线程 join 可能无限期阻塞）。
-//   修法：WebRTC 管线的 NULL 切换 + unref 全部移交独立后台线程，GUI 主线程永不等待；
-//   线程自持引用，管线生命周期安全。SRT/普通管线保持原同步行为（多年验证无此问题）。
-static void asyncStopAndUnrefPipeline(GstElement *pipeline, const char *tag)
-{
-    if (!pipeline) return;
-    std::thread([pipeline, tag]() {
-        qDebug() << "🧹 [异步销毁]" << tag << ": 后台线程开始 set_state(NULL)...";
-        gst_element_set_state(pipeline, GST_STATE_NULL);
-        gst_object_unref(pipeline);
-        qDebug() << "🧹 [异步销毁]" << tag << ": 管线已停止并释放";
-    }).detach();
 }
 
 void GstPlayer::stop()
@@ -3420,8 +3421,9 @@ void GstPlayer::warmupDecoderEncoderAsync()
 
     // ⭐ 解码器与编码器并行预热（各占一个线程池任务），墙钟时间取两者较大者而非相加，
     //   尽量在用户真正 connectSRT 之前热完（MediaFoundation 首次初始化约 2s 是瓶颈）。
+    //   §56.7 QtConcurrent::run 丢弃 QFuture 触发 C4858 → 按编译器建议改 QThreadPool::start（语义相同：射后不理）
     // 解码器预热：videotestsrc → x264enc(软编造码流) → h264parse → <硬解> → fakesink
-    QtConcurrent::run([this, runWarmup]() {
+    QThreadPool::globalInstance()->start([this, runWarmup]() {
         qint64 t0 = QDateTime::currentMSecsSinceEpoch();
         srtLog(QString("[warmup] 解码器预热开始"));
         // 不调用 detectGpuType()（其 QProcess::waitForFinished 在无事件循环线程不可靠），
@@ -3447,7 +3449,7 @@ void GstPlayer::warmupDecoderEncoderAsync()
     });
 
     // 编码器预热：videotestsrc(NV12) → mfh264enc → h264parse → fakesink（触发 MediaFoundation 初始化）
-    QtConcurrent::run([this, runWarmup]() {
+    QThreadPool::globalInstance()->start([this, runWarmup]() {
         qint64 t0 = QDateTime::currentMSecsSinceEpoch();
         srtLog(QString("[warmup] 编码器预热开始（mfh264enc / MediaFoundation 冷启动约 2s）"));
         if (gst_element_factory_find("mfh264enc")) {
