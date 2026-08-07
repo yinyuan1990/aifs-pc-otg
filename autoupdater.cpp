@@ -375,9 +375,12 @@ void AutoUpdater::downloadAndInstall()
             out << "echo ==== Phoenix update %date% %time% ==== > \"%ULOG%\"\n";
             out << "echo  解压明细将写入: %ULOG%\n";
 
-            // 强制结束 Phoenix 进程并等待释放文件锁
+            // 强制结束本程序进程并等待释放文件锁
+            // ⭐ §56.21 OTG 专版：exe 已改名（PhoenixOTG.exe）时**不 kill Phoenix.exe**——那是同机主版
             out << "echo  [1/3] 等待旧程序退出...\n";
-            out << "taskkill /F /IM Phoenix.exe /T >nul 2>&1\n";
+            if (!exeRenamed) {
+                out << "taskkill /F /IM Phoenix.exe /T >nul 2>&1\n";
+            }
             out << "taskkill /F /IM " << actualExeName << " /T >nul 2>&1\n";
             out << "timeout /t 2 /nobreak >nul\n";
             out << "echo.\n";
@@ -801,13 +804,10 @@ void AutoUpdater::finalizeManifestUpdate()
     out << "echo  [1/3] 等待旧程序退出...\n";
     out << "set /a WAITED=0\n";
     out << ":waitloop\n";
-    out << "tasklist /FI \"IMAGENAME eq Phoenix.exe\" 2>nul | find /i \"Phoenix.exe\" >nul\n";
+    // ⭐ §56.21 OTG 专版：只等本程序自己的进程名退出，不查 Phoenix.exe（那是同机主版）
+    out << "tasklist /FI \"IMAGENAME eq " << actualExeName << "\" 2>nul | find /i \""
+        << actualExeName << "\" >nul\n";
     out << "if not errorlevel 1 goto stillrunning\n";
-    if (exeRenamed) {
-        out << "tasklist /FI \"IMAGENAME eq " << actualExeName << "\" 2>nul | find /i \""
-            << actualExeName << "\" >nul\n";
-        out << "if not errorlevel 1 goto stillrunning\n";
-    }
     out << "goto readytocopy\n";
     out << ":stillrunning\n";
     out << "set /a WAITED+=1\n";
@@ -816,9 +816,10 @@ void AutoUpdater::finalizeManifestUpdate()
     out << "goto waitloop\n";
     out << ":killhard\n";
     out << "echo  等待超时, 强制结束进程 >> \"%ULOG%\"\n";
-    out << "taskkill /F /IM Phoenix.exe /T >nul 2>&1\n";
-    if (exeRenamed)
-        out << "taskkill /F /IM " << actualExeName << " /T >nul 2>&1\n";
+    // ⭐ §56.21 OTG 专版：只强杀本程序自己，不碰 Phoenix.exe（同机主版）
+    if (!exeRenamed)
+        out << "taskkill /F /IM Phoenix.exe /T >nul 2>&1\n";
+    out << "taskkill /F /IM " << actualExeName << " /T >nul 2>&1\n";
     out << "timeout /t 2 /nobreak >nul\n";
     out << ":readytocopy\n";
     out << "taskkill /F /IM QtWebEngineProcess.exe >nul 2>&1\n";

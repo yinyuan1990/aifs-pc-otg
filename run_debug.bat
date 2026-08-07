@@ -28,10 +28,10 @@ echo   Plugin Path: %GST_PLUGIN_PATH%
 echo ========================================
 echo.
 
-REM 运行程序
+REM 运行程序（⭐ OTG 专版产物名 PhoenixOTG.exe，见 CMakeLists OUTPUT_NAME）
 cd /d "%~dp0build\Desktop_Qt_6_10_3_MSVC2022_64bit-Debug"
-echo Starting appAifs.exe from %CD%
+echo Starting PhoenixOTG.exe from %CD%
 echo.
-appAifs.exe
+PhoenixOTG.exe
 
 pause

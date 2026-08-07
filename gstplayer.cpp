@@ -2586,6 +2586,21 @@ GstFlowReturn GstPlayer::onNewSample(GstAppSink *sink, gpointer userData)
     {
         QMutexLocker lock(&self->m_queueMutex);
         
+        // ⭐⭐⭐ §56.21 OTG 高帧率（120/240fps）latest-wins（跳闪根因修复，见 §56.19）：
+        //   入站远超渲染消耗在高帧率下是**常态**（240 进 / 30-60 出），不是异常。
+        //   老的 v11.3 极端保护在 240fps 下每 ~0.3s 触发一次「攒到60帧→一把砍30帧→PLI」：
+        //   砍 30 帧 = 画面时间轴跳 125ms（"跳"）；PLI 逼设备每秒补 ~2 个 IDR，
+        //   240fps@2.4Mbps 平均帧仅 1.2KB，IDR 挤占几十帧码率预算 → 画质脉冲（"闪"）。
+        //   改为持续小步淘汰旧帧：队列钉在 ~50ms 窗口，渲染取到的永远是准最新帧、
+        //   时间步距均匀（观感=平滑），且**本地拥塞淘汰绝不发 PLI**。
+        //   仅 OTG 源且到达率>70fps 生效；低帧率 OTG / 自带摄像头维持 v11.3 原逻辑。
+        if (self->m_otgSource.load() && self->m_arrivalRateEma > 70.0) {
+            const int cap = qMax(6, (int)(self->m_arrivalRateEma * 0.05));  // 240fps→12帧≈50ms
+            while (self->m_frameQueue.size() >= cap) {
+                GstSample *oldest = self->m_frameQueue.takeFirst();
+                gst_sample_unref(oldest);
+            }
+        } else {
         // 🔥 v11.3: 只在极端情况（2×限制 = 60帧）才丢帧，正常靠追帧消耗
         int extremeLimit = QUEUE_ABSOLUTE_MAX * 2;  // 60帧
         if (self->m_frameQueue.size() >= extremeLimit) {
@@ -2601,6 +2616,7 @@ GstFlowReturn GstPlayer::onNewSample(GstAppSink *sink, gpointer userData)
             
             // 丢帧后请求关键帧
             QMetaObject::invokeMethod(self, "requestKeyFrame", Qt::QueuedConnection);
+        }
         }
         
         // 直接入队（pull_sample 返回的已有引用计数，由队列接管）
@@ -2670,6 +2686,22 @@ GstFlowReturn GstPlayer::onNewSample(GstAppSink *sink, gpointer userData)
         // 防止EMA过低/过高（最小10fps，保证播放流畅）
         if (self->m_arrivalRateEma < 10.0) self->m_arrivalRateEma = 10.0;  // 最小10fps
         if (self->m_arrivalRateEma > 240.0) self->m_arrivalRateEma = 240.0;
+        
+        // ⭐ §56.21 OTG 高帧率渲染自适应：到达率>70fps 时渲染 33ms→16ms（60fps 消耗，
+        //   60Hz 显示器的呈现上限），配合上面的 latest-wins 队列 = 平滑 60fps 观感。
+        //   到达率回落（换低帧档/自带摄像头）自动切回 33ms。定时器在 GUI 线程，Queued 切换。
+        {
+            const int desired = (self->m_otgSource.load() && self->m_arrivalRateEma > 70.0) ? 16 : 33;
+            if (self->m_renderIntervalTarget.exchange(desired) != desired) {
+                const int arrivalNow = (int)self->m_arrivalRateEma;
+                QMetaObject::invokeMethod(self, [self, desired, arrivalNow]() {
+                    if (self->m_renderTimer) {
+                        self->m_renderTimer->start(desired);
+                        qDebug() << "🎞️ [OTG高帧率] 渲染间隔切换 →" << desired << "ms（到达率≈" << arrivalNow << "fps）";
+                    }
+                }, Qt::QueuedConnection);
+            }
+        }
         
         // ⭐⭐⭐ 自动检测fps变化并同步调整（自动唤醒机制）
         // 当实测fps稳定在不同于配置fps的值时，自动调整

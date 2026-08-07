@@ -463,6 +463,9 @@ private:
     bool m_fpsEmaInitialized = false;            // EMA 是否已初始化
     std::atomic<int> m_receiveFps{0};            // 最终帧率值（自带 ×4 / OTG 真实值）
     std::atomic<bool> m_otgSource{false};        // ⭐ OTG 源：fps 统计不做 ×4（统计跑在流线程，用原子量）
+    // ⭐ §56.21 OTG 高帧率渲染自适应：到达率>70fps 时渲染定时器 33ms→16ms（60fps 消耗），
+    //   由流线程每秒判定、经 QueuedConnection 切换（渲染定时器在 GUI 线程）。记录目标值防重复切。
+    std::atomic<int> m_renderIntervalTarget{33};
     static constexpr double FPS_EMA_ALPHA = 0.2; // 平滑系数（越小越平滑）
     
     // ⭐ 缓冲队列状态（供 QML 显示）

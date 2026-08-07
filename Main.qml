@@ -7,7 +7,7 @@ import Aifs.Components
 ApplicationWindow {
     id: mainWindow
     visible: true
-    title: "金凤凰"
+    title: "金凤凰OTG"
     
     // 登录状态
     property bool isLoggedIn: false

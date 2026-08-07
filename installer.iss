@@ -1,33 +1,35 @@
-; Phoenix 安装程序脚本 (Inno Setup)
+; PhoenixOTG（OTG 专版）安装程序脚本 (Inno Setup)
+; ⭐ §56.21 与主版 Phoenix 完全独立：AppId/程序名/安装目录/快捷方式全部区分，
+;   同一台 PC 可与主版共存安装、同时运行（注意：两版 PC 设备号相同，别同时登录观看）。
 ; 需要安装 Inno Setup: https://jrsoftware.org/isinfo.php
 
-#define MyAppName "Phoenix"
+#define MyAppName "PhoenixOTG"
 ; §43 版本号由 pack.bat 经 ISCC /DMyAppVersion=x.y.z 传入（源头=CMakeLists.txt 的 PHOENIX_APP_VERSION）
 ; 未传时才用下面的兜底值
 #ifndef MyAppVersion
 #define MyAppVersion "1.0.0"
 #endif
 #define MyAppPublisher "Acard"
-#define MyAppExeName "Phoenix.exe"
+#define MyAppExeName "PhoenixOTG.exe"
 
 [Setup]
-; 应用程序信息
-AppId={{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}
+; 应用程序信息（⭐ OTG 专版独立 AppId——与主版不同 GUID，Inno 才不会把两者当同一程序互相覆盖）
+AppId={{D03E4A9B-1DA9-45A3-A468-D739615835C2}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
 DefaultDirName={code:GetDefaultInstallDir}
 DefaultGroupName={#MyAppName}
-; 输出设置
-OutputDir=D:\javafx\Acard\aic\Aifs\installer_output
-OutputBaseFilename=Phoenix_Setup_{#MyAppVersion}
+; 输出设置（⭐ OTG 专版：路径指向 aifs-pc-otg 仓库自己的目录）
+OutputDir=D:\javafx\Acard\aic\aifs-pc-otg\installer_output
+OutputBaseFilename=PhoenixOTG_Setup_{#MyAppVersion}
 ; 压缩设置
 Compression=lzma2/ultra64
 SolidCompression=yes
 LZMAUseSeparateProcess=yes
 ; 界面设置
 WizardStyle=modern
-SetupIconFile=D:\javafx\Acard\aic\Aifs\images\icon.ico
+SetupIconFile=D:\javafx\Acard\aic\aifs-pc-otg\images\icon.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 ; 权限设置
 PrivilegesRequired=admin
@@ -48,7 +50,7 @@ Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: 
 [Files]
 ; ⭐ zjc_worker 已分离（第三十二章）：不再随主程序打包，PC 端登录后由 ZjcInstaller
 ;   从 CDN 自动下载安装为独立 Windows 服务（金凤凰）。故此处不再包含 zjc_worker.exe。
-Source: "D:\javafx\Acard\aic\Aifs\release\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "D:\javafx\Acard\aic\aifs-pc-otg\release\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
@@ -109,5 +111,5 @@ var
   ResultCode: Integer;
 begin
   Result := True;
-  Exec('taskkill.exe', '/F /IM Phoenix.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec('taskkill.exe', '/F /IM PhoenixOTG.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 end;

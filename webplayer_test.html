@@ -974,7 +974,11 @@
         //   累计 lost 跑久了到几千很正常；丢包率 < 1~2% 即肉眼无感。lostDelta = 本秒新增丢包。
         const recv = inbound.packetsReceived || 0;
         const lossRate = (recv + lost) > 0 ? (lost / (recv + lost) * 100) : 0;
-        const artifactRisk = (lostDelta >= ARTIFACT_LOST_DELTA) || (dropDelta >= ARTIFACT_DROP_DELTA);
+        // ⭐ §56.21 OTG 高帧率：入站 fps 超过渲染/显示能力时 framesDropped 每秒必然大涨
+        //   （240 进 60 出 = 每秒正常丢 ~180 帧，不是花屏），高帧率流只认真丢包；
+        //   低帧率流维持原「丢包或丢帧」双判定。fpsReal>70 即视为高帧率流。
+        const artifactRisk = (lostDelta >= ARTIFACT_LOST_DELTA) ||
+                             (fpsReal <= 70 && dropDelta >= ARTIFACT_DROP_DELTA);
         if (artifactRisk && dec !== lastDecoded /* 仍在出帧才算花屏(非纯卡死) */) {
           artifactStreak++;
           const nowMs = Date.now();

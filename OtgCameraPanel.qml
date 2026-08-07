@@ -51,7 +51,9 @@ Window {
     //   采集上限直接体现在「推送帧率」滑条的 max 上（= min(编码器上限, 采集协商值)），无需再选。
     readonly property int captureFpsRequest: 120
     // 「还原」用的出厂缺省
-    readonly property int defaultBitratePct: 50
+    // ⭐ §56.21 OTG 专版：默认码率拉满——240fps 下 50%（2400kbps）平均每帧仅 1.2KB 太瘦，
+    //   100%（按档位上限，如 640x400@240 → 4000kbps）画质余量才够高帧率分摊。
+    readonly property int defaultBitratePct: 100
 
     function defaultPushFps() {
         var cap = Math.min(pushFpsCeiling, CameraCapsStore.maxFpsOfCurrentSize())

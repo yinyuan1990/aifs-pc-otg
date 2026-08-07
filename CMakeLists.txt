@@ -130,6 +130,11 @@ target_include_directories(Phoenix PRIVATE
     ${ONNXRUNTIME_INCLUDE_DIR}
 )
 
+# ⭐ §56.21 OTG 专版：可执行文件名与主版 Phoenix.exe 区分（PhoenixOTG.exe），
+#   同一台 PC 共存安装/同时运行时任务管理器可分辨，卸载器 taskkill 不会误杀对方。
+#   target 名保持 Phoenix 不动（避免牵动下面所有 target_* 引用），只改产物名。
+set_target_properties(Phoenix PROPERTIES OUTPUT_NAME "PhoenixOTG")
+
 # ⭐ GStreamer WebRTC API 需要此宏定义
 target_compile_definitions(Phoenix PRIVATE GST_USE_UNSTABLE_API)
 
