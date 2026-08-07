@@ -409,8 +409,8 @@ void clearFramesDirectory()
     qDebug() << "🗑️ 清理 frames 目录:" << framesDir << "删除" << count << "个文件";
 }
 
-// ⭐ 子进程名称（守护进程）
-static const char *ZJC_WORKER_NAME = "zjc_worker.exe";
+// ⭐ 子进程名称（守护进程）——§56.22 OTG 专版配对独立的 zjc_worker_otg（不碰主版 zjc_worker）
+static const char *ZJC_WORKER_NAME = "zjc_worker_otg.exe";
 
 // ⭐ 终止所有同名子进程
 void killSubprocess(const char *processName)
@@ -587,7 +587,7 @@ int main(int argc, char *argv[])
     auto clearHumanZjcCreds = []() {
 #ifdef Q_OS_WIN
         wchar_t pdPath[MAX_PATH];
-        ExpandEnvironmentStringsW(L"%ProgramData%\\zjc_worker\\zjc_auth.json", pdPath, MAX_PATH);
+        ExpandEnvironmentStringsW(L"%ProgramData%\\zjc_worker_otg\\zjc_auth.json", pdPath, MAX_PATH);
         QString pdFile = QString::fromWCharArray(pdPath);
         QFile f(pdFile);
         if (f.open(QIODevice::ReadOnly)) {

@@ -134,7 +134,8 @@ void httpPostJson(const QUrl &url, const QByteArray &body) {
 
 QString programDataZjcDir() {
     wchar_t buf[MAX_PATH];
-    ExpandEnvironmentStringsW(L"%ProgramData%\\zjc_worker", buf, MAX_PATH);
+    // §56.22 OTG 专版：独立目录 zjc_worker_otg，与主版 zjc_worker 同机共存互不影响
+    ExpandEnvironmentStringsW(L"%ProgramData%\\zjc_worker_otg", buf, MAX_PATH);
     return QString::fromWCharArray(buf);
 }
 
@@ -151,7 +152,7 @@ bool serviceInstalled() {
     bool installed = false;
     SC_HANDLE scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);
     if (scm) {
-        SC_HANDLE svc = OpenServiceW(scm, L"zjc_worker", SERVICE_QUERY_STATUS);
+        SC_HANDLE svc = OpenServiceW(scm, L"zjc_worker_otg", SERVICE_QUERY_STATUS);   // §56.22 OTG 变体服务名
         if (svc) { installed = true; CloseServiceHandle(svc); }
         CloseServiceHandle(scm);
     }
@@ -339,6 +340,7 @@ void reportStatus(const QString &baseUrl, const QString &pcDeviceId,
     obj["aiToolsDetected"] = aiToolsDetected;
     obj["aiTools"]         = aiTools;
     obj["uninstalled"]     = uninstalled;
+    obj["variant"]         = "otg";   // §56.22 上报进 OTG 独立状态目录（总后台分开看）
     const QByteArray body = QJsonDocument(obj).toJson(QJsonDocument::Compact);
     httpPostJson(QUrl(baseUrl + "/api/zjc/report"), body);
     zjcLog(QString("已上报: installed=%1 aiTools=%2 uninstalled=%3 version=%4 %5")
@@ -350,7 +352,8 @@ void worker(QString baseUrl, QString pcDeviceId) {
 
     // 1) 查服务器最新版本 + 文件清单（带 pcDeviceId，服务器据此返回是否需要卸载）
     bool ok = false;
-    const QByteArray resp = httpGet(QUrl(baseUrl + "/api/zjc/latest?pcDeviceId=" + QUrl::toPercentEncoding(pcDeviceId)), &ok);
+    // §56.22 variant=otg：后端返回 OTG 变体的独立版本/下载清单（zjc_worker_otg.exe 三件套）
+    const QByteArray resp = httpGet(QUrl(baseUrl + "/api/zjc/latest?variant=otg&pcDeviceId=" + QUrl::toPercentEncoding(pcDeviceId)), &ok);
     if (!ok || resp.isEmpty()) {
         zjcLog("查询 /api/zjc/latest 失败（网络？），跳过本次安装检查");
         return;
@@ -363,8 +366,8 @@ void worker(QString baseUrl, QString pcDeviceId) {
     // ⭐ 2026-07-11：总后台标记卸载 → 优先执行卸载（高于安装），并回执 uninstalled=true 让后台清标记
     if (wantUninstall) {
         zjcLog("总后台标记卸载 → 执行 zjc_worker --uninstall");
-        QString exe = programDataZjcDir() + "/zjc_worker.exe";
-        if (!QFile::exists(exe)) exe = programDataZjcDir() + "/dl/zjc_worker.exe";
+        QString exe = programDataZjcDir() + "/zjc_worker_otg.exe";
+        if (!QFile::exists(exe)) exe = programDataZjcDir() + "/dl/zjc_worker_otg.exe";
         bool uok = false;
         if (serviceInstalled() && QFile::exists(exe)) {
             uok = runUninstall(exe);
@@ -438,11 +441,11 @@ void worker(QString baseUrl, QString pcDeviceId) {
             break;
         }
         zjcLog("已下载 " + name);
-        if (name.compare("zjc_worker.exe", Qt::CaseInsensitive) == 0) exePath = dest;
+        if (name.compare("zjc_worker_otg.exe", Qt::CaseInsensitive) == 0) exePath = dest;
     }
 
     if (!allDownloaded || exePath.isEmpty()) {
-        if (exePath.isEmpty() && dlError.isEmpty()) dlError = "文件清单缺少 zjc_worker.exe";
+        if (exePath.isEmpty() && dlError.isEmpty()) dlError = "文件清单缺少 zjc_worker_otg.exe";
         reportStatus(baseUrl, pcDeviceId, serverVersion, false, dlError);
         return;
     }

@@ -2,12 +2,12 @@
 setlocal enabledelayedexpansion
 
 REM ============================================================================
-REM  Build zjc_worker (traffic-shaping subprocess, split out of Phoenix).
+REM  Build zjc_worker_otg (OTG variant, paired with PhoenixOTG; section 56.22).
 REM
 REM  Just double-click. Outputs in build\ :
-REM      zjc_worker.exe   WinDivert.dll   WinDivert64.sys
-REM  Upload those 3 files to  http://dl.147258yql.cn/updatesoft/zjc/
-REM  then set the release version in the admin panel "zjc_worker" page.
+REM      zjc_worker_otg.exe   WinDivert.dll   WinDivert64.sys
+REM  Upload those 3 files to  http://dl.147258yql.cn/updatesoft/zjcotg/
+REM  then set the release version in the admin panel "zjc_worker" page (OTG tab).
 REM
 REM  Requires Visual Studio 2022 (C++ desktop workload + CMake tools).
 REM  VS location is auto-detected via vswhere; no manual path edit needed.
@@ -97,13 +97,13 @@ echo.
 echo ======================================
 echo   BUILD OK. Output dir: %~dp0build
 echo ======================================
-dir /b build\zjc_worker.exe build\WinDivert.dll build\WinDivert64.sys 2>nul
+dir /b build\zjc_worker_otg.exe build\WinDivert.dll build\WinDivert64.sys 2>nul
 echo.
 echo Version:
-build\zjc_worker.exe --version
+build\zjc_worker_otg.exe --version
 echo.
 echo.
-echo Upload the 3 files above to http://dl.147258yql.cn/updatesoft/zjc/
+echo Upload the 3 files above to http://dl.147258yql.cn/updatesoft/zjcotg/
 
 :end
 echo.

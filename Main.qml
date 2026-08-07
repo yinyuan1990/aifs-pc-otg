@@ -39,8 +39,8 @@ ApplicationWindow {
         // ⭐ 启动画面计时器（2秒后隐藏）
         splashTimer.start()
         
-        // 启动时检查更新（与 Java 版使用相同的服务器）
-        AutoUpdater.setUpdateUrl("http://dl.147258yql.cn/updatesoft/yqlversion.json?v=" + Date.now())
+        // §56.22 OTG 专版独立更新源（与主版 yqlversion.json 完全分开，互不覆盖）
+        AutoUpdater.setUpdateUrl("http://dl.147258yql.cn/updatesoft/otg/yqlversion.json?v=" + Date.now())
         AutoUpdater.checkForUpdates()
     }
     

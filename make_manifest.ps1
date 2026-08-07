@@ -19,7 +19,9 @@
 param(
     [Parameter(Mandatory=$true)][string]$ReleaseDir,
     [Parameter(Mandatory=$true)][string]$Version,
-    [string]$BaseUrlTemplate = "http://dl.147258yql.cn/updatesoft/v{VERSION}"
+    # OTG variant (see section 56.22): everything lives under updatesoft/otg/,
+    # fully separate from the main-version update tree.
+    [string]$BaseUrlTemplate = "http://dl.147258yql.cn/updatesoft/otg/v{VERSION}"
 )
 
 $ErrorActionPreference = "Stop"
@@ -64,7 +66,7 @@ $yql = [ordered]@{
     manifestUrl = "$baseUrl/manifest.json"
     changelog   = "1. TODO: fill in changelog"
     forceUpdate = $false
-    downloadUrl = "http://dl.147258yql.cn/updatesoft/release.zip"
+    downloadUrl = "http://dl.147258yql.cn/updatesoft/otg/release.zip"
     updateMode  = 1
 }
 $yqlPath = Join-Path $PSScriptRoot 'yqlversion_new.json'

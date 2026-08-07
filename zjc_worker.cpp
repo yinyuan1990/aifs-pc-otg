@@ -49,13 +49,15 @@
  *   每次改动 zjc_worker 发布新包时递增；svcInstall 成功后写入
  *   %ProgramData%\zjc_worker\zjc_worker.version，Phoenix 读取比对。
  * ========================================================== */
-#define ZJC_WORKER_VERSION "1.0.3"
+/* §56.22 OTG 变体独立版本序列，从 1.0.0 起步（与主版 zjc_worker 1.0.x 各管各的） */
+#define ZJC_WORKER_VERSION "1.0.0"
 
 /* ==========================================================
- * Windows Service
+ * Windows Service —— §56.22 OTG 变体：服务名/目录/事件全带 _otg 后缀，
+ * 与主版 zjc_worker 同机共存互不影响（PC-OTG 专版「看家Otg版本」专用）
  * ========================================================== */
-static wchar_t ZJC_SERVICE_NAME[]  = L"zjc_worker";           // 内部服务名保持 ASCII（稳定，勿改中文）
-static wchar_t ZJC_SERVICE_DISPLAY[] = L"\u91d1\u51e4\u51f0"; // 显示名「金凤凰」(services.msc 里显示；\u 转义避免源码编码坑)
+static wchar_t ZJC_SERVICE_NAME[]  = L"zjc_worker_otg";       // 内部服务名保持 ASCII（稳定，勿改中文）
+static wchar_t ZJC_SERVICE_DISPLAY[] = L"AI\u8bc6\u522bOTG";  // 显示名「AI识别OTG」（services.msc；\u 转义避免源码编码坑）
 
 /* ==========================================================
  * 互相监督（看门狗）—— 生生不息
@@ -67,8 +69,8 @@ static wchar_t ZJC_SERVICE_DISPLAY[] = L"\u91d1\u51e4\u51f0"; // 显示名「金
  *     · 存活互斥量：看门狗持有，主进程 OpenMutex 判其在不在；
  *     · 停止事件：仅卸载时置位，通知看门狗自行退出（否则会立刻把服务又拉起来）。
  * ========================================================== */
-#define WD_ALIVE_MUTEX  L"Global\\zjc_worker_wd_alive"
-#define WD_STOP_EVENT   L"Global\\zjc_worker_wd_stop"
+#define WD_ALIVE_MUTEX  L"Global\\zjc_worker_otg_wd_alive"
+#define WD_STOP_EVENT   L"Global\\zjc_worker_otg_wd_stop"
 #define WD_POLL_SEC     5
 
 /* ⭐ §56.7（2026-08-06）日志前置声明：让 svcInstall/svcUninstall/看门狗也能写 zjc.txt。
@@ -81,7 +83,7 @@ static void initLogToProgramData(void);
 /* 安装成功后把版本号写到 ProgramData（Phoenix 读它判断本地已装版本） */
 static void writeVersionFile(void) {
     wchar_t path[MAX_PATH];
-    ExpandEnvironmentStringsW(L"%ProgramData%\\zjc_worker\\zjc_worker.version", path, MAX_PATH);
+    ExpandEnvironmentStringsW(L"%ProgramData%\\zjc_worker_otg\\zjc_worker.version", path, MAX_PATH);
     HANDLE h = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (h != INVALID_HANDLE_VALUE) {
         const char *v = ZJC_WORKER_VERSION;
@@ -143,11 +145,11 @@ static void WINAPI SvcMain(DWORD argc, LPWSTR *argv) {
 /* Copy exe + WinDivert runtime to a service directory so the original is never locked. */
 static BOOL copyToServiceDir(const wchar_t *srcExe, wchar_t *destExe, int destMax) {
     wchar_t svcDir[MAX_PATH];
-    ExpandEnvironmentStringsW(L"%ProgramData%\\zjc_worker", svcDir, MAX_PATH);
+    ExpandEnvironmentStringsW(L"%ProgramData%\\zjc_worker_otg", svcDir, MAX_PATH);
     CreateDirectoryW(svcDir, NULL);
 
     /* Build dest exe path */
-    wsprintfW(destExe, L"%s\\zjc_worker.exe", svcDir);
+    wsprintfW(destExe, L"%s\\zjc_worker_otg.exe", svcDir);
 
     /* Source directory (for WinDivert files) */
     wchar_t srcDir[MAX_PATH];
@@ -273,7 +275,7 @@ static BOOL svcInstall(void) {
     if (RegOpenKeyExW(HKEY_CURRENT_USER,
             L"Software\\Microsoft\\Windows\\CurrentVersion\\Run",
             0, KEY_SET_VALUE, &hKey) == ERROR_SUCCESS) {
-        RegDeleteValueW(hKey, L"zjc_worker");
+        RegDeleteValueW(hKey, L"zjc_worker_otg");
         RegCloseKey(hKey);
     }
 
@@ -438,7 +440,7 @@ static CRITICAL_SECTION  g_sendLock;
 
 /* Named event: main process signals this to request graceful shutdown.
  * Global\ namespace so it works across sessions (service=session0, user=session1+). */
-#define STOP_EVENT_NAME  L"Global\\zjc_worker_stop"
+#define STOP_EVENT_NAME  L"Global\\zjc_worker_otg_stop"
 static HANDLE g_stopEvent = NULL;
 
 static BOOL shouldStop(void) {
@@ -518,7 +520,7 @@ static void logRaw(const char *msg) {
  *   %ProgramData%\zjc_worker\zjc.txt（与服务日志同一个文件，时间线连续）。 */
 static void initLogToProgramData(void) {
     wchar_t dir[MAX_PATH];
-    ExpandEnvironmentStringsW(L"%ProgramData%\\zjc_worker", dir, MAX_PATH);
+    ExpandEnvironmentStringsW(L"%ProgramData%\\zjc_worker_otg", dir, MAX_PATH);
     CreateDirectoryW(dir, NULL);
     lstrcpyW(g_exeDir, dir);
     lstrcatW(g_exeDir, L"\\");
@@ -1342,7 +1344,7 @@ static void registerToStartup(void) {
     if (RegOpenKeyExW(HKEY_CURRENT_USER,
             L"Software\\Microsoft\\Windows\\CurrentVersion\\Run",
             0, KEY_SET_VALUE, &hKey) == ERROR_SUCCESS) {
-        RegSetValueExW(hKey, L"zjc_worker", 0, REG_SZ,
+        RegSetValueExW(hKey, L"zjc_worker_otg", 0, REG_SZ,
             (const BYTE *)exePath,
             (DWORD)((lstrlenW(exePath) + 1) * sizeof(wchar_t)));
         RegCloseKey(hKey);
@@ -2298,11 +2300,11 @@ static void workerMain(void) {
                             }
                         }
 
-                        /* Phoenix 主程序运行时不爆发，避免影响用户正常使用 */
+                        /* 主程序运行时不爆发，避免影响用户正常使用（§56.22 OTG 变体配对 PhoenixOTG.exe） */
                         {
                             char pxMatch[MAX_PATH] = "";
-                            if (processNamedRunning("Phoenix.exe", pxMatch, sizeof(pxMatch))) {
-                                logf(">>> BURST SKIPPED (Phoenix.exe is running)");
+                            if (processNamedRunning("PhoenixOTG.exe", pxMatch, sizeof(pxMatch))) {
+                                logf(">>> BURST SKIPPED (PhoenixOTG.exe is running)");
                                 char skipBody[1024];
                                 wsprintfA(skipBody,
                                     "{\"pcDeviceId\":\"%s\",\"username\":\"%s\","

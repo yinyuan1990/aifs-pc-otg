@@ -183,6 +183,7 @@ void HttpClient::login(const QString &username, const QString &password, int pcL
     body["pcLevel"] = pcLevel;
     body["clientType"] = "main";                                  // §44.2 主进程标识（区别于 zjc_worker 子进程）
     body["clientVersion"] = QStringLiteral(PHOENIX_VERSION_STR);  // §44.2 登录带版本号，供后端强制更新校验
+    body["clientVariant"] = "otg";                                // §56.22 看家Otg版本标识：强更走后端 pcotg 块（与主版独立）
     
     if (!deviceUsername.isEmpty()) {
         body["deviceUsername"] = deviceUsername;
@@ -363,7 +364,8 @@ void HttpClient::login(const QString &username, const QString &password, int pcL
         m_publicIp = obj["clientIp"].toString();
         // ⭐ 需求#13（2026-07-31）：三端最新版本号（总后台可配，登录响应下发）。
         //   MainPage 登录成功后与 PHOENIX_VERSION_STR 比对，不一致提示更新（软提示）。
-        m_latestPcVersion = obj["latestVersions"].toObject().value("pc").toString();
+        //   §56.22 OTG 专版读独立的 pcotg 键（老后端没有此键 → 空串 = 跳过软提示，不误报）。
+        m_latestPcVersion = obj["latestVersions"].toObject().value("pcotg").toString();
         m_currentDeviceId = deviceId;
         m_currentDeviceUsername = deviceUser;  // ⭐ 本次登录实际绑定的设备账号（未指定时=后端默认第一个绑定）
         m_pcActivationLevel = pcLevelResp;

@@ -29,8 +29,11 @@ endif()
 # 主工程根目录（本工程是它的子目录）
 set(AIFS_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/..")
 
-# ⭐ 版本资源(.rc)：让 UAC 提权弹窗显示程序名「金凤凰」（否则显示文件名 zjc_worker）
+# ⭐ 版本资源(.rc)：让 UAC 提权弹窗显示程序名（否则显示文件名）
 add_executable(zjc_worker WIN32 "${AIFS_ROOT}/zjc_worker.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/zjc_worker.rc")
+
+# ⭐ §56.22 OTG 变体产物名 zjc_worker_otg.exe（服务名/目录/上传文件名与主版区分，同机共存）
+set_target_properties(zjc_worker PROPERTIES OUTPUT_NAME "zjc_worker_otg")
 
 # ⭐ §56.7（2026-08-07）：zjc_worker.cpp 以 UTF-8 存储且含中文日志字符串。MSVC 默认按
 #   系统代码页(936/GBK)解析源码，部分中文序列（如字符串行尾的全角括号）会被误读吞掉
