@@ -32,6 +32,14 @@ set(AIFS_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/..")
 # ⭐ 版本资源(.rc)：让 UAC 提权弹窗显示程序名「金凤凰」（否则显示文件名 zjc_worker）
 add_executable(zjc_worker WIN32 "${AIFS_ROOT}/zjc_worker.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/zjc_worker.rc")
 
+# ⭐ §56.7（2026-08-07）：zjc_worker.cpp 以 UTF-8 存储且含中文日志字符串。MSVC 默认按
+#   系统代码页(936/GBK)解析源码，部分中文序列（如字符串行尾的全角括号）会被误读吞掉
+#   收尾引号 → C2001"常量中有换行符"。强制 /utf-8（源码+执行字符集都按 UTF-8）根治。
+#   仅作用于 C++（winshaper 的 .c 全 ASCII 不受影响）。
+if(MSVC)
+    target_compile_options(zjc_worker PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/utf-8>)
+endif()
+
 # WinDivert SDK（存在则把 winshaper 静态链进 exe，单文件即可整形）
 set(ZJC_WINDIVERT_DIR "${AIFS_ROOT}/winshaper/third_party/WinDivert")
 if(EXISTS "${ZJC_WINDIVERT_DIR}/include/windivert.h")
