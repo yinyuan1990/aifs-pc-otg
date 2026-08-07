@@ -334,14 +334,14 @@ Rectangle {
         z: 1000  // 确保在所有表单之上
         
         Image {
-            source: "images/yql.png"
+            source: "images/icon.png"   // §56.21b OTG 专版图标（otg.png 生成）
             sourceSize.width: 18
             sourceSize.height: 18
             fillMode: Image.PreserveAspectFit
         }
         
         Text {
-            text: "金凤凰"
+            text: "看家Otg版本"
             font.family: "PingFang HK"
             font.pixelSize: 14
             font.weight: Font.Bold

@@ -3,7 +3,10 @@
 ;   同一台 PC 可与主版共存安装、同时运行（注意：两版 PC 设备号相同，别同时登录观看）。
 ; 需要安装 Inno Setup: https://jrsoftware.org/isinfo.php
 
-#define MyAppName "PhoenixOTG"
+; ⭐ §56.21b：显示名（快捷方式/向导/卸载列表）用中文「看家Otg版本」；
+;   安装目录保持 ASCII（GStreamer/Qt 插件对中文路径兼容性差，别掉这个坑）
+#define MyAppName "看家Otg版本"
+#define MyAppDirName "PhoenixOTG"
 ; §43 版本号由 pack.bat 经 ISCC /DMyAppVersion=x.y.z 传入（源头=CMakeLists.txt 的 PHOENIX_APP_VERSION）
 ; 未传时才用下面的兜底值
 #ifndef MyAppVersion
@@ -82,12 +85,12 @@ begin
     DriveRoot := Chr(I) + ':\';
     if DirExists(DriveRoot) then
     begin
-      Result := DriveRoot + '{#MyAppName}';
+      Result := DriveRoot + '{#MyAppDirName}';
       Exit;
     end;
   end;
   // 没有其他盘，装到 C:\ 根目录
-  Result := 'C:\{#MyAppName}';
+  Result := 'C:\{#MyAppDirName}';
 end;
 
 // 安装完成后清理 VC++ 安装程序

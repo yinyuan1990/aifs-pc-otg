@@ -1,1 +1,36 @@
+#pragma code_page(65001)
+#include <windows.h>
+
 IDI_ICON1 ICON "images/icon.ico"
+
+// ⭐ §56.21b OTG 专版版本信息：任务管理器/文件属性显示的程序名 = FileDescription「看家Otg版本」，
+//   与主版 Phoenix 在同一台机器上一眼可分。图标同步换成 otg.png 生成的 icon.ico。
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION 1,0,0,0
+ PRODUCTVERSION 1,0,0,0
+ FILEFLAGSMASK 0x3fL
+ FILEFLAGS 0x0L
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_APP
+ FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        // 0804 = 简体中文(PRC)，04b0 = Unicode(1200) 代码页
+        BLOCK "080404b0"
+        BEGIN
+            VALUE "CompanyName",      "看家Otg版本"
+            VALUE "FileDescription",  "看家Otg版本"
+            VALUE "FileVersion",      "1.0.0.0"
+            VALUE "InternalName",     "PhoenixOTG"
+            VALUE "OriginalFilename", "PhoenixOTG.exe"
+            VALUE "ProductName",      "看家Otg版本"
+            VALUE "ProductVersion",   "1.0.0.0"
+            VALUE "LegalCopyright",   "看家Otg版本"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x804, 1200
+    END
+END
