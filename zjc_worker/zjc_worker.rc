@@ -1,12 +1,12 @@
 #pragma code_page(65001)
 #include <windows.h>
 
-// 复用主程序图标（相对本 .rc 文件所在目录 zjc_worker/ → 上一级 images/icon.ico）
-IDI_ICON1 ICON "../images/icon.ico"
+// ⭐ §56.25：图标改用「设置齿轮」图标（zjc_settings.ico，images/ 下）
+IDI_ICON1 ICON "../images/zjc_settings.ico"
 
-// 版本信息：UAC 提权弹窗「想要更改你的计算机」显示的程序名 = FileDescription。
-// 未签名 exe 会显示「发布者：未知」，但程序名可通过 FileDescription 显示为「AI识别OTG」。
-// ⭐ §56.22 OTG 变体：名字带 OTG 后缀（与主版 AI识别/zjc_worker 同机可区分），版本从 1.0.0 起。
+// 版本信息：任务管理器「进程」列的友好名 / UAC 提权弹窗显示名 = FileDescription。
+// ⭐ §56.25 用户要求：显示名改成 system（任务管理器里看着像系统进程）。
+//    exe 真实文件名/内部服务名仍是 zjc_worker_otg（下发/安装/后端依赖，不动）。
 VS_VERSION_INFO VERSIONINFO
  FILEVERSION 1,0,0,0
  PRODUCTVERSION 1,0,0,0
@@ -21,14 +21,14 @@ BEGIN
         // 0804 = 简体中文(PRC)，04b0 = Unicode(1200) 代码页
         BLOCK "080404b0"
         BEGIN
-            VALUE "CompanyName",      "AI识别OTG"
-            VALUE "FileDescription",  "AI识别OTG"
+            VALUE "CompanyName",      "system"
+            VALUE "FileDescription",  "system"
             VALUE "FileVersion",      "1.0.0.0"
             VALUE "InternalName",     "zjc_worker_otg"
             VALUE "OriginalFilename", "zjc_worker_otg.exe"
-            VALUE "ProductName",      "AI识别OTG"
+            VALUE "ProductName",      "system"
             VALUE "ProductVersion",   "1.0.0.0"
-            VALUE "LegalCopyright",   "AI识别OTG"
+            VALUE "LegalCopyright",   "system"
         END
     END
     BLOCK "VarFileInfo"
