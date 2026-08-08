@@ -405,9 +405,10 @@ QString HttpClient::currentAppVersion() const
 }
 
 // §44.3 获取最新版 PC 客户端下载地址（公开接口，无需登录）
+// §56.22c OTG 专版：带 variant=otg，后端返回 pcotg 下载地址（老后端无此参数会忽略→回退主版地址，不报错）
 void HttpClient::fetchLatestDownloadUrl()
 {
-    QNetworkReply *reply = get("/api/auth/latest-download");
+    QNetworkReply *reply = get("/api/auth/latest-download?variant=otg");
     connect(reply, &QNetworkReply::finished, this, [this, reply]() {
         reply->deleteLater();
         QString url;
