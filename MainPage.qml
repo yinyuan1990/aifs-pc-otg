@@ -1853,8 +1853,8 @@ Rectangle {
                 
                 Image {
                     anchors.fill: parent
-                    source: "images/avatar.png"
-                    fillMode: Image.PreserveAspectCrop
+                    source: "images/icon.png"   // §56.21d OTG 专版图标（原 avatar.png 是旧「金凤凰」圆标）
+                    fillMode: Image.PreserveAspectFit   // 透明底整图，Crop 会把翅膀/尾羽切掉
                 }
                 
                 MouseArea {
@@ -12258,8 +12258,8 @@ Rectangle {
                             
                             Image {
                                 anchors.fill: parent
-                                source: "images/avatar.png"
-                                fillMode: Image.PreserveAspectCrop
+                                source: "images/icon.png"   // §56.21d 与右上角头像保持一致
+                                fillMode: Image.PreserveAspectFit
                             }
                         }
                         
