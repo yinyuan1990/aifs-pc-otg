@@ -1,14 +1,14 @@
 @echo off
-chcp 65001 >nul
+chcp 936 >nul
 setlocal enabledelayedexpansion
 
 echo ========================================
-echo    çœ‹å®¶Otgç‰ˆæœ¬ (PhoenixOTG) æ‰“åŒ…å·¥å…·
+echo    ¿´¼ÒOtg°æ±¾ (PhoenixOTG) ´ò°ü¹¤¾ß
 echo ========================================
 echo.
 
-rem â­ Â§56.23 OTG ä¸“ç‰ˆæ‰“åŒ…è„šæœ¬ï¼ˆä»Žä¸»ç‰ˆ pack.bat é€‚é…ï¼‰ï¼š
-rem    exe=PhoenixOTG.exeã€ä»“åº“è·¯å¾„=aifs-pc-otgã€ä¸Šä¼ ç›®å½•=updatesoft/otg/ ä¸Ž ä¸»ç‰ˆå®Œå…¨åˆ†å¼€ã€‚
+rem ? ¡ì56.23 OTG ×¨°æ´ò°ü½Å±¾£¨´ÓÖ÷°æ pack.bat ÊÊÅä£©£º
+rem    exe=PhoenixOTG.exe¡¢²Ö¿âÂ·¾¶=aifs-pc-otg¡¢ÉÏ´«Ä¿Â¼=updatesoft/otg/ Óë Ö÷°æÍêÈ«·Ö¿ª¡£
 set RELEASE_DIR=D:\javafx\Acard\aic\aifs-pc-otg\release
 set BUILD_DIR=D:\javafx\Acard\aic\aifs-pc-otg\build\Desktop_Qt_6_10_3_MSVC2022_64bit-Release
 set QT_DIR=D:\javafx\Acard\aic\qt\6.10.3\msvc2022_64\bin
@@ -21,35 +21,35 @@ set INSTALLER_OUTPUT=D:\javafx\Acard\aic\aifs-pc-otg\installer_output
 set VCREDIST_PATH=D:\javafx\Acard\aic\aifs-pc-otg\redist\vc_redist.x64.exe
 set VCREDIST_URL=https://aka.ms/vs/17/release/vc_redist.x64.exe
 
-:: æ£€æŸ¥ Release ç‰ˆæœ¬æ˜¯å¦å­˜åœ¨
+:: ¼ì²é Release °æ±¾ÊÇ·ñ´æÔÚ
 if not exist "%BUILD_DIR%\PhoenixOTG.exe" (
-    echo [é”™è¯¯] æœªæ‰¾åˆ° Release ç‰ˆæœ¬çš„ PhoenixOTG.exe
-    echo è¯·å…ˆåœ¨ Qt Creator ä¸­åˆ‡æ¢åˆ° Release æ¨¡å¼å¹¶ç¼–è¯‘ï¼
+    echo [´íÎó] Î´ÕÒµ½ Release °æ±¾µÄ PhoenixOTG.exe
+    echo ÇëÏÈÔÚ Qt Creator ÖÐÇÐ»»µ½ Release Ä£Ê½²¢±àÒë£¡
     echo.
     pause
     exit /b 1
 )
 
-echo [0/8] æ£€æŸ¥ VC++ è¿è¡Œåº“...
+echo [0/8] ¼ì²é VC++ ÔËÐÐ¿â...
 if not exist "%VCREDIST_PATH%" (
-    echo     æœªæ‰¾åˆ°æœ¬åœ° VC++ è¿è¡Œåº“ï¼Œæ­£åœ¨ä¸‹è½½...
+    echo     Î´ÕÒµ½±¾µØ VC++ ÔËÐÐ¿â£¬ÕýÔÚÏÂÔØ...
     if not exist "D:\javafx\Acard\aic\aifs-pc-otg\redist" mkdir "D:\javafx\Acard\aic\aifs-pc-otg\redist"
     powershell -Command "Invoke-WebRequest -Uri '%VCREDIST_URL%' -OutFile '%VCREDIST_PATH%'"
     if exist "%VCREDIST_PATH%" (
-        echo     VC++ è¿è¡Œåº“ä¸‹è½½å®Œæˆï¼
+        echo     VC++ ÔËÐÐ¿âÏÂÔØÍê³É£¡
     ) else (
-        echo     [è­¦å‘Š] VC++ è¿è¡Œåº“ä¸‹è½½å¤±è´¥ï¼Œè¯·æ‰‹åŠ¨ä¸‹è½½å¹¶æ”¾ç½®åˆ°:
+        echo     [¾¯¸æ] VC++ ÔËÐÐ¿âÏÂÔØÊ§°Ü£¬ÇëÊÖ¶¯ÏÂÔØ²¢·ÅÖÃµ½:
         echo     %VCREDIST_PATH%
     )
 ) else (
-    echo     VC++ è¿è¡Œåº“å·²å­˜åœ¨
+    echo     VC++ ÔËÐÐ¿âÒÑ´æÔÚ
 )
 
-echo [1/8] æ¸…ç†å¹¶åˆ›å»ºå‘å¸ƒç›®å½•...
+echo [1/8] ÇåÀí²¢´´½¨·¢²¼Ä¿Â¼...
 if exist "%RELEASE_DIR%" rmdir /s /q "%RELEASE_DIR%"
 mkdir "%RELEASE_DIR%"
 
-echo [2/8] å¤åˆ¶ä¸»ç¨‹åº...
+echo [2/8] ¸´ÖÆÖ÷³ÌÐò...
 copy "%BUILD_DIR%\PhoenixOTG.exe" "%RELEASE_DIR%\" >nul
 rem zjc worker is separated: NOT bundled, PC downloads+installs zjc_worker_otg from CDN after login.
 
@@ -68,24 +68,24 @@ if defined VC_CRT (
     echo     VC Redist folder not found, copied CRT from System32 fallback
 )
 
-echo [3/8] éƒ¨ç½² Qt ä¾èµ–ï¼ˆè¿™å¯èƒ½éœ€è¦ä¸€ç‚¹æ—¶é—´ï¼‰...
+echo [3/8] ²¿Êð Qt ÒÀÀµ£¨Õâ¿ÉÄÜÐèÒªÒ»µãÊ±¼ä£©...
 "%QT_DIR%\windeployqt.exe" --release --qmldir D:\javafx\Acard\aic\aifs-pc-otg "%RELEASE_DIR%\PhoenixOTG.exe" >nul 2>&1
 
-echo [3.5/8] éƒ¨ç½² Qt WebEngine è¿è¡Œæ—¶ï¼ˆå†…æ ¸æµ‹è¯•è§†å›¾ï¼Œè®©ä»»ä½•äººæ— éœ€è£… Qt å³å¯æµ‹ï¼‰...
-:: WebEngine ä¸æ˜¯æ™®é€š DLL ä¾èµ–ï¼šChromium å­è¿›ç¨‹ QtWebEngineProcess.exe + resources(*.pak/icudtl.dat/v8) + locales å¿…é¡»æ‰‹åŠ¨éšåŒ…ï¼Œ
-:: å¦åˆ™æ²¡è£… Qt çš„æœºå™¨ä¸Šã€Œå†…æ ¸æµ‹è¯•ã€è§†å›¾ç›´æŽ¥é»‘å±/æ‰“ä¸å¼€ã€‚è¿™é‡Œæ˜¾å¼å¤åˆ¶å…¨å¥—ï¼Œç¼ºå¤±åˆ™è·³è¿‡ä¸æŠ¥é”™ã€‚
+echo [3.5/8] ²¿Êð Qt WebEngine ÔËÐÐÊ±£¨ÄÚºË²âÊÔÊÓÍ¼£¬ÈÃÈÎºÎÈËÎÞÐè×° Qt ¼´¿É²â£©...
+:: WebEngine ²»ÊÇÆÕÍ¨ DLL ÒÀÀµ£ºChromium ×Ó½ø³Ì QtWebEngineProcess.exe + resources(*.pak/icudtl.dat/v8) + locales ±ØÐëÊÖ¶¯Ëæ°ü£¬
+:: ·ñÔòÃ»×° Qt µÄ»úÆ÷ÉÏ¡¸ÄÚºË²âÊÔ¡¹ÊÓÍ¼Ö±½ÓºÚÆÁ/´ò²»¿ª¡£ÕâÀïÏÔÊ½¸´ÖÆÈ«Ì×£¬È±Ê§ÔòÌø¹ý²»±¨´í¡£
 set QT_ROOT=D:\javafx\Acard\aic\qt\6.10.3\msvc2022_64
 if exist "%QT_DIR%\Qt6WebEngineCore.dll" (
-    :: 1) WebEngine / WebChannel æ ¸å¿ƒ DLLï¼ˆä»… releaseï¼Œä¸å¸¦ç»“å°¾ d çš„è°ƒè¯•ç‰ˆï¼‰
+    :: 1) WebEngine / WebChannel ºËÐÄ DLL£¨½ö release£¬²»´ø½áÎ² d µÄµ÷ÊÔ°æ£©
     copy "%QT_DIR%\Qt6WebEngineCore.dll" "%RELEASE_DIR%\" >nul 2>&1
     copy "%QT_DIR%\Qt6WebEngineQuick.dll" "%RELEASE_DIR%\" >nul 2>&1
     copy "%QT_DIR%\Qt6WebEngineQuickDelegatesQml.dll" "%RELEASE_DIR%\" >nul 2>&1
     copy "%QT_DIR%\Qt6WebEngineWidgets.dll" "%RELEASE_DIR%\" >nul 2>&1
     copy "%QT_DIR%\Qt6WebChannel.dll" "%RELEASE_DIR%\" >nul 2>&1
     copy "%QT_DIR%\Qt6WebChannelQuick.dll" "%RELEASE_DIR%\" >nul 2>&1
-    :: 2) Chromium å­è¿›ç¨‹
+    :: 2) Chromium ×Ó½ø³Ì
     copy "%QT_DIR%\QtWebEngineProcess.exe" "%RELEASE_DIR%\" >nul 2>&1
-    :: 3) Chromium èµ„æºï¼ˆicudtl.dat + release .pak + v8 å¿«ç…§ï¼‰ï¼Œæ”¾ä¸»ç¨‹åºåŒçº§ resources\
+    :: 3) Chromium ×ÊÔ´£¨icudtl.dat + release .pak + v8 ¿ìÕÕ£©£¬·ÅÖ÷³ÌÐòÍ¬¼¶ resources\
     if not exist "%RELEASE_DIR%\resources" mkdir "%RELEASE_DIR%\resources"
     copy "%QT_ROOT%\resources\icudtl.dat" "%RELEASE_DIR%\resources\" >nul 2>&1
     copy "%QT_ROOT%\resources\qtwebengine_resources.pak" "%RELEASE_DIR%\resources\" >nul 2>&1
@@ -93,10 +93,10 @@ if exist "%QT_DIR%\Qt6WebEngineCore.dll" (
     copy "%QT_ROOT%\resources\qtwebengine_resources_200p.pak" "%RELEASE_DIR%\resources\" >nul 2>&1
     copy "%QT_ROOT%\resources\qtwebengine_devtools_resources.pak" "%RELEASE_DIR%\resources\" >nul 2>&1
     copy "%QT_ROOT%\resources\v8_context_snapshot.bin" "%RELEASE_DIR%\resources\" >nul 2>&1
-    :: 4) è¯­è¨€åŒ…ï¼ˆç¼ºå®ƒ Chromium å¯åŠ¨ä¼šå‘Šè­¦/éƒ¨åˆ†åŠŸèƒ½å¼‚å¸¸ï¼‰
+    :: 4) ÓïÑÔ°ü£¨È±Ëü Chromium Æô¶¯»á¸æ¾¯/²¿·Ö¹¦ÄÜÒì³££©
     if not exist "%RELEASE_DIR%\translations\qtwebengine_locales" mkdir "%RELEASE_DIR%\translations\qtwebengine_locales"
     xcopy "%QT_ROOT%\translations\qtwebengine_locales\*.pak" "%RELEASE_DIR%\translations\qtwebengine_locales\" /Q /Y >nul 2>&1
-    :: 5) QML æ¨¡å—ï¼ˆwindeployqt ä¸ä¸€å®šå¸¦å…¨ï¼Œæ˜¾å¼è¡¥ release æ’ä»¶ï¼‰
+    :: 5) QML Ä£¿é£¨windeployqt ²»Ò»¶¨´øÈ«£¬ÏÔÊ½²¹ release ²å¼þ£©
     if not exist "%RELEASE_DIR%\QtWebEngine" mkdir "%RELEASE_DIR%\QtWebEngine"
     copy "%QT_ROOT%\qml\QtWebEngine\qmldir" "%RELEASE_DIR%\QtWebEngine\" >nul 2>&1
     copy "%QT_ROOT%\qml\QtWebEngine\plugins.qmltypes" "%RELEASE_DIR%\QtWebEngine\" >nul 2>&1
@@ -107,51 +107,51 @@ if exist "%QT_DIR%\Qt6WebEngineCore.dll" (
     copy "%QT_ROOT%\qml\QtWebChannel\plugins.qmltypes" "%RELEASE_DIR%\QtWebChannel\" >nul 2>&1
     copy "%QT_ROOT%\qml\QtWebChannel\webchannelquickplugin.dll" "%RELEASE_DIR%\QtWebChannel\" >nul 2>&1
     if exist "%RELEASE_DIR%\QtWebEngineProcess.exe" (
-        echo     å·²å¤åˆ¶ Qt WebEngine è¿è¡Œæ—¶ï¼ˆDLL + Process + resources + locales + QML æ¨¡å—ï¼‰
+        echo     ÒÑ¸´ÖÆ Qt WebEngine ÔËÐÐÊ±£¨DLL + Process + resources + locales + QML Ä£¿é£©
     ) else (
-        echo     [è­¦å‘Š] QtWebEngineProcess.exe å¤åˆ¶å¤±è´¥ï¼Œå†…æ ¸æµ‹è¯•è§†å›¾å¯èƒ½æ— æ³•æ‰“å¼€
+        echo     [¾¯¸æ] QtWebEngineProcess.exe ¸´ÖÆÊ§°Ü£¬ÄÚºË²âÊÔÊÓÍ¼¿ÉÄÜÎÞ·¨´ò¿ª
     )
 ) else (
-    echo     [æç¤º] æœªæ‰¾åˆ° Qt6WebEngineCore.dllï¼ˆQt æœªè£… WebEngine æˆ–ä¸»ç¨‹åºæœªå¯ç”¨ HAVE_KERNEL_TESTï¼‰ï¼Œå·²è·³è¿‡ WebEngine æ‰“åŒ…
+    echo     [ÌáÊ¾] Î´ÕÒµ½ Qt6WebEngineCore.dll£¨Qt Î´×° WebEngine »òÖ÷³ÌÐòÎ´ÆôÓÃ HAVE_KERNEL_TEST£©£¬ÒÑÌø¹ý WebEngine ´ò°ü
 )
 
-echo [4/8] å¤åˆ¶ VC++ è¿è¡Œåº“å®‰è£…ç¨‹åº...
+echo [4/8] ¸´ÖÆ VC++ ÔËÐÐ¿â°²×°³ÌÐò...
 if exist "%VCREDIST_PATH%" (
     copy "%VCREDIST_PATH%" "%RELEASE_DIR%\" >nul 2>&1
-    echo     å·²å¤åˆ¶ vc_redist.x64.exe
+    echo     ÒÑ¸´ÖÆ vc_redist.x64.exe
 ) else (
-    echo     [è­¦å‘Š] VC++ è¿è¡Œåº“ä¸å­˜åœ¨ï¼Œè·³è¿‡
+    echo     [¾¯¸æ] VC++ ÔËÐÐ¿â²»´æÔÚ£¬Ìø¹ý
 )
 
-echo [5/8] å¤åˆ¶ FFmpeg DLLï¼ˆé¢œè‰²è°ƒæ•´å¤‡ç”¨ï¼‰...
-rem é€šé…å¤åˆ¶å…¨éƒ¨ ffmpeg DLLï¼ˆä¸å†™æ­»ç‰ˆæœ¬å·ï¼Œé¿å…å‡çº§åŽåå­—å¯¹ä¸ä¸Šç¼º DLLï¼‰
+echo [5/8] ¸´ÖÆ FFmpeg DLL£¨ÑÕÉ«µ÷Õû±¸ÓÃ£©...
+rem Í¨Åä¸´ÖÆÈ«²¿ ffmpeg DLL£¨²»Ð´ËÀ°æ±¾ºÅ£¬±ÜÃâÉý¼¶ºóÃû×Ö¶Ô²»ÉÏÈ± DLL£©
 copy "%FFMPEG_BIN%\av*.dll" "%RELEASE_DIR%\" >nul 2>&1
 copy "%FFMPEG_BIN%\sw*.dll" "%RELEASE_DIR%\" >nul 2>&1
-rem è‹¥ exe æ˜¯æ—§ç‰ˆæœ¬(é“¾æŽ¥äº†è€ ffmpeg)ï¼Œæž„å»ºç›®å½•é‡Œçš„åŒå DLL ä¹Ÿä¸€å¹¶å¸¦ä¸Šï¼ˆç‰ˆæœ¬å…œåº•ï¼‰
+rem Èô exe ÊÇ¾É°æ±¾(Á´½ÓÁËÀÏ ffmpeg)£¬¹¹½¨Ä¿Â¼ÀïµÄÍ¬Ãû DLL Ò²Ò»²¢´øÉÏ£¨°æ±¾¶µµ×£©
 copy "%BUILD_DIR%\av*.dll" "%RELEASE_DIR%\" >nul 2>&1
 copy "%BUILD_DIR%\sw*.dll" "%RELEASE_DIR%\" >nul 2>&1
 
-echo [6/8] å¤åˆ¶ turbojpeg DLL...
+echo [6/8] ¸´ÖÆ turbojpeg DLL...
 copy "%VCPKG_BIN%\turbojpeg.dll" "%RELEASE_DIR%\" >nul 2>&1
 
-echo [6.5/8] å¤åˆ¶ ONNX Runtime + AI æ¨¡åž‹ï¼ˆç‰Œä½ç½®è¯†åˆ«ï¼‰...
+echo [6.5/8] ¸´ÖÆ ONNX Runtime + AI Ä£ÐÍ£¨ÅÆÎ»ÖÃÊ¶±ð£©...
 set ONNXRUNTIME_LIB=C:\onnxruntime\lib
 copy "%ONNXRUNTIME_LIB%\onnxruntime.dll" "%RELEASE_DIR%\" >nul 2>&1
 if exist "%RELEASE_DIR%\onnxruntime.dll" (
-    echo     å·²å¤åˆ¶ onnxruntime.dll
+    echo     ÒÑ¸´ÖÆ onnxruntime.dll
 ) else (
-    echo     [è­¦å‘Š] onnxruntime.dll æœªæ‰¾åˆ°ï¼ŒAI ç‰Œä½ç½®è¯†åˆ«å°†ä¸å¯ç”¨ï¼ˆç¡®è®¤ C:\onnxruntime\libï¼‰
+    echo     [¾¯¸æ] onnxruntime.dll Î´ÕÒµ½£¬AI ÅÆÎ»ÖÃÊ¶±ð½«²»¿ÉÓÃ£¨È·ÈÏ C:\onnxruntime\lib£©
 )
 if not exist "%RELEASE_DIR%\models" mkdir "%RELEASE_DIR%\models"
 copy "D:\javafx\Acard\aic\aifs-pc-otg\resources\models\cardYolov8.onnx" "%RELEASE_DIR%\models\" >nul 2>&1
 if exist "%RELEASE_DIR%\models\cardYolov8.onnx" (
-    echo     å·²å¤åˆ¶ cardYolov8.onnx åˆ° models\
+    echo     ÒÑ¸´ÖÆ cardYolov8.onnx µ½ models\
 ) else (
-    echo     [è­¦å‘Š] cardYolov8.onnx æœªæ‰¾åˆ°ï¼ˆç¡®è®¤ resources\models\ï¼‰
+    echo     [¾¯¸æ] cardYolov8.onnx Î´ÕÒµ½£¨È·ÈÏ resources\models\£©
 )
 
-echo [7/8] å¤åˆ¶ GStreamer è¿è¡Œæ—¶...
-:: GStreamer æ ¸å¿ƒ DLL
+echo [7/8] ¸´ÖÆ GStreamer ÔËÐÐÊ±...
+:: GStreamer ºËÐÄ DLL
 copy "%GST_ROOT%\bin\gstreamer-1.0-0.dll" "%RELEASE_DIR%\" >nul 2>&1
 copy "%GST_ROOT%\bin\gstapp-1.0-0.dll" "%RELEASE_DIR%\" >nul 2>&1
 copy "%GST_ROOT%\bin\gstvideo-1.0-0.dll" "%RELEASE_DIR%\" >nul 2>&1
@@ -164,7 +164,7 @@ copy "%GST_ROOT%\bin\intl-8.dll" "%RELEASE_DIR%\" >nul 2>&1
 copy "%GST_ROOT%\bin\ffi-7.dll" "%RELEASE_DIR%\" >nul 2>&1
 copy "%GST_ROOT%\bin\pcre2-8-0.dll" "%RELEASE_DIR%\" >nul 2>&1
 copy "%GST_ROOT%\bin\z-1.dll" "%RELEASE_DIR%\" >nul 2>&1
-:: GStreamer WebRTC ç›¸å…³ DLL
+:: GStreamer WebRTC Ïà¹Ø DLL
 copy "%GST_ROOT%\bin\gstsdp-1.0-0.dll" "%RELEASE_DIR%\" >nul 2>&1
 copy "%GST_ROOT%\bin\gstrtp-1.0-0.dll" "%RELEASE_DIR%\" >nul 2>&1
 copy "%GST_ROOT%\bin\gstwebrtc-1.0-0.dll" "%RELEASE_DIR%\" >nul 2>&1
@@ -172,7 +172,7 @@ copy "%GST_ROOT%\bin\gstwebrtcnice-1.0-0.dll" "%RELEASE_DIR%\" >nul 2>&1
 copy "%GST_ROOT%\bin\nice-10.dll" "%RELEASE_DIR%\" >nul 2>&1
 copy "%GST_ROOT%\bin\libcrypto-3-x64.dll" "%RELEASE_DIR%\" >nul 2>&1
 copy "%GST_ROOT%\bin\libssl-3-x64.dll" "%RELEASE_DIR%\" >nul 2>&1
-:: é¢å¤–ä¾èµ– DLL
+:: ¶îÍâÒÀÀµ DLL
 copy "%GST_ROOT%\bin\orc-0.4-0.dll" "%RELEASE_DIR%\" >nul 2>&1
 copy "%GST_ROOT%\bin\gstpbutils-1.0-0.dll" "%RELEASE_DIR%\" >nul 2>&1
 copy "%GST_ROOT%\bin\gstaudio-1.0-0.dll" "%RELEASE_DIR%\" >nul 2>&1
@@ -180,19 +180,19 @@ copy "%GST_ROOT%\bin\gsttag-1.0-0.dll" "%RELEASE_DIR%\" >nul 2>&1
 copy "%GST_ROOT%\bin\gstnet-1.0-0.dll" "%RELEASE_DIR%\" >nul 2>&1
 copy "%GST_ROOT%\bin\gstsctp-1.0-0.dll" "%RELEASE_DIR%\" >nul 2>&1
 
-echo [8/8] å¤åˆ¶ GStreamer æ’ä»¶ï¼ˆè§£ç å™¨ + JPEG ç¼–ç ï¼‰...
-:: åˆ›å»º GStreamer è¿è¡Œæ—¶ç›®å½•ç»“æž„
+echo [8/8] ¸´ÖÆ GStreamer ²å¼þ£¨½âÂëÆ÷ + JPEG ±àÂë£©...
+:: ´´½¨ GStreamer ÔËÐÐÊ±Ä¿Â¼½á¹¹
 mkdir "%RELEASE_DIR%\runtime\gstreamer\bin" >nul 2>&1
 mkdir "%RELEASE_DIR%\runtime\gstreamer\lib\gstreamer-1.0" >nul 2>&1
 mkdir "%RELEASE_DIR%\runtime\gstreamer\libexec\gstreamer-1.0" >nul 2>&1
 
-:: å¤åˆ¶æ’ä»¶æ‰«æå™¨
+:: ¸´ÖÆ²å¼þÉ¨ÃèÆ÷
 copy "%GST_ROOT%\libexec\gstreamer-1.0\gst-plugin-scanner.exe" "%RELEASE_DIR%\runtime\gstreamer\libexec\gstreamer-1.0\" >nul 2>&1
 
-:: å¤åˆ¶æ ¸å¿ƒ DLL åˆ° runtime ç›®å½•ï¼ˆä¾›æ’ä»¶ä½¿ç”¨ï¼‰
+:: ¸´ÖÆºËÐÄ DLL µ½ runtime Ä¿Â¼£¨¹©²å¼þÊ¹ÓÃ£©
 xcopy "%GST_ROOT%\bin\*.dll" "%RELEASE_DIR%\runtime\gstreamer\bin\" /Q /Y >nul 2>&1
 
-:: å¤åˆ¶å¿…éœ€çš„æ’ä»¶
+:: ¸´ÖÆ±ØÐèµÄ²å¼þ
 copy "%GST_ROOT%\lib\gstreamer-1.0\gstcoreelements.dll" "%RELEASE_DIR%\runtime\gstreamer\lib\gstreamer-1.0\" >nul 2>&1
 copy "%GST_ROOT%\lib\gstreamer-1.0\gstapp.dll" "%RELEASE_DIR%\runtime\gstreamer\lib\gstreamer-1.0\" >nul 2>&1
 copy "%GST_ROOT%\lib\gstreamer-1.0\gstvideoconvertscale.dll" "%RELEASE_DIR%\runtime\gstreamer\lib\gstreamer-1.0\" >nul 2>&1
@@ -206,14 +206,14 @@ copy "%GST_ROOT%\lib\gstreamer-1.0\gstautodetect.dll" "%RELEASE_DIR%\runtime\gst
 copy "%GST_ROOT%\lib\gstreamer-1.0\gsttypefindfunctions.dll" "%RELEASE_DIR%\runtime\gstreamer\lib\gstreamer-1.0\" >nul 2>&1
 copy "%GST_ROOT%\lib\gstreamer-1.0\gstplayback.dll" "%RELEASE_DIR%\runtime\gstreamer\lib\gstreamer-1.0\" >nul 2>&1
 copy "%GST_ROOT%\lib\gstreamer-1.0\gstvideofilter.dll" "%RELEASE_DIR%\runtime\gstreamer\lib\gstreamer-1.0\" >nul 2>&1
-:: â­ è§£ç å™¨æ’ä»¶ï¼ˆå…³é”®ï¼ï¼‰
+:: ? ½âÂëÆ÷²å¼þ£¨¹Ø¼ü£¡£©
 copy "%GST_ROOT%\lib\gstreamer-1.0\gstlibav.dll" "%RELEASE_DIR%\runtime\gstreamer\lib\gstreamer-1.0\" >nul 2>&1
 copy "%GST_ROOT%\lib\gstreamer-1.0\gstnvcodec.dll" "%RELEASE_DIR%\runtime\gstreamer\lib\gstreamer-1.0\" >nul 2>&1
 copy "%GST_ROOT%\lib\gstreamer-1.0\gstqsv.dll" "%RELEASE_DIR%\runtime\gstreamer\lib\gstreamer-1.0\" >nul 2>&1
 copy "%GST_ROOT%\lib\gstreamer-1.0\gstamfcodec.dll" "%RELEASE_DIR%\runtime\gstreamer\lib\gstreamer-1.0\" >nul 2>&1
-:: Media Foundation ç¼–ç å™¨æ’ä»¶ï¼ˆmfh264enc IDR ç¼–ç ï¼‰
+:: Media Foundation ±àÂëÆ÷²å¼þ£¨mfh264enc IDR ±àÂë£©
 copy "%GST_ROOT%\lib\gstreamer-1.0\gstmediafoundation.dll" "%RELEASE_DIR%\runtime\gstreamer\lib\gstreamer-1.0\" >nul 2>&1
-:: WebRTC æ’ä»¶
+:: WebRTC ²å¼þ
 copy "%GST_ROOT%\lib\gstreamer-1.0\gstwebrtc.dll" "%RELEASE_DIR%\runtime\gstreamer\lib\gstreamer-1.0\" >nul 2>&1
 copy "%GST_ROOT%\lib\gstreamer-1.0\gstrtp.dll" "%RELEASE_DIR%\runtime\gstreamer\lib\gstreamer-1.0\" >nul 2>&1
 copy "%GST_ROOT%\lib\gstreamer-1.0\gstrtpmanager.dll" "%RELEASE_DIR%\runtime\gstreamer\lib\gstreamer-1.0\" >nul 2>&1
@@ -221,120 +221,120 @@ copy "%GST_ROOT%\lib\gstreamer-1.0\gstnice.dll" "%RELEASE_DIR%\runtime\gstreamer
 copy "%GST_ROOT%\lib\gstreamer-1.0\gstdtls.dll" "%RELEASE_DIR%\runtime\gstreamer\lib\gstreamer-1.0\" >nul 2>&1
 copy "%GST_ROOT%\lib\gstreamer-1.0\gstsrtp.dll" "%RELEASE_DIR%\runtime\gstreamer\lib\gstreamer-1.0\" >nul 2>&1
 copy "%GST_ROOT%\lib\gstreamer-1.0\gstsctp.dll" "%RELEASE_DIR%\runtime\gstreamer\lib\gstreamer-1.0\" >nul 2>&1
-:: SRT æ‹‰æµæ’ä»¶ï¼ˆsrtsrc + tsdemuxï¼›libsrt.dll å·²éšä¸Šé¢ xcopy bin è¿›å…¥ runtime\binï¼‰
+:: SRT À­Á÷²å¼þ£¨srtsrc + tsdemux£»libsrt.dll ÒÑËæÉÏÃæ xcopy bin ½øÈë runtime\bin£©
 copy "%GST_ROOT%\lib\gstreamer-1.0\gstsrt.dll" "%RELEASE_DIR%\runtime\gstreamer\lib\gstreamer-1.0\" >nul 2>&1
 copy "%GST_ROOT%\lib\gstreamer-1.0\gstmpegtsdemux.dll" "%RELEASE_DIR%\runtime\gstreamer\lib\gstreamer-1.0\" >nul 2>&1
-:: SRT è¿è¡Œæ—¶åº“ï¼ˆæ˜¾å¼å…œåº•åˆ°ä¸»ç¨‹åºåŒçº§ï¼Œé˜² xcopy bin å¤±è´¥æ—¶ç¼º libsrtï¼‰
+:: SRT ÔËÐÐÊ±¿â£¨ÏÔÊ½¶µµ×µ½Ö÷³ÌÐòÍ¬¼¶£¬·À xcopy bin Ê§°ÜÊ±È± libsrt£©
 copy "%GST_ROOT%\bin\libsrt.dll" "%RELEASE_DIR%\" >nul 2>&1
 
 echo.
 echo ========================================
-echo    æ–‡ä»¶å¤åˆ¶å®Œæˆï¼ï¼ˆzjc_worker_otg å·²åˆ†ç¦»ï¼Œç”± PC ç«¯ç™»å½•åŽä»Ž CDN è‡ªåŠ¨å®‰è£…ï¼Œä¸éšåŒ…ï¼‰
+echo    ÎÄ¼þ¸´ÖÆÍê³É£¡£¨zjc_worker_otg ÒÑ·ÖÀë£¬ÓÉ PC ¶ËµÇÂ¼ºó´Ó CDN ×Ô¶¯°²×°£¬²»Ëæ°ü£©
 echo ========================================
 echo.
 
-:: â­ Â§43 æ¸…å•å·®é‡æ›´æ–°ï¼šä»Ž CMakeLists.txt è¯»ç‰ˆæœ¬å·ï¼ˆå•ä¸€æ¥æºï¼‰ï¼Œç”Ÿæˆ manifest.json
-:: OTG ç‰ˆ make_manifest.ps1 é»˜è®¤ baseUrl å·²æ˜¯ updatesoft/otg/v{VERSION}
-echo [æ¸…å•æ›´æ–°] è¯»å–ç‰ˆæœ¬å·å¹¶ç”Ÿæˆ manifest.json ...
+:: ? ¡ì43 Çåµ¥²îÁ¿¸üÐÂ£º´Ó CMakeLists.txt ¶Á°æ±¾ºÅ£¨µ¥Ò»À´Ô´£©£¬Éú³É manifest.json
+:: OTG °æ make_manifest.ps1 Ä¬ÈÏ baseUrl ÒÑÊÇ updatesoft/otg/v{VERSION}
+echo [Çåµ¥¸üÐÂ] ¶ÁÈ¡°æ±¾ºÅ²¢Éú³É manifest.json ...
 set "APP_VERSION="
 for /f tokens^=2^ delims^=^" %%v in ('findstr /c:"set(PHOENIX_APP_VERSION" "D:\javafx\Acard\aic\aifs-pc-otg\CMakeLists.txt"') do set "APP_VERSION=%%v"
 if not defined APP_VERSION (
-    echo     [è­¦å‘Š] æœªèƒ½ä»Ž CMakeLists.txt è§£æž PHOENIX_APP_VERSIONï¼Œè·³è¿‡ manifest ç”Ÿæˆï¼
+    echo     [¾¯¸æ] Î´ÄÜ´Ó CMakeLists.txt ½âÎö PHOENIX_APP_VERSION£¬Ìø¹ý manifest Éú³É£¡
 ) else (
-    echo     ç‰ˆæœ¬å·: !APP_VERSION!
+    echo     °æ±¾ºÅ: !APP_VERSION!
     powershell -NoProfile -ExecutionPolicy Bypass -File "D:\javafx\Acard\aic\aifs-pc-otg\make_manifest.ps1" -ReleaseDir "%RELEASE_DIR%" -Version "!APP_VERSION!"
     if exist "%RELEASE_DIR%\manifest.json" (
-        echo     manifest.json å·²ç”Ÿæˆ
-        echo     [ä¸Šä¼ 1] release æ•´ä¸ªç›®å½• ä¼ åˆ° http://dl.147258yql.cn/updatesoft/otg/v!APP_VERSION!/
-        echo     [ä¸Šä¼ 2] yqlversion_new.json å¡«å¥½ changelog åŽè¦†ç›– updatesoft/otg/yqlversion.json
+        echo     manifest.json ÒÑÉú³É
+        echo     [ÉÏ´«1] release Õû¸öÄ¿Â¼ ´«µ½ http://dl.147258yql.cn/updatesoft/otg/v!APP_VERSION!/
+        echo     [ÉÏ´«2] yqlversion_new.json ÌîºÃ changelog ºó¸²¸Ç updatesoft/otg/yqlversion.json
     ) else (
-        echo     [è­¦å‘Š] manifest.json ç”Ÿæˆå¤±è´¥ï¼
+        echo     [¾¯¸æ] manifest.json Éú³ÉÊ§°Ü£¡
     )
 )
 echo.
 
-:: â­ ç”Ÿæˆè‡ªåŠ¨æ›´æ–°ç”¨çš„ release.zipï¼ˆæ–‡ä»¶åœ¨zipæ ¹ç›®å½•ï¼Œæ— å­æ–‡ä»¶å¤¹ï¼›legacy å…¨é‡å›žé€€ + é¦–è£…åŒ…ç”¨ï¼‰
-echo [è‡ªåŠ¨æ›´æ–°] ç”Ÿæˆ release.zip ...
+:: ? Éú³É×Ô¶¯¸üÐÂÓÃµÄ release.zip£¨ÎÄ¼þÔÚzip¸ùÄ¿Â¼£¬ÎÞ×ÓÎÄ¼þ¼Ð£»legacy È«Á¿»ØÍË + Ê××°°üÓÃ£©
+echo [×Ô¶¯¸üÐÂ] Éú³É release.zip ...
 set RELEASE_ZIP=D:\javafx\Acard\aic\aifs-pc-otg\release.zip
 if exist "%RELEASE_ZIP%" del "%RELEASE_ZIP%"
 pushd "%RELEASE_DIR%"
 tar -a -c -f "%RELEASE_ZIP%" *
 popd
 if exist "%RELEASE_ZIP%" (
-    echo     release.zip å·²ç”Ÿæˆ: %RELEASE_ZIP%
-    echo     âš  ä¸Šä¼ åˆ°æœåŠ¡å™¨: http://dl.147258yql.cn/updatesoft/otg/release.zip
+    echo     release.zip ÒÑÉú³É: %RELEASE_ZIP%
+    echo     ? ÉÏ´«µ½·þÎñÆ÷: http://dl.147258yql.cn/updatesoft/otg/release.zip
 ) else (
-    echo     [è­¦å‘Š] release.zip ç”Ÿæˆå¤±è´¥ï¼
+    echo     [¾¯¸æ] release.zip Éú³ÉÊ§°Ü£¡
 )
 echo.
 
-:: Â§43 å®‰è£…åŒ…ç‰ˆæœ¬å·è·Ÿéš CMakeLists çš„ PHOENIX_APP_VERSIONï¼ˆå‰é¢å·²è§£æžåˆ° APP_VERSIONï¼‰
+:: ¡ì43 °²×°°ü°æ±¾ºÅ¸úËæ CMakeLists µÄ PHOENIX_APP_VERSION£¨Ç°ÃæÒÑ½âÎöµ½ APP_VERSION£©
 set "SETUP_VER=1.0.0"
 if defined APP_VERSION set "SETUP_VER=%APP_VERSION%"
 set "OUT_EXE=%INSTALLER_OUTPUT%\PhoenixOTG_Setup_%SETUP_VER%.exe"
 
-:: æ£€æŸ¥æ˜¯å¦å®‰è£…äº† Inno Setup
+:: ¼ì²éÊÇ·ñ°²×°ÁË Inno Setup
 if exist %INNO_SETUP% (
-    echo [9/9] ç”Ÿæˆå®‰è£…ç¨‹åº...
+    echo [9/9] Éú³É°²×°³ÌÐò...
 
-    :: åˆ›å»ºè¾“å‡ºç›®å½•
+    :: ´´½¨Êä³öÄ¿Â¼
     if not exist "%INSTALLER_OUTPUT%" mkdir "%INSTALLER_OUTPUT%"
 
-    :: Â§43 é˜²"å‡æˆåŠŸ"ï¼šç¼–è¯‘å‰æŠŠåŒåæ—§å®‰è£…åŒ…æŒªæˆ .oldï¼Œç¼–è¯‘åŽ rc=0 ä¸”æ–°æ–‡ä»¶å­˜åœ¨æ‰ç®—æˆåŠŸã€‚
+    :: ¡ì43 ·À"¼Ù³É¹¦"£º±àÒëÇ°°ÑÍ¬Ãû¾É°²×°°üÅ²³É .old£¬±àÒëºó rc=0 ÇÒÐÂÎÄ¼þ´æÔÚ²ÅËã³É¹¦¡£
     if exist "%OUT_EXE%.old" del "%OUT_EXE%.old" >nul 2>&1
     if exist "%OUT_EXE%" ren "%OUT_EXE%" "PhoenixOTG_Setup_%SETUP_VER%.exe.old" >nul 2>&1
 
-    :: è°ƒç”¨ Inno Setup ç¼–è¯‘ï¼ˆ/DMyAppVersion è¦†ç›– iss å†…å…œåº•ç‰ˆæœ¬å·ï¼Œå®‰è£…åŒ…æ–‡ä»¶ååŒæ­¥å¸¦ç‰ˆæœ¬ï¼‰
+    :: µ÷ÓÃ Inno Setup ±àÒë£¨/DMyAppVersion ¸²¸Ç iss ÄÚ¶µµ×°æ±¾ºÅ£¬°²×°°üÎÄ¼þÃûÍ¬²½´ø°æ±¾£©
     %INNO_SETUP% /DMyAppVersion=%SETUP_VER% "%INSTALLER_SCRIPT%"
     set "ISCC_RC=!errorlevel!"
 
     if not "!ISCC_RC!"=="0" (
         echo.
-        echo [è­¦å‘Š] å®‰è£…ç¨‹åºç”Ÿæˆå¤±è´¥ï¼ISCC é€€å‡ºç =!ISCC_RC!
-        echo è¯·å¾€ä¸Šç¿»çœ‹ ISCC è¾“å‡ºçš„ Error è¡Œï¼ˆå¸¸è§åŽŸå› ï¼šæºæ–‡ä»¶ç¼ºå¤± / æ€æ¯’è½¯ä»¶é”å®š Output ç›®å½•ï¼Œ
-        echo åŽè€…è¯·æŠŠ %INSTALLER_OUTPUT% åŠ å…¥æ€æ¯’è½¯ä»¶æŽ’é™¤é¡¹åŽé‡è¯•ï¼‰ã€‚
-        echo ä¸Šä¸€ç‰ˆå®‰è£…åŒ…ä¿ç•™åœ¨: %OUT_EXE%.old
+        echo [¾¯¸æ] °²×°³ÌÐòÉú³ÉÊ§°Ü£¡ISCC ÍË³öÂë=!ISCC_RC!
+        echo ÇëÍùÉÏ·­¿´ ISCC Êä³öµÄ Error ÐÐ£¨³£¼ûÔ­Òò£ºÔ´ÎÄ¼þÈ±Ê§ / É±¶¾Èí¼þËø¶¨ Output Ä¿Â¼£¬
+        echo ºóÕßÇë°Ñ %INSTALLER_OUTPUT% ¼ÓÈëÉ±¶¾Èí¼þÅÅ³ýÏîºóÖØÊÔ£©¡£
+        echo ÉÏÒ»°æ°²×°°ü±£ÁôÔÚ: %OUT_EXE%.old
         echo.
-        echo å‘å¸ƒç›®å½•ï¼ˆå¯æ‰‹åŠ¨åŽ‹ç¼©åˆ†å‘ï¼‰: %RELEASE_DIR%
+        echo ·¢²¼Ä¿Â¼£¨¿ÉÊÖ¶¯Ñ¹Ëõ·Ö·¢£©: %RELEASE_DIR%
         explorer "%RELEASE_DIR%"
     ) else if not exist "%OUT_EXE%" (
         echo.
-        echo [è­¦å‘Š] ISCC é€€å‡ºç =0ï¼Œä½†æ²¡æœ‰äº§å‡º %OUT_EXE% ï¼
-        echo è¯·å¾€ä¸Šç¿»çœ‹æ˜¯å¦æœ‰ "Compile aborted" / "Error in ..." å­—æ ·ï¼›ä¸Šä¸€ç‰ˆä¿ç•™åœ¨ .oldã€‚
+        echo [¾¯¸æ] ISCC ÍË³öÂë=0£¬µ«Ã»ÓÐ²ú³ö %OUT_EXE% £¡
+        echo ÇëÍùÉÏ·­¿´ÊÇ·ñÓÐ "Compile aborted" / "Error in ..." ×ÖÑù£»ÉÏÒ»°æ±£ÁôÔÚ .old¡£
         echo.
-        echo å‘å¸ƒç›®å½•ï¼ˆå¯æ‰‹åŠ¨åŽ‹ç¼©åˆ†å‘ï¼‰: %RELEASE_DIR%
+        echo ·¢²¼Ä¿Â¼£¨¿ÉÊÖ¶¯Ñ¹Ëõ·Ö·¢£©: %RELEASE_DIR%
         explorer "%RELEASE_DIR%"
     ) else (
         if exist "%OUT_EXE%.old" del "%OUT_EXE%.old" >nul 2>&1
         echo.
         echo ========================================
-        echo    å®‰è£…ç¨‹åºç”ŸæˆæˆåŠŸï¼
+        echo    °²×°³ÌÐòÉú³É³É¹¦£¡
         echo ========================================
         echo.
-        echo å®‰è£…ç¨‹åºä½ç½®: %OUT_EXE%
-        echo ï¼ˆå¼ºæ›´/ä¸‹è½½åœ°å€å¡«æ€»åŽå° PC-OTG æ ï¼šupdatesoft/otg/PhoenixOTG_Setup_%SETUP_VER%.exeï¼‰
+        echo °²×°³ÌÐòÎ»ÖÃ: %OUT_EXE%
+        echo £¨Ç¿¸ü/ÏÂÔØµØÖ·Ìî×ÜºóÌ¨ PC-OTG À¸£ºupdatesoft/otg/PhoenixOTG_Setup_%SETUP_VER%.exe£©
         echo.
-        :: æ‰“å¼€å®‰è£…ç¨‹åºç›®å½•
+        :: ´ò¿ª°²×°³ÌÐòÄ¿Â¼
         explorer "%INSTALLER_OUTPUT%"
     )
 ) else (
     echo.
-    echo [æç¤º] æœªæ£€æµ‹åˆ° Inno Setupï¼Œè·³è¿‡å®‰è£…ç¨‹åºç”Ÿæˆã€‚
+    echo [ÌáÊ¾] Î´¼ì²âµ½ Inno Setup£¬Ìø¹ý°²×°³ÌÐòÉú³É¡£
     echo.
-    echo å¦‚éœ€ç”Ÿæˆå®‰è£…ç¨‹åºï¼Œè¯·å®‰è£… Inno Setup 6:
+    echo ÈçÐèÉú³É°²×°³ÌÐò£¬Çë°²×° Inno Setup 6:
     echo https://jrsoftware.org/isdl.php
     echo.
     echo ========================================
-    echo    æ‰“åŒ…å®Œæˆï¼ˆä»…æ–‡ä»¶å¤åˆ¶ï¼‰ï¼
+    echo    ´ò°üÍê³É£¨½öÎÄ¼þ¸´ÖÆ£©£¡
     echo ========================================
     echo.
-    echo å‘å¸ƒç›®å½•: %RELEASE_DIR%
-    echo GStreamer æ’ä»¶: %RELEASE_DIR%\runtime\gstreamer\
+    echo ·¢²¼Ä¿Â¼: %RELEASE_DIR%
+    echo GStreamer ²å¼þ: %RELEASE_DIR%\runtime\gstreamer\
     echo.
-    :: æ‰“å¼€å‘å¸ƒç›®å½•
+    :: ´ò¿ª·¢²¼Ä¿Â¼
     explorer "%RELEASE_DIR%"
 )
 
 echo.
-echo æŒ‰ä»»æ„é”®é€€å‡º...
+echo °´ÈÎÒâ¼üÍË³ö...
 pause >nul
