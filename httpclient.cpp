@@ -422,6 +422,23 @@ void HttpClient::fetchLatestDownloadUrl()
     });
 }
 
+// §56.29 获取主版(PC-SRS)下载地址（无 variant → 后端返回主版 pc 下载地址）
+void HttpClient::fetchMainClientDownloadUrl()
+{
+    QNetworkReply *reply = get("/api/auth/latest-download");
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        reply->deleteLater();
+        QString url;
+        QByteArray responseData = reply->readAll();
+        QJsonDocument doc = QJsonDocument::fromJson(responseData);
+        if (!doc.isNull() && doc.isObject()) {
+            url = doc.object().value("url").toString();
+        }
+        qDebug() << "[MainClientDownload] url:" << url;
+        emit mainClientDownloadUrlReceived(url);
+    });
+}
+
 // ⭐ 生成/获取PC设备唯一标识（基于Windows MachineGuid + MAC地址）
 // §56.22b OTG 专版：设备号带 _OTG 后缀 = 后端视为另一台 PC——与主版同机安装时
 // pc:online 不互顶、观看计数不误判、zjc 双套上报各归各。缓存也用独立注册表分支
