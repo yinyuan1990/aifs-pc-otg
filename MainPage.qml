@@ -4980,9 +4980,11 @@ Rectangle {
     }
     
     // P键：打开/关闭 iOS 滤镜弹框（替代旧的 PC 端曝光弹框）
+    // ⭐ §56.28 OTG 专版：滤镜/LUT 整体去掉（OTG 相机自带画质调节，走 O 键外接设定的 otg_ctrl），P 键禁用
     Shortcut {
         sequence: "P"
         context: Qt.ApplicationShortcut
+        enabled: false
         onActivated: {
             if (iosFilterPopup.visible) {
                 iosFilterPopup.close()
@@ -5127,6 +5129,9 @@ Rectangle {
     // 把 iOS 滤镜弹框当前的 f* 值映射到「PC 本地能实现的子集」并落到当前活动 sink。
     //   本地只做亮度/对比度/饱和度(/gamma)，其余 iOS 专有项(redBoost/黑点/锐化/高光/色度)在 PC 无等价能力→忽略。
     function applyLocalColorFilter() {
+        // ⭐ §56.28 OTG 专版：PC 本地滤镜也去掉——任何调用一律复位中性，画面永远是相机原始输出
+        clearLocalColorFilter()
+        return
         var p = iosFilterPopup
         // 滤镜关 → 本地复位中性
         if (!p.fEnabled) {
@@ -8899,10 +8904,8 @@ Rectangle {
                     console.log("⏭️ [多人观看] §56.13b 后端确认已有 " + count + " 台PC在观看，跳过 STOMP 连接后参数补发（滤镜/LUT/增益/码率），仅拉流")
                     return
                 }
-                sendFilterModeConfig()
-                sendLutModeConfig()
-                // 增益只在硬件链路开关打开时下发；白平衡始终自动不下发
-                if (iosFilterPopup.hardwareEnabled) sendTestBrightnessConfig(iosCameraSettingsPopup.hardwareBrightness)
+                // ⭐ §56.28 OTG 专版：滤镜/LUT/增益补发全部去掉（设备端 OTG 相机自带画质调节，
+                //   这些 ptype 在 android-otg 端本来就是忽略桩），只保留码率补发。
                 sendBitrateConfig()
             })
         }
@@ -14382,6 +14385,8 @@ Rectangle {
 
         // ⭐ v3 STOMP 直推: 单参数 → /topic/device/{id}/config
         function pushParam(ptype, val) {
+            // ⭐ §56.28 OTG 专版：滤镜/LUT 单参数一律不下发也不做 PC 本地处理（OTG 相机自带画质调节）
+            return
             // ⭐ Android：颜色类滤镜不下发设备，改 PC 本地处理（快门 cjfps / 增益 gain 不走此函数，仍下发设备）
             if (HttpClient.currentIsAndroid()) {
                 if (mainPage.isLocalColorPtype(ptype) || ptype === "filterEnabled") {
@@ -14397,6 +14402,10 @@ Rectangle {
 
         // ⭐ STOMP 全量推送 — 只下发「开关打开」的链路；白平衡任何时候都不在这里推（只手动纠正）
         function pushAllStomp() {
+            // ⭐ §56.28 OTG 专版：滤镜/LUT/HDR/增益/低功率全量推送整体去掉（android-otg 端全是忽略桩，
+            //   OTG 相机画质走 O 键外接设定的 otg_ctrl 硬件控制）
+            console.log("⏭️ [OTG专版] pushAllStomp 跳过（滤镜/LUT 已移除）")
+            return
             // ⭐ Android：颜色类滤镜走 PC 本地；仅 ISO 增益仍下发设备（快门 cjfps 由超级帧率滑块单独下发，不在此）
             if (HttpClient.currentIsAndroid()) {
                 mainPage.applyLocalColorFilter()
@@ -15531,13 +15540,16 @@ Rectangle {
                 // ===== 红色增强已锁死 0.02 (无滑块, 启动时由 pushAllStomp 推) =====
 
                 // ===== 滤镜 / LUT 开关 + LUT 切换 =====
+                // ⭐ §56.28 OTG 专版：滤镜/LUT 开关整行隐藏（OTG 相机自带画质调节）
                 Rectangle {
+                    visible: false
                     Layout.fillWidth: true
                     Layout.preferredHeight: 1
                     color: "#E0E0E0"
                 }
 
                 RowLayout {
+                    visible: false
                     Layout.fillWidth: true
                     spacing: 12
 
