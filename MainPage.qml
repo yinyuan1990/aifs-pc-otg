@@ -181,6 +181,18 @@ Rectangle {
         return frac * (contSize * (zoom - 1) / 2)
     }
 
+    // ⭐ S+滚轮「局部放大」的偏移计算——截图四处放大（抓拍格 / 单个全屏 / 列预览单张 / 列预览A键放大）共用。
+    //   语义：把鼠标指着的那块内容拉向画面中央，再夹到「图片边缘不脱离容器」的范围内（不露黑边）。
+    //   低倍档余量小会被夹在边界（画面明显朝鼠标那侧偏），倍数越高越接近精确居中。
+    //   mouseRel/oldOff 都是「相对容器中心」的像素量，contSize=容器对应边尺寸。
+    function localZoomOffset(mouseRel, oldOff, oldZoom, newZoom, contSize) {
+        if (newZoom <= 1.0 || contSize <= 0 || oldZoom <= 0) return 0
+        // 鼠标处的内容点，缩放后相对图片中心的位置；取其反数即可把该点摆到容器中心
+        var off = -(mouseRel - oldOff) * (newZoom / oldZoom)
+        var maxOff = contSize * (newZoom - 1) / 2
+        return Math.max(-maxOff, Math.min(maxOff, off))
+    }
+
     // ⭐ Ctrl + 滚轮/单击 → 整 grid 所有 item 同步动作（联动模式广播 signal）
     //   gridCell delegate 用 Connections 监听, 收到就对自己执行同样操作.
     //   适用于"几张牌同时翻帧"、"同时缩放对比"的场景.
@@ -2490,7 +2502,7 @@ Rectangle {
                                 captureManager.zoomLog("🎡 实时流: videoZoom=" + mainPage.videoZoom.toFixed(2) + " videoOffsetX=" + mainPage.videoOffsetX.toFixed(1) + " videoOffsetY=" + mainPage.videoOffsetY.toFixed(1))
 
                                 if (mainPage.sKeyPressed) {
-                                    // S + 滚轮：以鼠标为中心缩放
+                                    // S + 滚轮：局部放大（放大鼠标指着的那一块）
                                     var oldZoom = gridCell.itemZoom
                                     var delta = wheel.angleDelta.y > 0 ? 0.2 : -0.2
                                     var newZoom = Math.max(1.0, Math.min(3.0, oldZoom + delta))
@@ -2502,26 +2514,12 @@ Rectangle {
                                         var mouseRelX = wheel.x - containerCenterX
                                         var mouseRelY = wheel.y - containerCenterY
                                         
-                                        // 计算缩放比例变化
-                                        var zoomRatio = newZoom / oldZoom
-                                        
-                                        // 调整偏移以保持鼠标位置不变
-                                        var newOffsetX = mouseRelX - (mouseRelX - gridCell.itemOffsetX) * zoomRatio
-                                        var newOffsetY = mouseRelY - (mouseRelY - gridCell.itemOffsetY) * zoomRatio
-                                        
-                                        // ⭐ 边界约束：确保偏移量在有效范围内
+                                        // ⭐ 局部放大：把鼠标指着的那块拉向画面中央（含不露黑边的边界约束）
+                                        gridCell.itemOffsetX = mainPage.localZoomOffset(mouseRelX, gridCell.itemOffsetX, oldZoom, newZoom, imageContainer.width)
+                                        gridCell.itemOffsetY = mainPage.localZoomOffset(mouseRelY, gridCell.itemOffsetY, oldZoom, newZoom, imageContainer.height)
                                         var maxOffsetX = imageContainer.width * (newZoom - 1) / 2
-                                        var maxOffsetY = imageContainer.height * (newZoom - 1) / 2
-                                        gridCell.itemOffsetX = Math.max(-maxOffsetX, Math.min(maxOffsetX, newOffsetX))
-                                        gridCell.itemOffsetY = Math.max(-maxOffsetY, Math.min(maxOffsetY, newOffsetY))
                                         
                                         gridCell.itemZoom = newZoom
-                                        
-                                        // 如果缩放到1倍，重置偏移
-                                        if (newZoom === 1.0) {
-                                            gridCell.itemOffsetX = 0
-                                            gridCell.itemOffsetY = 0
-                                        }
                                         
                                         // ⭐ 2026-07-11 修复「改行列后 item 缩放丢失」：S+滚轮缩放必须落盘 itemZoomMap
                                         //   （原来只有拖动落盘，滚轮缩放没存 → GridView 重建 delegate 后被复位）
@@ -10747,20 +10745,11 @@ Rectangle {
                         var mouseRelX = wheel.x - containerCenterX
                         var mouseRelY = wheel.y - containerCenterY
                         
-                        // 计算缩放比例变化
-                        var zoomRatio = newZoom / oldZoom
-                        
-                        // 调整偏移量，使鼠标位置保持不变
-                        fullscreenOffsetX = mouseRelX - (mouseRelX - fullscreenOffsetX) * zoomRatio
-                        fullscreenOffsetY = mouseRelY - (mouseRelY - fullscreenOffsetY) * zoomRatio
+                        // ⭐ 局部放大：把鼠标指着的那块拉向画面中央（含不露黑边的边界约束）
+                        fullscreenOffsetX = mainPage.localZoomOffset(mouseRelX, fullscreenOffsetX, oldZoom, newZoom, fullscreenImageContainer.width)
+                        fullscreenOffsetY = mainPage.localZoomOffset(mouseRelY, fullscreenOffsetY, oldZoom, newZoom, fullscreenImageContainer.height)
                         
                         fullscreenZoom = newZoom
-                        
-                        // 缩放回1.0时重置偏移
-                        if (newZoom === 1.0) {
-                            fullscreenOffsetX = 0
-                            fullscreenOffsetY = 0
-                        }
                         mainPage.syncFullscreenZoomToItem()  // ⭐ 同步回 item
                     }
                 } else {
@@ -10877,30 +10866,17 @@ Rectangle {
                             var newZoom = Math.max(1.0, Math.min(5.0, fullscreenZoom + delta))
                             
                             if (newZoom !== oldZoom) {
-                                // 鼠标在图片上的位置
-                                var mouseInImageX = wheel.x
-                                var mouseInImageY = wheel.y
-                                
-                                // 鼠标相对于容器中心的位置
+                                // 鼠标在图片上的位置 → 换算成相对容器中心（图片可能已被放大平移过）
                                 var containerCenterX = fullscreenImageContainer.width / 2
                                 var containerCenterY = fullscreenImageContainer.height / 2
-                                var mouseRelX = fullscreenImage.x + mouseInImageX - containerCenterX
-                                var mouseRelY = fullscreenImage.y + mouseInImageY - containerCenterY
+                                var mouseRelX = fullscreenImage.x + wheel.x - containerCenterX
+                                var mouseRelY = fullscreenImage.y + wheel.y - containerCenterY
                                 
-                                // 计算缩放比例变化
-                                var zoomRatio = newZoom / oldZoom
-                                
-                                // 调整偏移量
-                                fullscreenOffsetX = mouseRelX - (mouseRelX - fullscreenOffsetX) * zoomRatio
-                                fullscreenOffsetY = mouseRelY - (mouseRelY - fullscreenOffsetY) * zoomRatio
+                                // ⭐ 局部放大：把鼠标指着的那块拉向画面中央（含不露黑边的边界约束）
+                                fullscreenOffsetX = mainPage.localZoomOffset(mouseRelX, fullscreenOffsetX, oldZoom, newZoom, fullscreenImageContainer.width)
+                                fullscreenOffsetY = mainPage.localZoomOffset(mouseRelY, fullscreenOffsetY, oldZoom, newZoom, fullscreenImageContainer.height)
                                 
                                 fullscreenZoom = newZoom
-                                
-                                // 缩放回1.0时重置偏移
-                                if (newZoom === 1.0) {
-                                    fullscreenOffsetX = 0
-                                    fullscreenOffsetY = 0
-                                }
                                 mainPage.syncFullscreenZoomToItem()  // ⭐ 同步回 item
                             }
                         } else {
@@ -11378,16 +11354,9 @@ Rectangle {
                                         var containerCenterY = colPreviewItem.height / 2
                                         var mouseRelX = colPreviewImage.x + wheel.x - containerCenterX
                                         var mouseRelY = colPreviewImage.y + wheel.y - containerCenterY
-                                        var zoomRatio = newZoom / oldZoom
-                                        var nOffX = mouseRelX - (mouseRelX - colPreviewItem.itemOffX) * zoomRatio
-                                        var nOffY = mouseRelY - (mouseRelY - colPreviewItem.itemOffY) * zoomRatio
-                                        if (newZoom === 1.0) { nOffX = 0; nOffY = 0 }
-                                        else {
-                                            var mX = colPreviewItem.width * (newZoom - 1) / 2
-                                            var mY = colPreviewItem.height * (newZoom - 1) / 2
-                                            nOffX = Math.max(-mX, Math.min(mX, nOffX))
-                                            nOffY = Math.max(-mY, Math.min(mY, nOffY))
-                                        }
+                                        // ⭐ 局部放大：把鼠标指着的那块拉向画面中央（含不露黑边的边界约束）
+                                        var nOffX = mainPage.localZoomOffset(mouseRelX, colPreviewItem.itemOffX, oldZoom, newZoom, colPreviewItem.width)
+                                        var nOffY = mainPage.localZoomOffset(mouseRelY, colPreviewItem.itemOffY, oldZoom, newZoom, colPreviewItem.height)
                                         mainPage.saveItemZoom(colPreviewItem.dataIdx, newZoom, nOffX, nOffY, colPreviewItem.width, colPreviewItem.height)
                                         mainPage.itemZoomRestore(colPreviewItem.dataIdx)
                                     }
@@ -11623,11 +11592,11 @@ Rectangle {
                         var cy = zoomImageContainer.height / 2
                         var mx = wheel.x - cx
                         var my = wheel.y - cy
-                        var r = newZoom / oldZoom
-                        columnPreviewZoomOffX = mx - (mx - columnPreviewZoomOffX) * r
-                        columnPreviewZoomOffY = my - (my - columnPreviewZoomOffY) * r
+                        // ⭐ 局部放大：把鼠标指着的那块拉向画面中央（含不露黑边的边界约束）
+                        columnPreviewZoomOffX = mainPage.localZoomOffset(mx, columnPreviewZoomOffX, oldZoom, newZoom, zoomImageContainer.width)
+                        columnPreviewZoomOffY = mainPage.localZoomOffset(my, columnPreviewZoomOffY, oldZoom, newZoom, zoomImageContainer.height)
                         columnPreviewZoomScale = newZoom
-                        if (newZoom === 1.0) { columnPreviewZoomOffX = 0; columnPreviewZoomOffY = 0 }
+                        syncColumnPreviewZoomToItem()  // ⭐ 缩放同步回 itemZoomMap（原来这条路径漏了）
                     }
                 } else {
                     // 普通滚轮：切帧
@@ -11724,11 +11693,10 @@ Rectangle {
                                 var cy = zoomImageContainer.height / 2
                                 var mx = zoomImage.x + wheel.x - cx
                                 var my = zoomImage.y + wheel.y - cy
-                                var r = newZoom / oldZoom
-                                columnPreviewZoomOffX = mx - (mx - columnPreviewZoomOffX) * r
-                                columnPreviewZoomOffY = my - (my - columnPreviewZoomOffY) * r
+                                // ⭐ 局部放大：把鼠标指着的那块拉向画面中央（含不露黑边的边界约束）
+                                columnPreviewZoomOffX = mainPage.localZoomOffset(mx, columnPreviewZoomOffX, oldZoom, newZoom, zoomImageContainer.width)
+                                columnPreviewZoomOffY = mainPage.localZoomOffset(my, columnPreviewZoomOffY, oldZoom, newZoom, zoomImageContainer.height)
                                 columnPreviewZoomScale = newZoom
-                                if (newZoom === 1.0) { columnPreviewZoomOffX = 0; columnPreviewZoomOffY = 0 }
                                 syncColumnPreviewZoomToItem()  // ⭐ 缩放同步回 itemZoomMap
                             }
                         } else {
