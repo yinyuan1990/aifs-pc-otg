@@ -22,11 +22,16 @@ ApplicationWindow {
     
     // 初始尺寸（登录/注册卡片大小）
     //   ⭐ 2026-06-24：登录页新增「播放内核」分段选择（约 +84px），原 502 高度会把
-    //      豪华版/至尊版/注册按钮挤出可视区，故登录态高度提到 590。
+    //      豪华版/AI全能版/注册按钮挤出可视区，故登录态高度提到 590。
     width: 600
     height: 590
-    minimumWidth: isLoggedIn ? 1280 : 600
-    minimumHeight: isLoggedIn ? 720 : 590
+    // ⭐ 2026-08-16 修「点击登录后登录页先被撑大」：最小尺寸不能绑 isLoggedIn——
+    //   登录成功瞬间 isLoggedIn=true，但 MainPage 是异步加载（§24），窗口切换推迟到
+    //   mainPageLoader.onLoaded；绑定抢跑会让 600x590 的登录窗口立刻被最小尺寸
+    //   1280x720 强制撑大，登录卡片跟着拉大。最小尺寸改为进主页时 switchTimer
+    //   显式设 1280x720、退出登录时 logoutTimer 显式设回 600x590。
+    minimumWidth: 600
+    minimumHeight: 590
     flags: Qt.Window | Qt.FramelessWindowHint
     color: "transparent"
     
@@ -121,9 +126,8 @@ ApplicationWindow {
             mainWindow.height = newHeight
             mainWindow.minimumWidth = 1280
             mainWindow.minimumHeight = 720
-            // 窗口背景色根据PC等级区分：等级2绿色，等级1蓝色
-            var pcLevel = HttpClient.pcActivationLevel()
-            mainWindow.color = (pcLevel >= 2) ? "#C8DFC0" : "#CAD9F2"
+            // 窗口背景色统一浅灰，与菜单栏一致（OTG 版不按等级区分颜色）
+            mainWindow.color = "#F3F3F3"
             
             // 再延迟一帧后恢复可见
             showTimer.start()
@@ -421,7 +425,13 @@ ApplicationWindow {
     // 处理退出登录
     function handleLogout() {
         console.log("Main.qml: 收到退出登录信号")
-        // 先隐藏窗口
+        // ⭐ 2026-08-16 修「退出登录回到登录页铺满屏幕」：最大化/全屏状态下直接改
+        //   width/height 不生效，visible=true 后窗口仍按最大化恢复 → 登录页铺满。
+        //   先退回普通窗口态（要在隐藏之前做，隐藏后再设 visibility 会把窗口提前显示出来）。
+        if (mainWindow.visibility === Window.Maximized || mainWindow.visibility === Window.FullScreen) {
+            mainWindow.visibility = Window.Windowed
+        }
+        // 再隐藏窗口
         mainWindow.visible = false
         logoutTimer.start()
     }
@@ -430,13 +440,14 @@ ApplicationWindow {
         id: logoutTimer
         interval: 50
         onTriggered: {
-            // 先切换状态（这样 minimumWidth/Height 的绑定会生效）
+            // 先切换状态（最小尺寸已不再绑 isLoggedIn，下面显式恢复登录页尺寸；
+            //   最大化/全屏 → 普通窗口态的切换已在 handleLogout 里提前做掉）
             isLoggedIn = false
             
             // ⭐ 恢复登录页窗口尺寸（必须与首次启动初始值完全一致：600 x 590）。
             //   2026-06-24：登录页加了「播放内核」分段选择后初始高度从 502 提到 590，
             //   此处退出登录路径之前漏改、还写 502，导致退出后窗口比首次启动矮 88px，
-            //   豪华版/至尊版/注册按钮被挤出可视区。统一改 590。
+            //   豪华版/AI全能版/注册按钮被挤出可视区。统一改 590。
             mainWindow.minimumWidth = 600
             mainWindow.minimumHeight = 590
             mainWindow.maximumWidth = 600
