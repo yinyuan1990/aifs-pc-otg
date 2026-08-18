@@ -1526,7 +1526,7 @@ Rectangle {
                 //   livePanel 内 kernelPlayerLoader），不再需要顶部对比浮窗入口。
                 //   浮窗本体 kernelTestOverlay 暂保留但无入口触发（P2P 退场逻辑仍在），后续可清理。
 
-                // ⭐ 滚轮帧数（步长）显示：默认1，按 F5–F8 或鼠标悬停在本标签上滚轮加减
+                // ⭐ 滚轮帧数（步长）显示：默认1，按 F5–F8 跟随 frameStep 变化
                 Rectangle {
                     width: wheelStepText.width + 16
                     height: 24
@@ -1548,18 +1548,9 @@ Rectangle {
                     MouseArea {
                         anchors.fill: parent
                         hoverEnabled: true
-                        cursorShape: Qt.PointingHandCursor
                         ToolTip.visible: containsMouse
-                        ToolTip.text: "滚轮：加减步长（1~10 帧）｜快捷键 F5=1 F6=2 F7=3 F8=4"
+                        ToolTip.text: "F5=1 F6=2 F7=3 F8=4 帧"
                         ToolTip.delay: 300
-
-                        // ⭐ 鼠标放在本标签上滚轮直接加减步长——F5~F8 只给到 1~4，这里能调到 10
-                        onWheel: function(wheel) {
-                            var d = wheel.angleDelta.y > 0 ? 1 : -1
-                            mainPage.frameStep = Math.max(1, Math.min(10, mainPage.frameStep + d))
-                            wheel.accepted = true
-                            console.log("🎡 滚轮帧数(步长):", mainPage.frameStep)
-                        }
                     }
                 }
 
