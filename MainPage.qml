@@ -252,6 +252,7 @@ Rectangle {
     
     // ⭐ 列预览相关属性（数字键0-9触发，0代表第10列）
     property bool columnPreviewVisible: false
+    property int columnPreviewMode: 0  // ⭐ 0=全屏, 1=半屏（只覆盖截图区域、不遮实时流）；打开时按菜单栏开关快照
     property int columnPreviewCol: -1  // 当前预览的列号（0-based）
     property var columnPreviewItems: []  // 该列所有有数据的 dataIndex 列表
     property int columnPreviewRefreshToken: 0
@@ -1284,7 +1285,7 @@ Rectangle {
                     }
                 }
                 
-                // ⭐ 放大查看模式开关（A键放大）
+                // ⭐ 放大查看模式开关（A键单张放大 + 数字键列预览共用）
                 Row {
                     spacing: 4
                     height: parent.height
@@ -1300,7 +1301,7 @@ Rectangle {
                             anchors.fill: parent
                             hoverEnabled: true
                             ToolTip.visible: containsMouse
-                            ToolTip.text: "A键放大查看模式：关闭=全屏，打开=覆盖截图区域"
+                            ToolTip.text: "放大查看模式（A键单张放大 / 数字键列预览）：关闭=全屏，打开=只覆盖截图区域、不遮实时流"
                             ToolTip.delay: 300
                         }
                     }
@@ -1330,7 +1331,7 @@ Rectangle {
                             cursorShape: Qt.PointingHandCursor
                             onClicked: {
                                 appSettings.halfScreenViewMode = !appSettings.halfScreenViewMode
-                                console.log("📺 放大查看模式:", appSettings.halfScreenViewMode ? "半屏" : "全屏")
+                                console.log("📺 放大查看模式(A键放大/列预览):", appSettings.halfScreenViewMode ? "半屏" : "全屏")
                             }
                         }
                     }
@@ -10390,6 +10391,8 @@ Rectangle {
         columnPreviewOffsetY = offY
         columnPreviewCol = colIndex
         columnPreviewRefreshToken = Date.now()
+        // ⭐ 与 A 键单张放大同一个菜单栏开关：半屏时列预览也只覆盖截图区域，实时流照常可见可操作
+        columnPreviewMode = appSettings.halfScreenViewMode ? 1 : 0
         columnPreviewVisible = true
     }
     
@@ -11094,9 +11097,13 @@ Rectangle {
     }
     
     // ============ 列预览覆盖层（数字键0-9触发，仅2-5张）============
+    // columnPreviewMode: 0=全屏, 1=半屏（只覆盖截图区域，与 fullscreenViewer 同一套口径）
     Rectangle {
         id: columnPreviewOverlay
-        anchors.fill: parent
+        x: columnPreviewMode === 0 ? 0 : captureGridContent.mapToItem(mainPage, 0, 0).x
+        y: columnPreviewMode === 0 ? 0 : captureGridContent.mapToItem(mainPage, 0, 0).y
+        width: columnPreviewMode === 0 ? parent.width : captureGridContent.width
+        height: columnPreviewMode === 0 ? parent.height : captureGridContent.height
         color: "#CC000000"  // 半透明黑色背景
         visible: columnPreviewVisible
         z: 1001  // 在全屏查看之上
@@ -11177,8 +11184,9 @@ Rectangle {
             property int layoutCols: imgCount <= 3 ? imgCount : (imgCount === 4 ? 2 : 3)
             property int layoutRows: imgCount <= 3 ? 1 : 2
             property real gridSpacing: 8
-            property real availH: columnPreviewOverlay.height - 110  // 上方顶部栏+下方提示栏
-            property real availW: columnPreviewOverlay.width - 60    // 左右各留30边距
+            // ⭐ 半屏模式下覆盖区域只有截图区那么大，扣掉顶部栏/提示栏后可能不够，夹住防负尺寸
+            property real availH: Math.max(60, columnPreviewOverlay.height - 110)  // 上方顶部栏+下方提示栏
+            property real availW: Math.max(60, columnPreviewOverlay.width - 60)    // 左右各留30边距
             property real cellW: layoutCols > 0 ? (availW - (layoutCols - 1) * gridSpacing) / layoutCols : 0
             property real cellH: layoutRows > 0 ? (availH - (layoutRows - 1) * gridSpacing) / layoutRows : 0
             
@@ -11544,7 +11552,11 @@ Rectangle {
     // ============ 列预览A键放大覆盖层（z:1002，在列预览之上）============
     Rectangle {
         id: columnPreviewZoomOverlay
-        anchors.fill: parent
+        // ⭐ 跟随列预览的全屏/半屏模式，半屏时同样不遮实时流
+        x: columnPreviewMode === 0 ? 0 : captureGridContent.mapToItem(mainPage, 0, 0).x
+        y: columnPreviewMode === 0 ? 0 : captureGridContent.mapToItem(mainPage, 0, 0).y
+        width: columnPreviewMode === 0 ? parent.width : captureGridContent.width
+        height: columnPreviewMode === 0 ? parent.height : captureGridContent.height
         color: "#EE000000"
         visible: columnPreviewVisible && columnPreviewZoomItemIdx >= 0
         z: 1002
