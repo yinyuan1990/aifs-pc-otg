@@ -5221,19 +5221,24 @@ Rectangle {
     //   videoZoom/offset 变化后会自动触发 onVideoZoomChanged→kernelSyncTransform（内核模式回写 webview）。
     function applyWheelZoom(up, mouseX, mouseY) {
         var oldZoom = mainPage.videoZoom
-        // ⭐ §84.3：与截图放大同款——第一档直达 2 倍（原「光标钉住」+0.2 步进，低倍档位移余量不足，
-        //   看着就是中心放大，与截图 A 放大是同一个问题），2 倍以上仍 0.2 微调。
-        var newZoom = nextScreenshotZoom(oldZoom, up, 5.0)
-        if (newZoom === oldZoom) return
+        // ⭐ §84.5：实时流回归 0.2 平滑步进（§84.3 曾学截图一档直达 2 倍，动态画面上观感是"猛跳"）；
+        //   截图 item 仍保留第一档 2 倍（nextScreenshotZoom），二者档位策略从此分开。
+        var newZoom = Math.max(1.0, Math.min(5.0, oldZoom + (up ? 0.2 : -0.2)))
+        if (Math.abs(newZoom - oldZoom) < 0.001) return
 
         var containerCenterX = videoContainer.width / 2
         var containerCenterY = videoContainer.height / 2
         var mouseRelX = mouseX - containerCenterX
         var mouseRelY = mouseY - containerCenterY
-        // ⭐ 把鼠标指着的那块拉向画面中央（含不露黑边边界约束），与截图六处放大共用 localZoomOffset
-        mainPage.videoOffsetX = localZoomOffset(mouseRelX, mainPage.videoOffsetX, oldZoom, newZoom, videoContainer.width)
-        mainPage.videoOffsetY = localZoomOffset(mouseRelY, mainPage.videoOffsetY, oldZoom, newZoom, videoContainer.height)
+        var oldOffX = mainPage.videoOffsetX
+        var oldOffY = mainPage.videoOffsetY
+        // ⭐ §84.5：必须**先改 zoom 再改 offset**——onVideoOffsetXChanged→clampVideoOffsets 按"当时的
+        //   videoZoom"夹偏移；旧顺序（先 offset 后 zoom）下第一档 videoZoom 还是 1.0、上限=0，
+        //   算好的光标钉住偏移当场被夹成 0 → 表现为低倍档中心放大"跑了"，2 倍以后旧上限够大才正常。
+        //   截图 item 没有这个联动 clamp，所以截图六处一直是对的。
         mainPage.videoZoom = newZoom
+        mainPage.videoOffsetX = localZoomOffset(mouseRelX, oldOffX, oldZoom, newZoom, videoContainer.width)
+        mainPage.videoOffsetY = localZoomOffset(mouseRelY, oldOffY, oldZoom, newZoom, videoContainer.height)
         if (newZoom === 1.0) { mainPage.videoOffsetX = 0; mainPage.videoOffsetY = 0 }
         sendLocalViewUpdate(mainPage.videoZoom, mainPage.videoOffsetX, mainPage.videoOffsetY)
     }
