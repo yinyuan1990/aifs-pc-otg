@@ -181,14 +181,16 @@ Rectangle {
         return frac * (contSize * (zoom - 1) / 2)
     }
 
-    // ⭐ S+滚轮「局部放大」的偏移计算——截图四处放大（抓拍格 / 单个全屏 / 列预览单张 / 列预览A键放大）共用。
-    //   语义：把鼠标指着的那块内容拉向画面中央，再夹到「图片边缘不脱离容器」的范围内（不露黑边）。
-    //   低倍档余量小会被夹在边界（画面明显朝鼠标那侧偏），倍数越高越接近精确居中。
+    // ⭐ S+滚轮「局部放大」的偏移计算——截图放大（抓拍格 / 单个全屏 / 列预览单张 / A键放大）与实时流共用。
+    //   语义（§84.4 定稿）：**以鼠标为锚点放大**——鼠标底下的内容点钉住不动，画面绕它胀开，
+    //   再夹到「图片边缘不脱离容器」的范围内（不露黑边）。
+    //   历史：§78 曾因 1.2 倍第一档没体感改成「拉向中央」，实测画面会整块甩走（"感觉跑了"）；
+    //   §84 第一档直达 2 倍后幅度问题已解决，语义回归光标钉住——两者组合才是「指哪放大哪」。
     //   mouseRel/oldOff 都是「相对容器中心」的像素量，contSize=容器对应边尺寸。
     function localZoomOffset(mouseRel, oldOff, oldZoom, newZoom, contSize) {
         if (newZoom <= 1.0 || contSize <= 0 || oldZoom <= 0) return 0
-        // 鼠标处的内容点，缩放后相对图片中心的位置；取其反数即可把该点摆到容器中心
-        var off = -(mouseRel - oldOff) * (newZoom / oldZoom)
+        // 光标钉住：鼠标处内容点缩放前后停在同一屏幕位置
+        var off = mouseRel - (mouseRel - oldOff) * (newZoom / oldZoom)
         var maxOff = contSize * (newZoom - 1) / 2
         return Math.max(-maxOff, Math.min(maxOff, off))
     }
