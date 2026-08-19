@@ -193,6 +193,20 @@ Rectangle {
         return Math.max(-maxOff, Math.min(maxOff, off))
     }
 
+    // ⭐ §84：截图 S+滚轮缩放档位——第一档直接 1.0→2.0。
+    //   §78 把语义改成「拉向中央+不露黑边夹取」后，1.2 倍最大偏移只有容器 ±10%，
+    //   位移余量物理上不够，第一档看着仍是中心放大。2 倍起步偏移余量到 ±50%，
+    //   「指哪放大哪」才有体感；2 倍以上仍按 0.2 微调，缩小时低于 2 倍直接回 1.0。
+    //   maxZoom=各视图自己的上限（抓拍格 3，其余 5）。慢放/实时流不走这里。
+    function nextScreenshotZoom(oldZoom, zoomIn, maxZoom) {
+        if (zoomIn) {
+            if (oldZoom < 2.0) return Math.min(maxZoom, 2.0)
+            return Math.min(maxZoom, oldZoom + 0.2)
+        }
+        if (oldZoom <= 2.0) return 1.0
+        return oldZoom - 0.2
+    }
+
     // ⭐ Ctrl + 滚轮/单击 → 整 grid 所有 item 同步动作（联动模式广播 signal）
     //   gridCell delegate 用 Connections 监听, 收到就对自己执行同样操作.
     //   适用于"几张牌同时翻帧"、"同时缩放对比"的场景.
@@ -2503,10 +2517,9 @@ Rectangle {
                                 captureManager.zoomLog("🎡 实时流: videoZoom=" + mainPage.videoZoom.toFixed(2) + " videoOffsetX=" + mainPage.videoOffsetX.toFixed(1) + " videoOffsetY=" + mainPage.videoOffsetY.toFixed(1))
 
                                 if (mainPage.sKeyPressed) {
-                                    // S + 滚轮：局部放大（放大鼠标指着的那一块）
+                                    // S + 滚轮：局部放大（放大鼠标指着的那一块）；§84 第一档直达 2 倍
                                     var oldZoom = gridCell.itemZoom
-                                    var delta = wheel.angleDelta.y > 0 ? 0.2 : -0.2
-                                    var newZoom = Math.max(1.0, Math.min(3.0, oldZoom + delta))
+                                    var newZoom = mainPage.nextScreenshotZoom(oldZoom, wheel.angleDelta.y > 0, 3.0)
                                     
                                     if (newZoom !== oldZoom) {
                                         // 计算鼠标相对于容器中心的位置
@@ -10691,8 +10704,12 @@ Rectangle {
     Rectangle {
         id: fullscreenViewer
         // ⭐ 根据模式选择覆盖区域
-        x: fullscreenViewerMode === 0 ? 0 : captureGridContent.mapToItem(mainPage, 0, 0).x
-        y: fullscreenViewerMode === 0 ? 0 : captureGridContent.mapToItem(mainPage, 0, 0).y
+        // ⭐ §84：mapToItem 不是响应式的——x/y 原来只在 mode 变化时求值，若 mode 一直是 1（半屏），
+        //   窗口改过大小/切过布局后重开会用旧坐标。把 visible/布局/窗口尺寸挂进依赖，每次打开重新取位。
+        x: fullscreenViewerMode === 0 ? 0 : (fullscreenViewerVisible, windowLayoutMode, mainPage.width, mainPage.height,
+                                             captureGridContent.mapToItem(mainPage, 0, 0).x)
+        y: fullscreenViewerMode === 0 ? 0 : (fullscreenViewerVisible, windowLayoutMode, mainPage.width, mainPage.height,
+                                             captureGridContent.mapToItem(mainPage, 0, 0).y)
         width: fullscreenViewerMode === 0 ? parent.width : captureGridContent.width
         height: fullscreenViewerMode === 0 ? parent.height : captureGridContent.height
         color: "#000000"
@@ -10736,10 +10753,9 @@ Rectangle {
                         console.log("🔒 全屏局部放大需要AI全能版")
                         return
                     }
-                    // ⭐ S + 滚轮：以鼠标位置为中心缩放
+                    // ⭐ S + 滚轮：以鼠标位置为中心缩放；§84 第一档直达 2 倍
                     var oldZoom = fullscreenZoom
-                    var delta = wheel.angleDelta.y > 0 ? 0.2 : -0.2
-                    var newZoom = Math.max(1.0, Math.min(5.0, fullscreenZoom + delta))
+                    var newZoom = mainPage.nextScreenshotZoom(oldZoom, wheel.angleDelta.y > 0, 5.0)
                     
                     if (newZoom !== oldZoom) {
                         // 计算鼠标相对于容器中心的位置
@@ -10863,10 +10879,9 @@ Rectangle {
                     
                     onWheel: function(wheel) {
                         if (mainPage.sKeyPressed) {
-                            // ⭐ S + 滚轮：以鼠标位置为中心缩放
+                            // ⭐ S + 滚轮：以鼠标位置为中心缩放；§84 第一档直达 2 倍
                             var oldZoom = fullscreenZoom
-                            var delta = wheel.angleDelta.y > 0 ? 0.2 : -0.2
-                            var newZoom = Math.max(1.0, Math.min(5.0, fullscreenZoom + delta))
+                            var newZoom = mainPage.nextScreenshotZoom(oldZoom, wheel.angleDelta.y > 0, 5.0)
                             
                             if (newZoom !== oldZoom) {
                                 // 鼠标在图片上的位置 → 换算成相对容器中心（图片可能已被放大平移过）
@@ -11100,8 +11115,11 @@ Rectangle {
     // columnPreviewMode: 0=全屏, 1=半屏（只覆盖截图区域，与 fullscreenViewer 同一套口径）
     Rectangle {
         id: columnPreviewOverlay
-        x: columnPreviewMode === 0 ? 0 : captureGridContent.mapToItem(mainPage, 0, 0).x
-        y: columnPreviewMode === 0 ? 0 : captureGridContent.mapToItem(mainPage, 0, 0).y
+        // ⭐ §84：同 fullscreenViewer——把 visible/布局/窗口尺寸挂进依赖，每次打开重新取位（mapToItem 非响应式）
+        x: columnPreviewMode === 0 ? 0 : (columnPreviewVisible, windowLayoutMode, mainPage.width, mainPage.height,
+                                          captureGridContent.mapToItem(mainPage, 0, 0).x)
+        y: columnPreviewMode === 0 ? 0 : (columnPreviewVisible, windowLayoutMode, mainPage.width, mainPage.height,
+                                          captureGridContent.mapToItem(mainPage, 0, 0).y)
         width: columnPreviewMode === 0 ? parent.width : captureGridContent.width
         height: columnPreviewMode === 0 ? parent.height : captureGridContent.height
         color: "#CC000000"  // 半透明黑色背景
@@ -11352,10 +11370,9 @@ Rectangle {
                                 }
 
                                 if (mainPage.sKeyPressed) {
-                                    // S + 滚轮：以鼠标为中心缩放（单张）→ 直接落 itemZoomMap（唯一数据源）
+                                    // S + 滚轮：以鼠标为中心缩放（单张）→ 直接落 itemZoomMap（唯一数据源）；§84 第一档直达 2 倍
                                     var oldZoom = colPreviewItem.itemZoom
-                                    var delta = wheel.angleDelta.y > 0 ? 0.2 : -0.2
-                                    var newZoom = Math.max(1.0, Math.min(5.0, oldZoom + delta))
+                                    var newZoom = mainPage.nextScreenshotZoom(oldZoom, wheel.angleDelta.y > 0, 5.0)
                                     
                                     if (newZoom !== oldZoom) {
                                         var containerCenterX = colPreviewItem.width / 2
@@ -11553,8 +11570,11 @@ Rectangle {
     Rectangle {
         id: columnPreviewZoomOverlay
         // ⭐ 跟随列预览的全屏/半屏模式，半屏时同样不遮实时流
-        x: columnPreviewMode === 0 ? 0 : captureGridContent.mapToItem(mainPage, 0, 0).x
-        y: columnPreviewMode === 0 ? 0 : captureGridContent.mapToItem(mainPage, 0, 0).y
+        // ⭐ §84：同上，挂响应式依赖，每次打开重新取位（mapToItem 非响应式）
+        x: columnPreviewMode === 0 ? 0 : (columnPreviewVisible, windowLayoutMode, mainPage.width, mainPage.height,
+                                          captureGridContent.mapToItem(mainPage, 0, 0).x)
+        y: columnPreviewMode === 0 ? 0 : (columnPreviewVisible, windowLayoutMode, mainPage.width, mainPage.height,
+                                          captureGridContent.mapToItem(mainPage, 0, 0).y)
         width: columnPreviewMode === 0 ? parent.width : captureGridContent.width
         height: columnPreviewMode === 0 ? parent.height : captureGridContent.height
         color: "#EE000000"
@@ -11595,10 +11615,9 @@ Rectangle {
             
             onWheel: function(wheel) {
                 if (mainPage.sKeyPressed) {
-                    // S + 滚轮：缩放
+                    // S + 滚轮：缩放；§84 第一档直达 2 倍
                     var oldZoom = columnPreviewZoomScale
-                    var delta = wheel.angleDelta.y > 0 ? 0.2 : -0.2
-                    var newZoom = Math.max(1.0, Math.min(5.0, oldZoom + delta))
+                    var newZoom = mainPage.nextScreenshotZoom(oldZoom, wheel.angleDelta.y > 0, 5.0)
                     if (newZoom !== oldZoom) {
                         var cx = zoomImageContainer.width / 2
                         var cy = zoomImageContainer.height / 2
@@ -11698,8 +11717,8 @@ Rectangle {
                     onWheel: function(wheel) {
                         if (mainPage.sKeyPressed) {
                             var oldZoom = columnPreviewZoomScale
-                            var delta = wheel.angleDelta.y > 0 ? 0.2 : -0.2
-                            var newZoom = Math.max(1.0, Math.min(5.0, oldZoom + delta))
+                            // §84 第一档直达 2 倍
+                            var newZoom = mainPage.nextScreenshotZoom(oldZoom, wheel.angleDelta.y > 0, 5.0)
                             if (newZoom !== oldZoom) {
                                 var cx = zoomImageContainer.width / 2
                                 var cy = zoomImageContainer.height / 2
