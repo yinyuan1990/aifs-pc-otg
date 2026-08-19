@@ -5219,21 +5219,18 @@ Rectangle {
     //   videoZoom/offset 变化后会自动触发 onVideoZoomChanged→kernelSyncTransform（内核模式回写 webview）。
     function applyWheelZoom(up, mouseX, mouseY) {
         var oldZoom = mainPage.videoZoom
-        var delta = up ? 0.2 : -0.2
-        var newZoom = Math.max(1.0, Math.min(5.0, oldZoom + delta))
+        // ⭐ §84.3：与截图放大同款——第一档直达 2 倍（原「光标钉住」+0.2 步进，低倍档位移余量不足，
+        //   看着就是中心放大，与截图 A 放大是同一个问题），2 倍以上仍 0.2 微调。
+        var newZoom = nextScreenshotZoom(oldZoom, up, 5.0)
         if (newZoom === oldZoom) return
 
         var containerCenterX = videoContainer.width / 2
         var containerCenterY = videoContainer.height / 2
         var mouseRelX = mouseX - containerCenterX
         var mouseRelY = mouseY - containerCenterY
-        var zoomRatio = newZoom / oldZoom
-        var newOffsetX = mouseRelX - (mouseRelX - mainPage.videoOffsetX) * zoomRatio
-        var newOffsetY = mouseRelY - (mouseRelY - mainPage.videoOffsetY) * zoomRatio
-        var maxOffsetX = videoContainer.width * (newZoom - 1) / 2
-        var maxOffsetY = videoContainer.height * (newZoom - 1) / 2
-        mainPage.videoOffsetX = Math.max(-maxOffsetX, Math.min(maxOffsetX, newOffsetX))
-        mainPage.videoOffsetY = Math.max(-maxOffsetY, Math.min(maxOffsetY, newOffsetY))
+        // ⭐ 把鼠标指着的那块拉向画面中央（含不露黑边边界约束），与截图六处放大共用 localZoomOffset
+        mainPage.videoOffsetX = localZoomOffset(mouseRelX, mainPage.videoOffsetX, oldZoom, newZoom, videoContainer.width)
+        mainPage.videoOffsetY = localZoomOffset(mouseRelY, mainPage.videoOffsetY, oldZoom, newZoom, videoContainer.height)
         mainPage.videoZoom = newZoom
         if (newZoom === 1.0) { mainPage.videoOffsetX = 0; mainPage.videoOffsetY = 0 }
         sendLocalViewUpdate(mainPage.videoZoom, mainPage.videoOffsetX, mainPage.videoOffsetY)
