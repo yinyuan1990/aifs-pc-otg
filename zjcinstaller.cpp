@@ -347,6 +347,51 @@ bool runUninstall(const QString &exePath) {
     return ok;
 }
 
+// ⭐ §85 2026-08-19：登录检查发现「服务注册着但没在跑」→ **只拉起，不重装**。
+//   ① 先试非提权 StartServiceW：Phoenix 以管理员运行（或服务 DACL 放开）时零打扰直接成功；
+//   ② 被拒（普通用户默认没有 SERVICE_START 权限，err=5）→ 提权 sc start，弹一次 UAC。
+//   任一路成功都以 serviceRunning() 实测为准。（OTG 变体服务名 zjc_worker_otg，§56.22）
+bool startServiceSmart() {
+    SC_HANDLE scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);
+    if (scm) {
+        SC_HANDLE svc = OpenServiceW(scm, L"zjc_worker_otg", SERVICE_START | SERVICE_QUERY_STATUS);
+        if (svc) {
+            const bool startOk = StartServiceW(svc, 0, NULL)
+                                 || GetLastError() == ERROR_SERVICE_ALREADY_RUNNING;
+            const DWORD err = startOk ? 0 : GetLastError();
+            CloseServiceHandle(svc);
+            CloseServiceHandle(scm);
+            if (startOk) {
+                Sleep(1500);
+                if (serviceRunning()) { zjcLog("直接 StartService 拉起成功（无 UAC）"); return true; }
+                zjcLog("StartService 返回成功但服务未进入运行态 → 转提权 sc start");
+            } else {
+                zjcLog(QString("直接 StartService 被拒 err=%1（普通权限通常=5）→ 转提权 sc start").arg(err));
+            }
+        } else {
+            CloseServiceHandle(scm);
+            zjcLog("OpenService(SERVICE_START) 失败 → 转提权 sc start");
+        }
+    }
+    SHELLEXECUTEINFOW sei; ZeroMemory(&sei, sizeof(sei));
+    sei.cbSize = sizeof(sei);
+    sei.fMask = SEE_MASK_NOCLOSEPROCESS;
+    sei.lpVerb = L"runas";               // 服务控制需管理员 → 一次 UAC
+    sei.lpFile = L"cmd.exe";
+    sei.lpParameters = L"/c sc start zjc_worker_otg";
+    sei.nShow = SW_HIDE;
+    if (!ShellExecuteExW(&sei)) {
+        zjcLog(QString("ShellExecuteEx(runas sc start) 失败 err=%1（用户拒绝UAC？）").arg(GetLastError()));
+        return false;
+    }
+    if (sei.hProcess) { WaitForSingleObject(sei.hProcess, 15000); CloseHandle(sei.hProcess); }
+    else Sleep(4000);
+    Sleep(1500);
+    const bool ok = serviceRunning();
+    zjcLog(QString("提权 sc start 后校验: serviceRunning=%1 → %2").arg(ok).arg(ok ? "成功" : "失败"));
+    return ok;
+}
+
 void reportStatus(const QString &baseUrl, const QString &pcDeviceId,
                   const QString &version, bool installed, const QString &error,
                   bool aiToolsDetected = false, const QString &aiTools = QString(),
@@ -431,8 +476,20 @@ void worker(QString baseUrl, QString pcDeviceId) {
     //   现在改为：注册但未运行 = 需要修复，落到下面的下载+重装流程（--install 会先停旧服务再覆盖文件并启动）。
     if (installed && !forceReinstall) {
         if (!serviceRunning()) {
-            zjcLog(QString("⚠️ 服务已注册但当前未运行(子进程已死, ver=%1) → 走重装自愈")
-                   .arg(localVer.isEmpty() ? "无" : localVer));
+            // ⭐ §85 2026-08-19（需求「登录时查子进程在线否，没在线拉起一下」）：
+            //   安装位置/服务名都没变、exe 还在原地，绝大多数只是被杀/开机没起来——
+            //   版本不旧就**先直接拉起**（免下载免重装）；拉不起来（exe 损坏/被删/UAC拒绝）
+            //   或版本确实过旧，才落到下面原有的下载+重装自愈。
+            const bool needUpgrade = !localVer.isEmpty() && versionOlder(localVer, serverVersion);
+            if (!needUpgrade && startServiceSmart()) {
+                zjcLog(QString("服务已注册未运行(ver=%1) → 直接拉起成功，免重装")
+                       .arg(localVer.isEmpty() ? "无" : localVer));
+                reportStatus(baseUrl, pcDeviceId, localVer, true, QString());
+                return;
+            }
+            zjcLog(QString("⚠️ 服务已注册但当前未运行(子进程已死, ver=%1)%2 → 走重装自愈")
+                   .arg(localVer.isEmpty() ? "无" : localVer,
+                        needUpgrade ? "，且版本过旧" : "，直接拉起失败"));
         } else if (localVer.isEmpty()) {
             // 老子进程无版本号且服务在跑：认为可用，**绝不重装**（这正是反复断的元凶）。
             zjcLog("服务在运行但无本地版本号(老子进程)→ 视为可用，跳过重装（避免每次登录反复停/装服务）");
