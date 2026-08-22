@@ -475,7 +475,9 @@ Rectangle {
                 // (b) 画面确实停了 → 走统一收口（停流+清屏+改状态）。
                 //     ⚠️ 必须带 fps 条件：P2P 直连的媒体不经服务器，STOMP 抖一下断了
                 //     但画面还在正常播时不能把人家的画面清掉；那种情况只点灯、不清屏。
-                if (hbAgeMs > 6000 && currentPlayingFps() === 0
+                // ⭐ §86：6s→10s。bug2 实测设备侧 7s 网络抖动（心跳+媒体同断）踩线触发清屏断流，
+                //   而抖动过后本可无感续播；杀进程场景只是晚 4 秒清屏，无伤大雅。
+                if (hbAgeMs > 10000 && currentPlayingFps() === 0
                         && (publishState === 1 || videoSurfaceDirty)) {
                     markDeviceOffline("心跳超时 " + hbAgeMs + "ms 且无画面帧", "设备已离线")
                 }
@@ -5421,6 +5423,7 @@ Rectangle {
         pairedIosDisplay = ""   // 切设备/退登录清昵称，新登录时重设，避免残留上一台
         playRecoverStreak = 0   // §54：主动清场 = 会话结束，自愈退避从头算
         lastPlayAttemptMs = 0
+        noFrameSinceMs = 0      // §86：无画面计时随会话清零，防拿上一台设备的时刻判新设备
         p2pSingleModeOccupied = false   // ⭐ 2026-08-01：切设备/退登录，单人占用作废
         resetDeviceReportedStats()
         liveInfoFps.text = "FPS: --"
@@ -5447,9 +5450,16 @@ Rectangle {
     //   一次性快速路径（publishState 0→1、mode/codec/streamKey 变化）全部保留，对账只兜异常。
     property double lastPlayAttemptMs: 0   // 最近一次发起拉流的时刻（playP2P/playWebRTC 入口更新）
     property int playRecoverStreak: 0      // 连续自愈重建次数（出画面即清零），驱动退避
+    // ⭐ §86（2026-08-21）：fps 首次归零的时刻（0=当前有画面）。「无画面持续多久」必须从这里起算——
+    //   旧代码拿 lastPlayAttemptMs（上次发起拉流的时刻）当基准：正常播 276s 后 fps 归零 1 秒，
+    //   276s ≥ 8s 立刻成立 → 网络小抖动秒触发 stopAll+整会话重建（黑屏 5~7s），
+    //   比不重建（NACK/PLI 1~2s 无感恢复）体验差得多。8.3.7 稳定是因为 §65 之前
+    //   receiveFps 断流后冻结非零、本对账从不触发；§65 让 fps 如实归零后此 bug 被激活。
+    property double noFrameSinceMs: 0
 
     function reconcilePlayback(fps) {
         if (fps > 0) {
+            noFrameSinceMs = 0
             if (playRecoverStreak !== 0) {
                 console.log("✅ [自愈对账] 画面已恢复（自愈重建 " + playRecoverStreak + " 次后出画）")
                 playRecoverStreak = 0
@@ -5461,13 +5471,19 @@ Rectangle {
         if (deviceStatus !== "") return     // 睡眠/唤醒过渡态不介入
         if (p2pSingleModeOccupied) return   // ⭐ 2026-08-01：被单人模式拒绝，不自动重连（否则反复被拒卡死）
         var now = Date.now()
+        if (noFrameSinceMs <= 0) { noFrameSinceMs = now; return }
         if (lastPlayAttemptMs <= 0) { lastPlayAttemptMs = now; return }
-        // 退避：首次 8s（信令层常驻循环没在 8s 内连上 = 循环卡死，整会话换 epoch 重建），
+        // ⭐ §86：无画面须**持续 5s** 才考虑重建——1~3s 的网络抖动交给 RTP 层 NACK/PLI 自愈，
+        //   重建反而把 1 秒的卡顿放大成 5~7 秒黑屏（bug1/bug2 实测每 30~90s 重建一次的元凶）。
+        var stallMs = now - noFrameSinceMs
+        if (stallMs < 5000) return
+        // 退避：距上次发起拉流至少 8s（信令层常驻循环没在 8s 内连上 = 循环卡死，换 epoch 重建），
         // 之后逐次 +4s，封顶 30s——防重建风暴，同时保证异常也能自动收敛。
         var waitMs = Math.min(8000 + playRecoverStreak * 4000, 30000)
         if (now - lastPlayAttemptMs < waitMs) return
         playRecoverStreak++
-        console.log("🔁 [自愈对账] 设备在推流但 " + Math.round((now - lastPlayAttemptMs) / 1000)
+        noFrameSinceMs = 0                  // 重建后无画面时长从头计
+        console.log("🔁 [自愈对账] 设备在推流但已持续 " + Math.round(stallMs / 1000)
                     + "s 无画面 → 第 " + playRecoverStreak + " 次整会话重建（mode="
                     + (connectMode === 1 ? "P2P" : "SRS") + " stream=" + currentStream + "）")
         stopAll()
