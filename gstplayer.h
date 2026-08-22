@@ -94,6 +94,9 @@ public:
     int registerH264ValidRange(qint64 start, qint64 end) override;
     void updateH264ValidRange(int id, qint64 start, qint64 end) override;
     void unregisterH264ValidRange(int id) override;
+    // §88：观看会话结束（切设备/切账号/退登录）时显式清截图/慢放帧库。
+    //   管线重建（看门狗自愈/心跳清屏重连/切网重协商）不再清帧库——否则截图格子全成假图。
+    Q_INVOKABLE void resetCaptureSession();
 
     QImage grabCurrentFrame() override;
 

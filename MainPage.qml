@@ -5415,6 +5415,9 @@ Rectangle {
         }
         stopAll()
         clearVideoSurface()
+        // §88：截图/慢放帧库随「观看会话」清场——只在这里清（切设备/切账号/退登录）。
+        //   管线内部重建（看门狗自愈/心跳清屏重连）不再清帧库，断流重连后旧截图不再变假图。
+        gstPlayer.resetCaptureSession()
         publishState = 0
         isConnecting = false
         currentStream = ""

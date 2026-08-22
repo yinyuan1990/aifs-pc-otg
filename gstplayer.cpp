@@ -1633,7 +1633,18 @@ void GstPlayer::destroyPipeline()
     m_frameIndex = 0;
     m_naluFrameIndex.store(0, std::memory_order_release);
     m_firstFrame = false;
-    resetH264FrameState();
+    // §88：管线重建不再 resetH264FrameState()——看门狗自愈/心跳清屏重连都会经过这里，
+    //   原来把帧索引清零+保护区间全删，紧接着 createH264FrameBranch 换会话前缀并后台删光
+    //   旧前缀 .h264 文件，而 QML 刻意保留截图格子（"断线重连后保留抓拍"）→ 客户看到的
+    //   截图全成了无底层数据的假图（缩略图是解码缓存残影，切帧/放大/慢放全空；更坏的是
+    //   帧号从 0 重计，几分钟后旧截图会解出新会话的错误画面）。帧库生命周期改随「观看会话」，
+    //   仅 resetCaptureSession()（QML resetStreamStateForSwitch：切设备/切账号/退登录）才清。
+    //   这里只清 pending 发号队列：垂死管线 probe 已发号但 appsink 未消费的号，
+    //   不能留给新管线首帧错领（错位虽不致命，但帧号-内容对应会漂移几帧）。
+    {
+        QMutexLocker frameLock(&m_h264FrameMutex);
+        m_pendingH264FrameIndexes.clear();
+    }
 
     destroyEncodePipeline();
 }
@@ -1985,29 +1996,34 @@ bool GstPlayer::createH264FrameBranch()
 
     m_h264FrameDirectory = QCoreApplication::applicationDirPath() + "/captures/frames";
     QDir().mkpath(m_h264FrameDirectory);
-    m_h264SessionPrefix = QString("s_%1").arg(QDateTime::currentMSecsSinceEpoch());
-    // ⭐ 清理上一会话残留的 .h264 帧：文件名带 session 前缀(s_<时间戳>_)，重连/重建管线后
-    //    旧前缀文件无人引用，原清理只遍历内存集合够不到它们 → 会无限累积(无盘网吧网络目录越来越大越来越卡)。
-    // §23.16：清理整体移到后台线程——原来在主线程枚举+逐个删除上百文件，freeze_diag 实锤单次挂主线程
-    //    1.4~2.0s（createH264FrameBranch 在主线程被调用）。先定好本会话前缀，后台只删「非本前缀」的
-    //    孤儿文件，与本会话并发写入的新帧天然无冲突。
-    {
-        const QString dir = m_h264FrameDirectory;
-        const QString keepPrefix = m_h264SessionPrefix;
-        QThreadPool::globalInstance()->start([dir, keepPrefix]() {
-            QDir frameDir(dir);
-            const QStringList staleFrames = frameDir.entryList(QStringList() << "*.h264", QDir::Files);
-            int removed = 0;
-            for (const QString &f : staleFrames) {
-                if (f.startsWith(keepPrefix)) continue;
-                if (frameDir.remove(f)) removed++;
-            }
-            if (removed > 0) {
-                qDebug() << "🗑️ H.264 帧支路: 后台清理上一会话残留" << removed << "个 .h264 文件";
-            }
-        });
+    // §88：会话前缀/帧库只在「新观看会话」初始化（首次建管线，或 resetCaptureSession 之后）。
+    //   同一会话内的管线重建（看门狗自愈/心跳清屏重连/切网重协商）沿用旧前缀、帧号继续递增——
+    //   已有截图/慢放引用的帧文件不删、保护区间不丢，断流重连后截图依然可切帧/放大/慢放。
+    if (m_h264SessionPrefix.isEmpty()) {
+        m_h264SessionPrefix = QString("s_%1").arg(QDateTime::currentMSecsSinceEpoch());
+        // ⭐ 清理上一会话残留的 .h264 帧：文件名带 session 前缀(s_<时间戳>_)，换会话后
+        //    旧前缀文件无人引用，原清理只遍历内存集合够不到它们 → 会无限累积(无盘网吧网络目录越来越大越来越卡)。
+        // §23.16：清理整体移到后台线程——原来在主线程枚举+逐个删除上百文件，freeze_diag 实锤单次挂主线程
+        //    1.4~2.0s（createH264FrameBranch 在主线程被调用）。先定好本会话前缀，后台只删「非本前缀」的
+        //    孤儿文件，与本会话并发写入的新帧天然无冲突。
+        {
+            const QString dir = m_h264FrameDirectory;
+            const QString keepPrefix = m_h264SessionPrefix;
+            QThreadPool::globalInstance()->start([dir, keepPrefix]() {
+                QDir frameDir(dir);
+                const QStringList staleFrames = frameDir.entryList(QStringList() << "*.h264", QDir::Files);
+                int removed = 0;
+                for (const QString &f : staleFrames) {
+                    if (f.startsWith(keepPrefix)) continue;
+                    if (frameDir.remove(f)) removed++;
+                }
+                if (removed > 0) {
+                    qDebug() << "🗑️ H.264 帧支路: 后台清理上一会话残留" << removed << "个 .h264 文件";
+                }
+            });
+        }
+        resetH264FrameState();
     }
-    resetH264FrameState();
     qDebug() << "✅ H.264 独立帧保存支路:" << m_h264FrameEncoderName << "目录:" << m_h264FrameDirectory << "前缀:" << m_h264SessionPrefix;
     return true;
 }
@@ -2122,10 +2138,22 @@ void GstPlayer::resetH264FrameState()
     m_pendingH264FrameIndexes.clear();
     m_h264AvailableFrames.clear();
     m_h264ValidRanges.clear();
-    m_nextH264ValidRangeId = 1;
+    // §88：rangeId 计数器**不再归 1**——CaptureManager 的截图项跨会话持有旧 id，
+    //   归 1 会让新会话发出的 id 与旧截图撞号：删旧截图时 unregister 把新截图的
+    //   保护区间误摘掉 → 新截图的帧被滚动清理提前删除。id 全程单调即可。
     m_nextH264FrameIndex.store(0, std::memory_order_release);
     m_oldestH264Frame.store(-1, std::memory_order_release);
     m_newestH264Frame.store(-1, std::memory_order_release);
+}
+
+// §88：观看会话结束（切设备/切账号/退出登录，QML resetStreamStateForSwitch 调用）——
+//   清帧库索引/保护区间，并作废会话前缀；下次建管线时 createH264FrameBranch
+//   重新起前缀并后台清理旧前缀遗留文件。管线重建（同会话）不走这里。
+void GstPlayer::resetCaptureSession()
+{
+    resetH264FrameState();
+    m_h264SessionPrefix.clear();
+    qDebug() << "🧹 §88 观看会话清场：截图/慢放帧库已清，下次拉流换新会话前缀";
 }
 
 void GstPlayer::queuePendingH264FrameIndex(qint64 frameIndex)
