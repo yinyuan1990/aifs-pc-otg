@@ -3,7 +3,7 @@ chcp 936 >nul
 setlocal enabledelayedexpansion
 
 echo ========================================
-echo    ����Otg�汾 (PhoenixOTG) �������
+echo    ����Otg�汾 (PhoenixOTG) �������?
 echo ========================================
 echo.
 
@@ -21,7 +21,7 @@ set INSTALLER_OUTPUT=D:\javafx\Acard\aic\aifs-pc-otg\installer_output
 set VCREDIST_PATH=D:\javafx\Acard\aic\aifs-pc-otg\redist\vc_redist.x64.exe
 set VCREDIST_URL=https://aka.ms/vs/17/release/vc_redist.x64.exe
 
-:: ��� Release �汾�Ƿ����
+:: ���?Release �汾�Ƿ����?
 if not exist "%BUILD_DIR%\PhoenixOTG.exe" (
     echo [����] δ�ҵ� Release �汾�� PhoenixOTG.exe
     echo ������ Qt Creator ���л��� Release ģʽ�����룡
@@ -30,13 +30,13 @@ if not exist "%BUILD_DIR%\PhoenixOTG.exe" (
     exit /b 1
 )
 
-echo [0/8] ��� VC++ ���п�...
+echo [0/8] ���?VC++ ���п�...
 if not exist "%VCREDIST_PATH%" (
     echo     δ�ҵ����� VC++ ���п⣬��������...
     if not exist "D:\javafx\Acard\aic\aifs-pc-otg\redist" mkdir "D:\javafx\Acard\aic\aifs-pc-otg\redist"
     powershell -Command "Invoke-WebRequest -Uri '%VCREDIST_URL%' -OutFile '%VCREDIST_PATH%'"
     if exist "%VCREDIST_PATH%" (
-        echo     VC++ ���п�������ɣ�
+        echo     VC++ ���п�������ɣ�?
     ) else (
         echo     [����] VC++ ���п�����ʧ�ܣ����ֶ����ز����õ�:
         echo     %VCREDIST_PATH%
@@ -68,11 +68,11 @@ if defined VC_CRT (
     echo     VC Redist folder not found, copied CRT from System32 fallback
 )
 
-echo [3/8] ���� Qt �������������Ҫһ��ʱ�䣩...
+echo [3/8] ���� Qt �������������Ҫһ��ʱ��?..
 "%QT_DIR%\windeployqt.exe" --release --qmldir D:\javafx\Acard\aic\aifs-pc-otg "%RELEASE_DIR%\PhoenixOTG.exe" >nul 2>&1
 
 echo [3.5/8] ���� Qt WebEngine ����ʱ���ں˲�����ͼ�����κ�������װ Qt ���ɲ⣩...
-:: WebEngine ������ͨ DLL ������Chromium �ӽ��� QtWebEngineProcess.exe + resources(*.pak/icudtl.dat/v8) + locales �����ֶ������
+:: WebEngine ������ͨ DLL ������Chromium �ӽ��� QtWebEngineProcess.exe + resources(*.pak/icudtl.dat/v8) + locales �����ֶ������?
 :: ����ûװ Qt �Ļ����ϡ��ں˲��ԡ���ͼֱ�Ӻ���/�򲻿���������ʽ����ȫ�ף�ȱʧ��������������
 set QT_ROOT=D:\javafx\Acard\aic\qt\6.10.3\msvc2022_64
 if exist "%QT_DIR%\Qt6WebEngineCore.dll" (
@@ -93,10 +93,10 @@ if exist "%QT_DIR%\Qt6WebEngineCore.dll" (
     copy "%QT_ROOT%\resources\qtwebengine_resources_200p.pak" "%RELEASE_DIR%\resources\" >nul 2>&1
     copy "%QT_ROOT%\resources\qtwebengine_devtools_resources.pak" "%RELEASE_DIR%\resources\" >nul 2>&1
     copy "%QT_ROOT%\resources\v8_context_snapshot.bin" "%RELEASE_DIR%\resources\" >nul 2>&1
-    :: 4) ���԰���ȱ�� Chromium ������澯/���ֹ����쳣��
+    :: 4) ���԰���ȱ�� Chromium �������?���ֹ����쳣��
     if not exist "%RELEASE_DIR%\translations\qtwebengine_locales" mkdir "%RELEASE_DIR%\translations\qtwebengine_locales"
     xcopy "%QT_ROOT%\translations\qtwebengine_locales\*.pak" "%RELEASE_DIR%\translations\qtwebengine_locales\" /Q /Y >nul 2>&1
-    :: 5) QML ģ�飨windeployqt ��һ����ȫ����ʽ�� release �����
+    :: 5) QML ģ�飨windeployqt ��һ����ȫ����ʽ�� release �����?
     if not exist "%RELEASE_DIR%\QtWebEngine" mkdir "%RELEASE_DIR%\QtWebEngine"
     copy "%QT_ROOT%\qml\QtWebEngine\qmldir" "%RELEASE_DIR%\QtWebEngine\" >nul 2>&1
     copy "%QT_ROOT%\qml\QtWebEngine\plugins.qmltypes" "%RELEASE_DIR%\QtWebEngine\" >nul 2>&1
@@ -112,7 +112,7 @@ if exist "%QT_DIR%\Qt6WebEngineCore.dll" (
         echo     [����] QtWebEngineProcess.exe ����ʧ�ܣ��ں˲�����ͼ�����޷���
     )
 ) else (
-    echo     [��ʾ] δ�ҵ� Qt6WebEngineCore.dll��Qt δװ WebEngine ��������δ���� HAVE_KERNEL_TEST���������� WebEngine ���
+    echo     [��ʾ] δ�ҵ� Qt6WebEngineCore.dll��Qt δװ WebEngine ��������δ���� HAVE_KERNEL_TEST���������� WebEngine ���?
 )
 
 echo [4/8] ���� VC++ ���пⰲװ����...
@@ -127,7 +127,7 @@ echo [5/8] ���� FFmpeg DLL����ɫ�������ã�...
 rem ͨ�临��ȫ�� ffmpeg DLL����д���汾�ţ��������������ֶԲ���ȱ DLL��
 copy "%FFMPEG_BIN%\av*.dll" "%RELEASE_DIR%\" >nul 2>&1
 copy "%FFMPEG_BIN%\sw*.dll" "%RELEASE_DIR%\" >nul 2>&1
-rem �� exe �Ǿɰ汾(�������� ffmpeg)������Ŀ¼���ͬ�� DLL Ҳһ�����ϣ��汾���ף�
+rem �� exe �Ǿɰ汾(�������� ffmpeg)������Ŀ¼���ͬ��?DLL Ҳһ�����ϣ��汾���ף�
 copy "%BUILD_DIR%\av*.dll" "%RELEASE_DIR%\" >nul 2>&1
 copy "%BUILD_DIR%\sw*.dll" "%RELEASE_DIR%\" >nul 2>&1
 
@@ -164,7 +164,7 @@ copy "%GST_ROOT%\bin\intl-8.dll" "%RELEASE_DIR%\" >nul 2>&1
 copy "%GST_ROOT%\bin\ffi-7.dll" "%RELEASE_DIR%\" >nul 2>&1
 copy "%GST_ROOT%\bin\pcre2-8-0.dll" "%RELEASE_DIR%\" >nul 2>&1
 copy "%GST_ROOT%\bin\z-1.dll" "%RELEASE_DIR%\" >nul 2>&1
-:: GStreamer WebRTC ��� DLL
+:: GStreamer WebRTC ���?DLL
 copy "%GST_ROOT%\bin\gstsdp-1.0-0.dll" "%RELEASE_DIR%\" >nul 2>&1
 copy "%GST_ROOT%\bin\gstrtp-1.0-0.dll" "%RELEASE_DIR%\" >nul 2>&1
 copy "%GST_ROOT%\bin\gstwebrtc-1.0-0.dll" "%RELEASE_DIR%\" >nul 2>&1
@@ -180,16 +180,16 @@ copy "%GST_ROOT%\bin\gsttag-1.0-0.dll" "%RELEASE_DIR%\" >nul 2>&1
 copy "%GST_ROOT%\bin\gstnet-1.0-0.dll" "%RELEASE_DIR%\" >nul 2>&1
 copy "%GST_ROOT%\bin\gstsctp-1.0-0.dll" "%RELEASE_DIR%\" >nul 2>&1
 
-echo [8/8] ���� GStreamer ����������� + JPEG ���룩...
+echo [8/8] ���� GStreamer �����������?+ JPEG ���룩...
 :: ���� GStreamer ����ʱĿ¼�ṹ
 mkdir "%RELEASE_DIR%\runtime\gstreamer\bin" >nul 2>&1
 mkdir "%RELEASE_DIR%\runtime\gstreamer\lib\gstreamer-1.0" >nul 2>&1
 mkdir "%RELEASE_DIR%\runtime\gstreamer\libexec\gstreamer-1.0" >nul 2>&1
 
-:: ���Ʋ��ɨ����
+:: ���Ʋ��ɨ����?
 copy "%GST_ROOT%\libexec\gstreamer-1.0\gst-plugin-scanner.exe" "%RELEASE_DIR%\runtime\gstreamer\libexec\gstreamer-1.0\" >nul 2>&1
 
-:: ���ƺ��� DLL �� runtime Ŀ¼�������ʹ�ã�
+:: ���ƺ��� DLL �� runtime Ŀ¼�������ʹ�ã�?
 xcopy "%GST_ROOT%\bin\*.dll" "%RELEASE_DIR%\runtime\gstreamer\bin\" /Q /Y >nul 2>&1
 
 :: ���Ʊ���Ĳ��
@@ -206,14 +206,17 @@ copy "%GST_ROOT%\lib\gstreamer-1.0\gstautodetect.dll" "%RELEASE_DIR%\runtime\gst
 copy "%GST_ROOT%\lib\gstreamer-1.0\gsttypefindfunctions.dll" "%RELEASE_DIR%\runtime\gstreamer\lib\gstreamer-1.0\" >nul 2>&1
 copy "%GST_ROOT%\lib\gstreamer-1.0\gstplayback.dll" "%RELEASE_DIR%\runtime\gstreamer\lib\gstreamer-1.0\" >nul 2>&1
 copy "%GST_ROOT%\lib\gstreamer-1.0\gstvideofilter.dll" "%RELEASE_DIR%\runtime\gstreamer\lib\gstreamer-1.0\" >nul 2>&1
-:: ? ������������ؼ�����
+:: ? ������������ؼ�����?
 copy "%GST_ROOT%\lib\gstreamer-1.0\gstlibav.dll" "%RELEASE_DIR%\runtime\gstreamer\lib\gstreamer-1.0\" >nul 2>&1
 copy "%GST_ROOT%\lib\gstreamer-1.0\gstnvcodec.dll" "%RELEASE_DIR%\runtime\gstreamer\lib\gstreamer-1.0\" >nul 2>&1
 copy "%GST_ROOT%\lib\gstreamer-1.0\gstqsv.dll" "%RELEASE_DIR%\runtime\gstreamer\lib\gstreamer-1.0\" >nul 2>&1
 copy "%GST_ROOT%\lib\gstreamer-1.0\gstamfcodec.dll" "%RELEASE_DIR%\runtime\gstreamer\lib\gstreamer-1.0\" >nul 2>&1
 :: Media Foundation �����������mfh264enc IDR ���룩
 copy "%GST_ROOT%\lib\gstreamer-1.0\gstmediafoundation.dll" "%RELEASE_DIR%\runtime\gstreamer\lib\gstreamer-1.0\" >nul 2>&1
-:: WebRTC ���
+:: S90 soft H264 fallback plugins (x264enc/openh264enc): Lite/N Windows has no MediaFoundation
+copy "%GST_ROOT%\lib\gstreamer-1.0\gstx264.dll" "%RELEASE_DIR%\runtime\gstreamer\lib\gstreamer-1.0\" >nul 2>&1
+copy "%GST_ROOT%\lib\gstreamer-1.0\gstopenh264.dll" "%RELEASE_DIR%\runtime\gstreamer\lib\gstreamer-1.0\" >nul 2>&1
+:: WebRTC ���?
 copy "%GST_ROOT%\lib\gstreamer-1.0\gstwebrtc.dll" "%RELEASE_DIR%\runtime\gstreamer\lib\gstreamer-1.0\" >nul 2>&1
 copy "%GST_ROOT%\lib\gstreamer-1.0\gstrtp.dll" "%RELEASE_DIR%\runtime\gstreamer\lib\gstreamer-1.0\" >nul 2>&1
 copy "%GST_ROOT%\lib\gstreamer-1.0\gstrtpmanager.dll" "%RELEASE_DIR%\runtime\gstreamer\lib\gstreamer-1.0\" >nul 2>&1
@@ -226,10 +229,13 @@ copy "%GST_ROOT%\lib\gstreamer-1.0\gstsrt.dll" "%RELEASE_DIR%\runtime\gstreamer\
 copy "%GST_ROOT%\lib\gstreamer-1.0\gstmpegtsdemux.dll" "%RELEASE_DIR%\runtime\gstreamer\lib\gstreamer-1.0\" >nul 2>&1
 :: SRT ����ʱ�⣨��ʽ���׵�������ͬ������ xcopy bin ʧ��ʱȱ libsrt��
 copy "%GST_ROOT%\bin\libsrt.dll" "%RELEASE_DIR%\" >nul 2>&1
+:: S90 soft encoder runtime libs (wildcard, version-proof)
+copy "%GST_ROOT%\bin\x264-*.dll" "%RELEASE_DIR%\" >nul 2>&1
+copy "%GST_ROOT%\bin\openh264-*.dll" "%RELEASE_DIR%\" >nul 2>&1
 
 echo.
 echo ========================================
-echo    �ļ�������ɣ���zjc_worker_otg �ѷ��룬�� PC �˵�¼��� CDN �Զ���װ���������
+echo    �ļ�������ɣ���zjc_worker_otg �ѷ��룬�� PC �˵�¼���?CDN �Զ���װ���������?
 echo ========================================
 echo.
 
@@ -246,7 +252,7 @@ if not defined APP_VERSION (
     if exist "%RELEASE_DIR%\manifest.json" (
         echo     manifest.json ������
         echo     [�ϴ�1] release ����Ŀ¼ ���� http://dl.147258yql.cn/updatesoft/otg/v!APP_VERSION!/
-        echo     [�ϴ�2] yqlversion_new.json ��� changelog �󸲸� updatesoft/otg/yqlversion.json
+        echo     [�ϴ�2] yqlversion_new.json ���?changelog �󸲸� updatesoft/otg/yqlversion.json
     ) else (
         echo     [����] manifest.json ����ʧ�ܣ�
     )
@@ -273,14 +279,14 @@ set "SETUP_VER=1.0.0"
 if defined APP_VERSION set "SETUP_VER=%APP_VERSION%"
 set "OUT_EXE=%INSTALLER_OUTPUT%\PhoenixOTG_Setup_%SETUP_VER%.exe"
 
-:: ����Ƿ�װ�� Inno Setup
+:: ����Ƿ�װ��?Inno Setup
 if exist %INNO_SETUP% (
     echo [9/9] ���ɰ�װ����...
 
-    :: �������Ŀ¼
+    :: �������Ŀ�?
     if not exist "%INSTALLER_OUTPUT%" mkdir "%INSTALLER_OUTPUT%"
 
-    :: ��43 ��"�ٳɹ�"������ǰ��ͬ���ɰ�װ��Ų�� .old������� rc=0 �����ļ����ڲ���ɹ���
+    :: ��43 ��"�ٳɹ�"������ǰ��ͬ���ɰ�װ��Ų�� .old�������?rc=0 �����ļ����ڲ���ɹ���?
     if exist "%OUT_EXE%.old" del "%OUT_EXE%.old" >nul 2>&1
     if exist "%OUT_EXE%" ren "%OUT_EXE%" "PhoenixOTG_Setup_%SETUP_VER%.exe.old" >nul 2>&1
 
@@ -291,8 +297,8 @@ if exist %INNO_SETUP% (
     if not "!ISCC_RC!"=="0" (
         echo.
         echo [����] ��װ��������ʧ�ܣ�ISCC �˳���=!ISCC_RC!
-        echo �����Ϸ��� ISCC ����� Error �У�����ԭ��Դ�ļ�ȱʧ / ɱ���������� Output Ŀ¼��
-        echo ������� %INSTALLER_OUTPUT% ����ɱ�������ų�������ԣ���
+        echo �����Ϸ��� ISCC �����?Error �У�����ԭ��Դ�ļ�ȱʧ / ɱ���������� Output Ŀ¼��
+        echo �������?%INSTALLER_OUTPUT% ����ɱ�������ų�������ԣ���?
         echo ��һ�氲װ��������: %OUT_EXE%.old
         echo.
         echo ����Ŀ¼�����ֶ�ѹ���ַ���: %RELEASE_DIR%
@@ -319,7 +325,7 @@ if exist %INNO_SETUP% (
     )
 ) else (
     echo.
-    echo [��ʾ] δ��⵽ Inno Setup��������װ�������ɡ�
+    echo [��ʾ] δ���?Inno Setup��������װ�������ɡ�
     echo.
     echo �������ɰ�װ�����밲װ Inno Setup 6:
     echo https://jrsoftware.org/isdl.php
@@ -329,12 +335,12 @@ if exist %INNO_SETUP% (
     echo ========================================
     echo.
     echo ����Ŀ¼: %RELEASE_DIR%
-    echo GStreamer ���: %RELEASE_DIR%\runtime\gstreamer\
+    echo GStreamer ���? %RELEASE_DIR%\runtime\gstreamer\
     echo.
     :: �򿪷���Ŀ¼
     explorer "%RELEASE_DIR%"
 )
 
 echo.
-echo ��������˳�...
+echo ��������˳�?..
 pause >nul
