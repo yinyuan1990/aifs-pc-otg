@@ -38,7 +38,7 @@ HttpClient* HttpClient::instance()
 HttpClient::HttpClient(QObject *parent)
     : QObject(parent)
     , m_manager(new QNetworkAccessManager(this))
-    , m_baseUrl("https://api.147258yql.cn")
+    , m_baseUrl("https://api.jinfenghuang.vip")
 {
     // ⭐ 构造时立即生成设备ID，确保登录页面能显示
     m_pcDeviceId = generatePcDeviceId();
@@ -96,7 +96,7 @@ void HttpClient::setAuthToken(const QString &token)
 QString HttpClient::websocketUrl() const
 {
     // WebSocket 使用独立域名
-    return "wss://ws.147258yql.cn/ws";
+    return "wss://ws.jinfenghuang.vip/ws";
 }
 
 QString HttpClient::buildUrl(const QString &endpoint) const

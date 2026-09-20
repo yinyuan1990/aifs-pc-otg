@@ -6,7 +6,7 @@ REM  Build zjc_worker_otg (OTG variant, paired with PhoenixOTG; section 56.22).
 REM
 REM  Just double-click. Outputs in build\ :
 REM      zjc_worker_otg.exe   WinDivert.dll   WinDivert64.sys
-REM  Upload those 3 files to  http://dl.147258yql.cn/updatesoft/zjcotg/
+REM  Upload those 3 files to  http://dl.jinfenghuang.vip/updatesoft/zjcotg/
 REM  then set the release version in the admin panel "zjc_worker" page (OTG tab).
 REM
 REM  Requires Visual Studio 2022 (C++ desktop workload + CMake tools).
@@ -103,7 +103,7 @@ echo Version:
 build\zjc_worker_otg.exe --version
 echo.
 echo.
-echo Upload the 3 files above to http://dl.147258yql.cn/updatesoft/zjcotg/
+echo Upload the 3 files above to http://dl.jinfenghuang.vip/updatesoft/zjcotg/
 
 :end
 echo.

@@ -10,7 +10,7 @@
 #   2. <script dir>\yqlversion_new.json - template for updatesoft/yqlversion.json
 #
 # Publish: upload the whole ReleaseDir (including manifest.json) to
-#          http://dl.147258yql.cn/updatesoft/v<Version>/
+#          http://dl.jinfenghuang.vip/updatesoft/v<Version>/
 #          then update updatesoft/yqlversion.json from yqlversion_new.json
 #
 # NOTE: keep this file ASCII-only. Windows PowerShell 5.1 parses BOM-less
@@ -21,7 +21,7 @@ param(
     [Parameter(Mandatory=$true)][string]$Version,
     # OTG variant (see section 56.22): everything lives under updatesoft/otg/,
     # fully separate from the main-version update tree.
-    [string]$BaseUrlTemplate = "http://dl.147258yql.cn/updatesoft/otg/v{VERSION}"
+    [string]$BaseUrlTemplate = "http://dl.jinfenghuang.vip/updatesoft/otg/v{VERSION}"
 )
 
 $ErrorActionPreference = "Stop"
@@ -66,7 +66,7 @@ $yql = [ordered]@{
     manifestUrl = "$baseUrl/manifest.json"
     changelog   = "1. TODO: fill in changelog"
     forceUpdate = $false
-    downloadUrl = "http://dl.147258yql.cn/updatesoft/otg/release.zip"
+    downloadUrl = "http://dl.jinfenghuang.vip/updatesoft/otg/release.zip"
     updateMode  = 1
 }
 $yqlPath = Join-Path $PSScriptRoot 'yqlversion_new.json'

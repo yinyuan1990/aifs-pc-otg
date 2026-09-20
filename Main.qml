@@ -45,7 +45,7 @@ ApplicationWindow {
         splashTimer.start()
         
         // §56.22 OTG 专版独立更新源（与主版 yqlversion.json 完全分开，互不覆盖）
-        AutoUpdater.setUpdateUrl("http://dl.147258yql.cn/updatesoft/otg/yqlversion.json?v=" + Date.now())
+        AutoUpdater.setUpdateUrl("http://dl.jinfenghuang.vip/updatesoft/otg/yqlversion.json?v=" + Date.now())
         AutoUpdater.checkForUpdates()
     }
     
