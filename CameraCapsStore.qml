@@ -37,6 +37,9 @@ QtObject {
     // 手机当前的热控推流上限（0=无限制）。"fps 拖了没反应"十有八九是它摁的
     property int deviceThermalCap: 0
 
+    // 总后台配置的 OTG 最高帧率（0=不限），设备随能力快照上报；采集/推送都不会超过它
+    property int fpsLimit: 0
+
     // 已向设备索要过能力快照的版本（防重复索要）
     property real requestedVersion: -1
 
@@ -106,6 +109,10 @@ QtObject {
         return 120
     }
 
+    function applyFpsLimit(fps) {
+        return fpsLimit > 0 ? Math.min(fps, fpsLimit) : fps
+    }
+
     function sizeLabel(s) {
         return s.maxFps > 0 ? (s.width + "x" + s.height + "@" + s.maxFps)
                             : (s.width + "x" + s.height)
@@ -158,6 +165,7 @@ QtObject {
         deviceBitratePct = caps.bitratePct || 0
         activeFormat     = caps.format     || ""
         deviceThermalCap = caps.thermalCapFps || 0
+        fpsLimit         = caps.fpsLimit || 0
         capsReady  = sizes.length > 0 || controls.length > 0
         requestedVersion = version
         console.log("📷 [能力] 已接收 OTG 能力快照: " + deviceName
@@ -195,6 +203,7 @@ QtObject {
         requestedVersion = -1
         sizes = []
         controls = []
+        fpsLimit = 0
         console.log("📷 [能力] 已清空（切换账号/设备）")
     }
 }

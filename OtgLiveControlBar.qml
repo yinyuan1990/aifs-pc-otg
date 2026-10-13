@@ -37,8 +37,9 @@ RowLayout {
 
     // 推流上限 = min(编码器该尺寸真实能力, 采集实际帧率)，都来自设备上报，不写死
     function fpsCap() {
-        return Math.max(1, Math.min(CameraCapsStore.pushFpsCapOfCurrentSize(),
-                                    CameraCapsStore.maxFpsOfCurrentSize()))
+        return Math.max(1, CameraCapsStore.applyFpsLimit(
+                               Math.min(CameraCapsStore.pushFpsCapOfCurrentSize(),
+                                        CameraCapsStore.maxFpsOfCurrentSize())))
     }
 
     function fpsOptions() {

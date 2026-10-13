@@ -56,8 +56,31 @@ Window {
     //   100%（按档位上限，如 640x400@240 → 4000kbps）画质余量才够高帧率分摊。
     readonly property int defaultBitratePct: 100
 
+    // 「自动曝光」「快门/曝光」放在码率下面单独一组，硬件可调项里不再重复出现
+    readonly property var exposureKeys: ["autoExposure", "shutter"]
+
+    function exposureControls() {
+        var out = []
+        for (var i = 0; i < exposureKeys.length; i++) {
+            var c = CameraCapsStore.control(exposureKeys[i])
+            if (c && c.supported) out.push(c)
+        }
+        return out
+    }
+
+    function otherControls() {
+        return CameraCapsStore.supportedControls().filter(function(c) {
+            return exposureKeys.indexOf(c.key) < 0
+        })
+    }
+
+    // 显示名以 PC 为准覆盖（设备上报的 label 不改，免得为改字发 APK）
+    function controlLabel(c) {
+        return c.key === "shutter" ? "超级帧率" : c.label
+    }
+
     function defaultPushFps() {
-        var cap = Math.min(pushFpsCeiling, CameraCapsStore.maxFpsOfCurrentSize())
+        var cap = CameraCapsStore.applyFpsLimit(Math.min(pushFpsCeiling, CameraCapsStore.maxFpsOfCurrentSize()))
         return Math.min(30, cap)      // 默认 30，设备撑不到就取它能给的
     }
 
@@ -293,7 +316,8 @@ Window {
                 minValue: 1
                 // 上限 = min(编码器该尺寸能编多快, 采集协商/实测值)——采集 fps 上限直接体现在
                 // 这根滑条的 max 上（采集已按该档最大自动协商，不需要用户再选）。
-                maxValue: Math.max(1, Math.min(panel.pushFpsCeiling, CameraCapsStore.maxFpsOfCurrentSize()))
+                maxValue: Math.max(1, CameraCapsStore.applyFpsLimit(
+                                          Math.min(panel.pushFpsCeiling, CameraCapsStore.maxFpsOfCurrentSize())))
                 value: panel.pushFps
                 unit: "fps"
                 onMoved: function(v) { panel.pushFps = v }
@@ -310,6 +334,7 @@ Window {
                 text: "　　　　采集 " + CameraCapsStore.maxFpsOfCurrentSize() + "fps"
                       + (CameraCapsStore.fpsIsKnown() ? "（协商/实测）" : "（未知，按30估）")
                       + " → 编码器上限 " + panel.pushFpsCeiling + "fps"
+                      + (CameraCapsStore.fpsLimit > 0 ? " → 后台最高 " + CameraCapsStore.fpsLimit + "fps" : "")
                       + (CameraCapsStore.deviceThermalCap > 0
                          ? " → ⚠️ 手机发热，热控当前压到 " + CameraCapsStore.deviceThermalCap + "fps（降温自动放开）"
                          : "")
@@ -346,28 +371,39 @@ Window {
                 color: "#90A4AE"
             }
 
+            // ===== 自动曝光 / 超级帧率（快门）：紧跟码率 =====
+            Repeater {
+                model: panel.exposureControls()
+                delegate: hwControlRow
+            }
+
             Rectangle {
                 Layout.fillWidth: true
                 Layout.preferredHeight: 1
                 color: "#E8F5E9"
-                visible: CameraCapsStore.supportedControls().length > 0
+                visible: panel.otherControls().length > 0
             }
 
             Text {
-                text: "硬件可调项（该摄像头支持 " + CameraCapsStore.supportedControls().length + " 项）"
+                text: "硬件可调项（该摄像头支持 " + panel.otherControls().length + " 项）"
                 font.family: "PingFang HK"
                 font.pixelSize: 13
                 color: "#263238"
-                visible: CameraCapsStore.supportedControls().length > 0
+                visible: panel.otherControls().length > 0
             }
 
             // ===== 硬件可调项：设备支持哪些就长哪些 =====
             Repeater {
-                model: CameraCapsStore.supportedControls()
+                model: panel.otherControls()
+                delegate: hwControlRow
+            }
+
+            Component {
+                id: hwControlRow
 
                 CameraControlRow {
                     Layout.fillWidth: true
-                    label: modelData.label
+                    label: panel.controlLabel(modelData)
                     ctrlType: modelData.type
                     minValue: modelData.min
                     maxValue: modelData.max

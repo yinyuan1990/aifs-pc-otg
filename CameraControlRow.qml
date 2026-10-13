@@ -44,6 +44,13 @@ Item {
     implicitHeight: 40
     Layout.fillWidth: true
 
+    Timer {
+        id: wheelCommitTimer
+        interval: 300
+        repeat: false
+        onTriggered: row.committed(Math.round(pctSlider.value))
+    }
+
     RowLayout {
         anchors.fill: parent
         spacing: 10
@@ -68,6 +75,21 @@ Item {
             Component.onCompleted: value = row.value
             onMoved: row.moved(Math.round(value))
             onPressedChanged: if (!pressed) row.committed(Math.round(value))
+
+            // 鼠标停在滑条上滚轮一格 = ±1；连续滚动只在停下 300ms 后下发一次，不刷屏
+            WheelHandler {
+                enabled: row.ctrlType === "pct"
+                onWheel: function(event) {
+                    var d = event.angleDelta.y !== 0 ? event.angleDelta.y : event.angleDelta.x
+                    if (d === 0) return
+                    var cur = Math.round(pctSlider.value)
+                    var nv = Math.max(row.minValue, Math.min(row.maxValue, cur + (d > 0 ? 1 : -1)))
+                    if (nv === cur) return
+                    pctSlider.value = nv
+                    row.moved(nv)
+                    wheelCommitTimer.restart()
+                }
+            }
         }
 
         // ===== 开关 =====
