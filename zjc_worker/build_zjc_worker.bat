@@ -79,7 +79,7 @@ echo   Configure (CMake, Release) ...
 echo ======================================
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 if errorlevel 1 (
-    echo [ERROR] CMake configure failed (scroll up for details)
+    echo [ERROR] CMake configure failed - scroll up for details
     goto :end
 )
 
@@ -89,7 +89,7 @@ echo   Building ...
 echo ======================================
 cmake --build build
 if errorlevel 1 (
-    echo [ERROR] Build failed (scroll up for details)
+    echo [ERROR] Build failed - scroll up for details
     goto :end
 )
 

@@ -26,7 +26,7 @@
 // §43 版本号单一来源：CMakeLists.txt 顶部 PHOENIX_APP_VERSION 经编译宏注入。
 // 兜底值仅在极端情况（未走 CMake 配置）下生效。
 #ifndef PHOENIX_VERSION_STR
-#define PHOENIX_VERSION_STR "1.0.3"
+#define PHOENIX_VERSION_STR "1.0.6"
 #endif
 
 static QString qlgxPath()
@@ -346,6 +346,10 @@ void AutoUpdater::downloadAndInstall()
 
         bool directExeDownload = (m_updateMode == 0 && !m_downloadExeUrl.isEmpty());
         bool exeRenamed        = (actualExeName.compare("Phoenix.exe", Qt::CaseInsensitive) != 0);
+        // §93h 随机改名解耦：运行名 != 规范名 PhoenixOTG.exe → 当前跑的是随机名，更新时旧随机 exe 要删掉，
+        //   始终落成并重启 PhoenixOTG.exe（由它启动时重新随机改名）。exeRenamed 仍保留给 §56.21 的
+        //   「不误杀同机主版 Phoenix.exe」判断，两者语义不同不可混用。
+        bool runningRandomName = (actualExeName.compare("PhoenixOTG.exe", Qt::CaseInsensitive) != 0);
 
         QString nAppDir  = QDir::toNativeSeparators(appDir);
         QString nTempDir = QDir::toNativeSeparators(tempDir);
@@ -401,7 +405,8 @@ void AutoUpdater::downloadAndInstall()
             if (directExeDownload) {
                 out << "echo  [2/3] 正在替换程序文件...\n";
                 out << "echo --- copy exe --- >> \"%ULOG%\"\n";
-                out << "copy /y \"" << nExeFile << "\" \"" << nExePath << "\" >> \"%ULOG%\" 2>&1\n";
+                // §93h 始终落成规范名 PhoenixOTG.exe（不再写成随机名）；旧随机 exe 由重启段删除
+                out << "copy /y \"" << nExeFile << "\" \"" << nAppDir << "\\PhoenixOTG.exe\" >> \"%ULOG%\" 2>&1\n";
                 out << "del \"" << nExeFile << "\" >nul 2>&1\n";
             } else if (m_updateMode == 0) {
                 out << "echo  [2/3] 正在解压程序包（请稍候）...\n";
@@ -418,10 +423,10 @@ void AutoUpdater::downloadAndInstall()
                 out << ")\n";
                 out << "del \"" << nZipFile << "\" >nul 2>&1\n";
                 writeUnnestFix();
-                if (exeRenamed) {
-                    out << "if exist \"" << nAppDir << "\\Phoenix.exe\" "
-                        << "ren \"" << nAppDir << "\\Phoenix.exe\" \"" << actualExeName << "\"\n";
-                }
+                // §93h 始终落成规范名 PhoenixOTG.exe：OTG 更新包内本就是 PhoenixOTG.exe（此 ren 通常空转，
+                //   仅兜底万一包内叫 Phoenix.exe）；绝不再 ren 成随机名（那会覆盖运行中随机 exe → 换入失败卡旧版）
+                out << "if exist \"" << nAppDir << "\\Phoenix.exe\" "
+                    << "ren \"" << nAppDir << "\\Phoenix.exe\" \"PhoenixOTG.exe\"\n";
             } else {
                 // 模式1 全量更新：直接解压到 appDir
                 out << "echo  [2/3] 正在解压完整更新包（请稍候，文件较大）...\n";
@@ -441,16 +446,19 @@ void AutoUpdater::downloadAndInstall()
                 out << ")\n";
                 out << "del \"" << nZipFile << "\" >nul 2>&1\n";
                 writeUnnestFix();
-                if (exeRenamed) {
-                    out << "if exist \"" << nAppDir << "\\Phoenix.exe\" "
-                        << "ren \"" << nAppDir << "\\Phoenix.exe\" \"" << actualExeName << "\"\n";
-                }
+                // §93h 始终落成规范名 PhoenixOTG.exe：OTG 更新包内本就是 PhoenixOTG.exe（此 ren 通常空转，
+                //   仅兜底万一包内叫 Phoenix.exe）；绝不再 ren 成随机名（那会覆盖运行中随机 exe → 换入失败卡旧版）
+                out << "if exist \"" << nAppDir << "\\Phoenix.exe\" "
+                    << "ren \"" << nAppDir << "\\Phoenix.exe\" \"PhoenixOTG.exe\"\n";
             }
 
             out << "echo.\n";
             out << "echo  [3/3] 更新完成，正在重启程序...\n";
             out << "echo.\n";
-            out << "start \"\" \"" << nExePath << "\"\n";
+            // §93h 删掉旧随机名 exe（若在跑随机名），始终重启 PhoenixOTG.exe；由它启动时重新随机改名，更新与改名解耦
+            if (runningRandomName)
+                out << "del /f /q \"" << nExePath << "\" >nul 2>&1\n";
+            out << "start \"\" \"" << nAppDir << "\\PhoenixOTG.exe\"\n";
             out << "del \"%~f0\"\n";
             batScript.close();
 
@@ -769,6 +777,8 @@ void AutoUpdater::finalizeManifestUpdate()
     QString tempDir       = QStandardPaths::writableLocation(QStandardPaths::TempLocation);
     QString batFile       = tempDir + "/update_phoenix.bat";
     bool exeRenamed       = (actualExeName.compare("Phoenix.exe", Qt::CaseInsensitive) != 0);
+    // §93h 随机改名解耦：运行名 != 规范名 PhoenixOTG.exe → 当前跑随机名，换入后删旧随机 exe 并重启 PhoenixOTG.exe
+    bool runningRandomName = (actualExeName.compare("PhoenixOTG.exe", Qt::CaseInsensitive) != 0);
 
     QString nAppDir   = QDir::toNativeSeparators(appDir);
     QString nStageDir = QDir::toNativeSeparators(m_stageDir);
@@ -831,16 +841,17 @@ void AutoUpdater::finalizeManifestUpdate()
         << "\" /E /R:10 /W:1 /NP >> \"%ULOG%\" 2>&1\n";
     out << "if errorlevel 8 goto copyfail\n";
     out << "rd /s /q \"" << nStageDir << "\" >nul 2>&1\n";
-    if (exeRenamed) {
-        // 用户改过 exe 名: 新 Phoenix.exe 换入后复制为实际名字
-        out << "if exist \"" << nAppDir << "\\Phoenix.exe\" (\n";
-        out << "    copy /y \"" << nAppDir << "\\Phoenix.exe\" \"" << nExePath << "\" >> \"%ULOG%\" 2>&1\n";
-        out << ")\n";
-    }
+    // §93h 始终落成规范名 PhoenixOTG.exe（stage 内本就是 PhoenixOTG.exe，此 ren 通常空转，仅兜底）；
+    //   绝不再把新包复制成旧随机名（那会覆盖运行中随机 exe → 换入失败卡旧版）
+    out << "if exist \"" << nAppDir << "\\Phoenix.exe\" "
+        << "ren \"" << nAppDir << "\\Phoenix.exe\" \"PhoenixOTG.exe\"\n";
 
     // [3/3] 重启
     out << "echo  [3/3] 更新完成，正在重启程序...\n";
-    out << "start \"\" \"" << nExePath << "\"\n";
+    // §93h 删掉旧随机名 exe（若在跑随机名），始终重启 PhoenixOTG.exe；由它启动时重新随机改名，更新与改名解耦
+    if (runningRandomName)
+        out << "del /f /q \"" << nExePath << "\" >nul 2>&1\n";
+    out << "start \"\" \"" << nAppDir << "\\PhoenixOTG.exe\"\n";
     out << "del \"%~f0\"\n";
     out << "exit /b 0\n";
 

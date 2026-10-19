@@ -12,6 +12,11 @@
 #include <QDeadlineTimer>
 #include <QTimer>
 #include <QTextStream>
+#include <QSettings>
+#include <QRandomGenerator>
+#include <QStandardPaths>
+#include <QDirIterator>
+#include <QWindow>
 #include <thread>
 #include <utility>
 #include <atomic>
@@ -20,6 +25,11 @@
 #include <windows.h>
 #include <tlhelp32.h>
 #include <shellapi.h>
+#include <shlobj.h>
+#include <objbase.h>
+#pragma comment(lib, "ole32.lib")
+#pragma comment(lib, "shell32.lib")
+#pragma comment(lib, "uuid.lib")
 #endif
 #include "videoplayer.h"
 // #include "webrtcclient.h"  // ⭐ 废弃，改用 GstPlayer WebRTCBin
@@ -496,8 +506,225 @@ void earlyLog(const char *msg) {
     }
 }
 
+#ifdef Q_OS_WIN
+// ============================================================================
+// §93d 主进程随机改名（对抗竞品按固定进程名 PhoenixOTG.exe 做流量整形 / taskkill）——
+//   与主版 Aifs 同构（§93d/§93f/§93h）。OTG 专版差异：exe 名 PhoenixOTG.exe、注册表
+//   键 HKCU\Software\Acard\PhoenixOTG、Run 值名 PhoenixOTG、窗口标题指纹「看家Otg版本」。
+//   随机名整名随机、跨机器无共同子串 → 竞品写死进程名的规则 miss。autoupdater.cpp 更新时
+//   始终落成 PhoenixOTG.exe 再由本函数改随机名（§93h 更新通道与改名解耦），故安全。
+//
+//   极度防御：任一步失败都直接 return，回退成正常以当前名字运行，绝不阻断启动。
+//   关闭开关：exe 同目录放一个空文件 no_random.flag 即停用本功能。
+// ============================================================================
+static void winEnsureRunKey(const QString &exePath) {
+    HKEY hKey;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER,
+            L"Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0, KEY_SET_VALUE, &hKey) == ERROR_SUCCESS) {
+        QString val = "\"" + QDir::toNativeSeparators(exePath) + "\"";
+        RegSetValueExW(hKey, L"PhoenixOTG", 0, REG_SZ,
+            reinterpret_cast<const BYTE*>(val.utf16()),
+            (DWORD)((val.size() + 1) * sizeof(wchar_t)));
+        RegCloseKey(hKey);
+    }
+}
+
+static void winRepointRunEntries(const QString &oldPath, const QString &newPath) {
+    const HKEY roots[2] = { HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE };
+    for (HKEY root : roots) {
+        HKEY hKey;
+        if (RegOpenKeyExW(root, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0,
+                KEY_QUERY_VALUE | KEY_SET_VALUE, &hKey) != ERROR_SUCCESS) continue;
+        DWORD idx = 0;
+        for (;;) {
+            wchar_t name[256]; BYTE data[2048];
+            DWORD nlen = 256, dlen = sizeof(data), type = 0;
+            LONG r = RegEnumValueW(hKey, idx++, name, &nlen, nullptr, &type, data, &dlen);
+            if (r == ERROR_NO_MORE_ITEMS) break;
+            if (r != ERROR_SUCCESS) continue;
+            if (type != REG_SZ && type != REG_EXPAND_SZ) continue;
+            QString d = QString::fromWCharArray(reinterpret_cast<wchar_t*>(data));
+            if (d.contains(oldPath, Qt::CaseInsensitive)) {
+                QString nd = d; nd.replace(oldPath, newPath, Qt::CaseInsensitive);
+                RegSetValueExW(hKey, name, 0, type,
+                    reinterpret_cast<const BYTE*>(nd.utf16()),
+                    (DWORD)((nd.size() + 1) * sizeof(wchar_t)));
+            }
+        }
+        RegCloseKey(hKey);
+    }
+}
+
+static void winRepointShortcuts(const QString &oldPath, const QString &newPath) {
+    if (FAILED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED))) return;
+    QStringList dirs;
+    dirs << QStandardPaths::writableLocation(QStandardPaths::DesktopLocation);
+    wchar_t buf[MAX_PATH];
+    const int csidls[] = { CSIDL_STARTUP, CSIDL_COMMON_STARTUP, CSIDL_COMMON_DESKTOPDIRECTORY,
+                           CSIDL_PROGRAMS, CSIDL_COMMON_PROGRAMS };
+    for (int c : csidls)
+        if (SHGetFolderPathW(nullptr, c, nullptr, 0, buf) == S_OK) dirs << QString::fromWCharArray(buf);
+
+    for (const QString &d : dirs) {
+        if (d.isEmpty() || !QDir(d).exists()) continue;
+        QDirIterator it(d, QStringList() << "*.lnk", QDir::Files, QDirIterator::Subdirectories);
+        while (it.hasNext()) {
+            QString lnk = it.next();
+            IShellLinkW *sl = nullptr;
+            if (FAILED(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER,
+                    IID_IShellLinkW, reinterpret_cast<void**>(&sl)))) continue;
+            IPersistFile *pf = nullptr;
+            if (SUCCEEDED(sl->QueryInterface(IID_IPersistFile, reinterpret_cast<void**>(&pf)))) {
+                if (SUCCEEDED(pf->Load(reinterpret_cast<const wchar_t*>(QDir::toNativeSeparators(lnk).utf16()), STGM_READWRITE))) {
+                    wchar_t tgt[MAX_PATH]; WIN32_FIND_DATAW fd;
+                    if (sl->GetPath(tgt, MAX_PATH, &fd, 0) == S_OK) {
+                        QString t = QString::fromWCharArray(tgt);
+                        if (t.compare(oldPath, Qt::CaseInsensitive) == 0) {
+                            sl->SetPath(reinterpret_cast<const wchar_t*>(QDir::toNativeSeparators(newPath).utf16()));
+                            pf->Save(reinterpret_cast<const wchar_t*>(QDir::toNativeSeparators(lnk).utf16()), TRUE);
+                        }
+                    }
+                }
+                pf->Release();
+            }
+            sl->Release();
+        }
+    }
+    CoUninitialize();
+}
+
+// §93d 生成「整名随机」的 exe 名：无固定前缀（连 MediaHost 这种可被通配/子串匹配的前缀都去掉），
+//   由随机词根组合 + 随机长度 hex 拼成，跨机器无共同子串 → 竞品无法按前缀/通配一条规则批量匹配。
+static QString genRandomExeName() {
+    static const char *stems[] = {
+        "core","svc","host","net","media","runtime","update","helper","sys","audio",
+        "video","cache","sync","task","engine","bridge","proxy","stream","service","daemon",
+        "monitor","agent","client","node","link","frame","render","codec","device","session",
+        "worker","launch","module","kernel","broker","portal","relay","probe","unit","panel"
+    };
+    const int N = (int)(sizeof(stems) / sizeof(stems[0]));
+    QRandomGenerator g = QRandomGenerator::securelySeeded();
+    QString base;
+    int words = 1 + (int)g.bounded(2);                 // 1~2 个词根
+    for (int i = 0; i < words; ++i) base += QString::fromLatin1(stems[g.bounded(N)]);
+    if (g.bounded(2)) base += "_";
+    quint32 h = g.generate();
+    int hexlen = 4 + (int)g.bounded(5);                // 4~8 位 hex
+    base += QString::number(h, 16).left(hexlen);
+    if (base.size() > 0 && g.bounded(2)) base[0] = base.at(0).toUpper();
+    return base + ".exe";
+}
+
+static void maybeRandomizeSelfWin(int argc, char *argv[]) {
+    wchar_t selfW[MAX_PATH];
+    if (!GetModuleFileNameW(nullptr, selfW, MAX_PATH)) return;
+    QString selfPath = QDir::toNativeSeparators(QString::fromWCharArray(selfW));
+    QFileInfo fi(selfPath);
+    QString dir  = fi.absolutePath();
+    QString base = fi.fileName();
+
+    // §93f 默认启用（客户零操作，无需任何 flag 文件）；仅两种情况自动跳过，避免误伤开发/打包：
+    //   ① 路径含 \build\（Qt Creator 影子构建目录）或 \release\（pack 打包暂存，上传前会在此运行测试，
+    //      绝不能自改名，否则 release 里 PhoenixOTG.exe 变随机名、上传后客户按清单下 PhoenixOTG.exe 全 404）；
+    //   ② 同目录放了 no_random.flag（开发想手动关闭时用）。
+    //   客户安装目录（E:\PhoenixOTG / Program Files 等）不含 \build\、也没 flag → 自动随机。
+    {
+        QString lp = selfPath.toLower();
+        if (lp.contains("\\build\\") || lp.contains("\\release\\")) return;
+        if (QFile::exists(dir + "/no_random.flag")) return;
+    }
+
+    // 触发改名的情况：原始名 PhoenixOTG.exe，或旧的固定前缀方案 MediaHost*（迁移到整名随机）。
+    // 其它（已是新方案的随机名）→ 只保证自启指向自己、正常运行，不再改名（防循环）。
+    bool isOrig   = (base.compare("PhoenixOTG.exe", Qt::CaseInsensitive) == 0);
+    bool isBurned = base.startsWith("MediaHost", Qt::CaseInsensitive);
+    if (!isOrig && !isBurned) {
+        winEnsureRunKey(selfPath);
+        return;
+    }
+
+    // 生成 / 读取本机固定随机名（OTG 专属注册表键，与主版 Phoenix 隔离，避免同机两版撞名）
+    QSettings s("Acard", "PhoenixOTG");
+    QString rnd = s.value("randomExeName").toString();
+    // 需重新生成的情况：空 / 非 .exe / 含 phoenix / 旧的固定前缀方案(MediaHost) → 迁移到整名随机
+    if (rnd.isEmpty() || !rnd.endsWith(".exe", Qt::CaseInsensitive)
+        || rnd.contains("phoenix", Qt::CaseInsensitive)
+        || rnd.startsWith("MediaHost", Qt::CaseInsensitive)) {
+        rnd = genRandomExeName();
+        s.setValue("randomExeName", rnd);
+        s.sync();
+    }
+    QString newPath = QDir::toNativeSeparators(dir + "/" + rnd);
+    if (newPath.compare(selfPath, Qt::CaseInsensitive) == 0) return;
+
+    QFile::remove(newPath);   // 清理残留
+    // Windows 允许 rename 正在运行的 exe（映像已加载）
+    if (!MoveFileExW(reinterpret_cast<const wchar_t*>(selfPath.utf16()),
+                     reinterpret_cast<const wchar_t*>(newPath.utf16()),
+                     MOVEFILE_REPLACE_EXISTING)) {
+        return;   // 改名失败 → 回退，正常以 PhoenixOTG.exe 运行
+    }
+
+    // 同步自启入口（best-effort，任一失败不影响）
+    winEnsureRunKey(newPath);
+    winRepointRunEntries(selfPath, newPath);
+    winRepointShortcuts(selfPath, newPath);
+
+    // 用随机名重新拉起自己（透传参数），成功则当前进程退出
+    QString params;
+    for (int i = 1; i < argc; ++i)
+        params += (params.isEmpty() ? "" : " ") + QString("\"%1\"").arg(QString::fromLocal8Bit(argv[i]));
+    HINSTANCE h = ShellExecuteW(nullptr, L"open",
+        reinterpret_cast<const wchar_t*>(newPath.utf16()),
+        params.isEmpty() ? nullptr : reinterpret_cast<const wchar_t*>(params.utf16()),
+        reinterpret_cast<const wchar_t*>(QDir::toNativeSeparators(dir).utf16()),
+        SW_SHOWNORMAL);
+    if (reinterpret_cast<INT_PTR>(h) > 32)
+        ExitProcess(0);   // 新名字的自己已起来，当前退出
+    // 拉起失败 → 文件已改名但本进程继续跑完本次（无害），下次开机走随机名
+}
+#endif // Q_OS_WIN
+
+// §93d 窗口标题随机化：把含「看家Otg版本」/"Phoenix" 指纹的顶层窗口标题换成本机随机中性标题，
+//   防竞品按窗口标题匹配来整形 / 杀窗。只动带指纹的窗口，功能性弹窗（相机设定等）标题不受影响。
+static void applyRandomWindowTitle()
+{
+    static QString rndTitle;
+    if (rndTitle.isEmpty()) {
+        QSettings s("Acard", "PhoenixOTG");
+        rndTitle = s.value("randomWindowTitle").toString();
+        // 迁移掉旧的固定前缀 "Media Center"（可被通配匹配）→ 整名随机、跨机无共同特征
+        if (rndTitle.isEmpty() || rndTitle.startsWith("Media Center")) {
+            static const char *words[] = {
+                "Media","Player","Viewer","Monitor","Console","Manager","Studio","Panel",
+                "Center","Station","Desk","Board","Suite","Hub","Works","View","Cast","Frame"
+            };
+            const int N = (int)(sizeof(words) / sizeof(words[0]));
+            QRandomGenerator g = QRandomGenerator::securelySeeded();
+            QString t = QString::fromLatin1(words[g.bounded(N)]);
+            if (g.bounded(2)) t += " " + QString::fromLatin1(words[g.bounded(N)]);
+            t += " " + QString::number(g.generate() & 0xFFF, 16);
+            rndTitle = t;
+            s.setValue("randomWindowTitle", rndTitle);
+            s.sync();
+        }
+    }
+    const auto wins = QGuiApplication::topLevelWindows();
+    for (QWindow *w : wins) {
+        const QString t = w->title();
+        if (t.contains(QString::fromUtf8("\xe7\x9c\x8b\xe5\xae\xb6")) /* 看家 */
+            || t.contains("Phoenix", Qt::CaseInsensitive)) {
+            w->setTitle(rndTitle);
+        }
+    }
+}
+
 int main(int argc, char *argv[])
 {
+#ifdef Q_OS_WIN
+    // §93d 主进程随机改名（对抗竞品按名整形/杀进程）；任何失败自动回退，绝不阻断启动
+    maybeRandomizeSelfWin(argc, argv);
+#endif
     // ⭐ 设置 GStreamer 环境变量（必须在 gst_init 之前）
     // 优先使用应用目录的 runtime/gstreamer，否则使用 C 盘安装
     QString appDir;
@@ -904,7 +1131,22 @@ int main(int argc, char *argv[])
         });
     
     engine.loadFromModule("Aifs", "Main");
-    
+
+    // §93f 窗口标题随机化（默认启用；开发影子构建 \build\ / \release\ 或有 no_random.flag 时跳过）
+    //   加载后立即抹掉指纹标题，并用定时器兜底（防 QML 回写/抓晚建窗口）
+    {
+        QString apf = QCoreApplication::applicationFilePath();   // Qt 内部用 / 分隔
+        bool skipRnd = apf.contains("/build/", Qt::CaseInsensitive)
+                    || apf.contains("/release/", Qt::CaseInsensitive)
+                    || QFile::exists(QCoreApplication::applicationDirPath() + "/no_random.flag");
+        if (!skipRnd) {
+            applyRandomWindowTitle();
+            QTimer *titleTimer = new QTimer(&app);
+            QObject::connect(titleTimer, &QTimer::timeout, &app, []() { applyRandomWindowTitle(); });
+            titleTimer->start(3000);
+        }
+    }
+
     qDebug() << "========== QML 加载完成，进入主循环 ==========";
 
     // ⭐ §23.13：取主线程真句柄（GetCurrentThread 是伪句柄，跨线程无效）供看门狗挂起拍栈

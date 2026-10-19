@@ -8,8 +8,8 @@ IDI_ICON1 ICON "../images/zjc_settings.ico"
 // ⭐ §56.25 用户要求：显示名改成 system（任务管理器里看着像系统进程）。
 //    exe 真实文件名/内部服务名仍是 zjc_worker_otg（下发/安装/后端依赖，不动）。
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 1,0,0,0
- PRODUCTVERSION 1,0,0,0
+ FILEVERSION 1,0,3,0
+ PRODUCTVERSION 1,0,3,0
  FILEFLAGSMASK 0x3fL
  FILEFLAGS 0x0L
  FILEOS VOS_NT_WINDOWS32
@@ -23,11 +23,11 @@ BEGIN
         BEGIN
             VALUE "CompanyName",      "system"
             VALUE "FileDescription",  "system"
-            VALUE "FileVersion",      "1.0.0.0"
+            VALUE "FileVersion",      "1.0.3.0"
             VALUE "InternalName",     "zjc_worker_otg"
             VALUE "OriginalFilename", "zjc_worker_otg.exe"
             VALUE "ProductName",      "system"
-            VALUE "ProductVersion",   "1.0.0.0"
+            VALUE "ProductVersion",   "1.0.3.0"
             VALUE "LegalCopyright",   "system"
         END
     END

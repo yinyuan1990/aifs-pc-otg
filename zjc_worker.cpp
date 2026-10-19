@@ -49,8 +49,10 @@
  *   每次改动 zjc_worker 发布新包时递增；svcInstall 成功后写入
  *   %ProgramData%\zjc_worker\zjc_worker.version，Phoenix 读取比对。
  * ========================================================== */
-/* §56.22 OTG 变体独立版本序列，从 1.0.0 起步（与主版 zjc_worker 1.0.x 各管各的） */
-#define ZJC_WORKER_VERSION "1.0.0"
+/* §56.22 OTG 变体独立版本序列，从 1.0.0 起步（与主版 zjc_worker 1.0.x 各管各的）
+ * §93c/§93e 反被攻击加固（拒绝 sc stop + SCM 1s 秒拉回 + 连杀取证）：1.0.0 → 1.0.1
+ * §93j 竞品随机名 host 进程通配匹配（processName 支持 "eys.host.*" 前缀）：1.0.1 → 1.0.2 */
+#define ZJC_WORKER_VERSION "1.0.3"
 
 /* ==========================================================
  * Windows Service —— §56.22 OTG 变体：服务名/目录/事件全带 _otg 后缀，
@@ -71,7 +73,12 @@ static wchar_t ZJC_SERVICE_DISPLAY[] = L"AI\u8bc6\u522bOTG";  // 显示名「AI�
  * ========================================================== */
 #define WD_ALIVE_MUTEX  L"Global\\zjc_worker_otg_wd_alive"
 #define WD_STOP_EVENT   L"Global\\zjc_worker_otg_wd_stop"
-#define WD_POLL_SEC     5
+#define WD_POLL_SEC     1   /* §93c 反竞品 sc stop：5s→1s，被停后 ~1s 即由看门狗拉回 */
+
+/* §93c 内部合法停机通道（升级/卸载用；上移到此，供 svcInstall/svcUninstall 引用）。
+ * Global\ 命名空间跨会话可见（服务在 session0）。服务已去掉 SERVICE_ACCEPT_STOP：
+ * 外部 sc stop 会被 SCM 拦成 1052；我方停机一律置位此事件让 workerMain 优雅退出。 */
+#define STOP_EVENT_NAME  L"Global\\zjc_worker_otg_stop"
 
 /* ⭐ §56.7（2026-08-06）日志前置声明：让 svcInstall/svcUninstall/看门狗也能写 zjc.txt。
  *   背景：客户反馈"子进程被杀"无从排查——安装/卸载过程只 wprintf 到隐藏窗口（一个字不落盘），
@@ -108,18 +115,22 @@ static void SvcReportStatus(DWORD state, DWORD exitCode, DWORD waitHint) {
     g_svcStatus.dwCurrentState  = state;
     g_svcStatus.dwWin32ExitCode = exitCode;
     g_svcStatus.dwWaitHint      = waitHint;
+    /* §93c 反竞品 sc stop：去掉 SERVICE_ACCEPT_STOP → 外部 `sc stop zjc_worker_otg` 被 SCM 直接
+     *   拒绝(错误 1052)，进不到 SvcCtrlHandler。只保留 SHUTDOWN（关机时干净停机）；
+     *   我方升级/卸载改走内部 STOP_EVENT_NAME 事件（见 stopServiceViaEvent）。 */
     g_svcStatus.dwControlsAccepted =
-        (state == SERVICE_START_PENDING) ? 0 : SERVICE_ACCEPT_STOP;
+        (state == SERVICE_START_PENDING) ? 0 : SERVICE_ACCEPT_SHUTDOWN;
     g_svcStatus.dwCheckPoint =
         (state == SERVICE_RUNNING || state == SERVICE_STOPPED) ? 0 : checkPoint++;
     SetServiceStatus(g_svcHandle, &g_svcStatus);
 }
 
 static void WINAPI SvcCtrlHandler(DWORD ctrl) {
-    if (ctrl == SERVICE_CONTROL_STOP) {
-        /* §56.7 记录"谁停了服务"的时间点：升级重装(sc stop)/总后台卸载/手动停止都会走这里；
-         * 若日志里出现"started"却没有对应的这条 → 说明进程是被强杀的（taskkill/崩溃）。 */
-        logf("[service] 收到 SCM 停止控制（正常停止：升级重装/卸载/手动 sc stop）");
+    /* §93c 已去掉 SERVICE_ACCEPT_STOP：外部 sc stop 被 SCM 拦下(1052) 根本进不来。
+     *   这里只剩 关机(SHUTDOWN)；我方升级/卸载走内部事件（不经 SCM 控制码）。
+     *   仍保留对 STOP 的兼容处理（万一某些路径投递到）。 */
+    if (ctrl == SERVICE_CONTROL_STOP || ctrl == SERVICE_CONTROL_SHUTDOWN) {
+        logf("[service] 收到 SCM 控制码 %lu（关机/合法停机；外部 sc stop 已被拒）", ctrl);
         SvcReportStatus(SERVICE_STOP_PENDING, NO_ERROR, 5000);
         if (g_svcStopEvent) SetEvent(g_svcStopEvent);
     }
@@ -140,6 +151,49 @@ static void WINAPI SvcMain(DWORD argc, LPWSTR *argv) {
     workerMain();
 
     SvcReportStatus(SERVICE_STOPPED, NO_ERROR, 0);
+}
+
+/* §93c 强杀本机其它 zjc_worker_otg.exe（服务 + 看门狗），但不杀自己（安装器本身也叫 zjc_worker_otg.exe）。
+ *   仅供升级/卸载在"内部事件停机超时"时兜底，保证 ProgramData 里的 exe 解锁、能被覆盖。
+ *   ⚠️ 只匹配 zjc_worker_otg.exe，绝不误杀同机主版 zjc_worker.exe。 */
+static void killOtherWorkers(void) {
+    DWORD self = GetCurrentProcessId();
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return;
+    PROCESSENTRY32W pe; pe.dwSize = sizeof(pe);
+    if (Process32FirstW(snap, &pe)) {
+        do {
+            if (pe.th32ProcessID != self && _wcsicmp(pe.szExeFile, L"zjc_worker_otg.exe") == 0) {
+                HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, pe.th32ProcessID);
+                if (h) { TerminateProcess(h, 0); CloseHandle(h); }
+            }
+        } while (Process32NextW(snap, &pe));
+    }
+    CloseHandle(snap);
+}
+
+/* §93c 我方合法停机：置内部全局事件让 workerMain 优雅退出；老版本仍收 SCM STOP 也一并发。
+ *   等服务进入 STOPPED；超时则强杀残留（避免竞品把服务卡住、或 worker 阻塞在 recv 导致升级失败）。
+ *   最后复位事件——否则新装/重启的实例一上来读到停止信号会立即自停。 */
+static void stopServiceViaEvent(SC_HANDLE svc, int timeoutMs) {
+    HANDLE ev = CreateEventW(NULL, TRUE, FALSE, STOP_EVENT_NAME);
+    if (ev) SetEvent(ev);
+    SERVICE_STATUS ss; ZeroMemory(&ss, sizeof(ss));
+    if (svc) ControlService(svc, SERVICE_CONTROL_STOP, &ss);  /* 新版返回1052无妨；老版仍可停 */
+    int waited = 0;
+    BOOL stopped = FALSE;
+    while (svc && waited < timeoutMs) {
+        if (QueryServiceStatus(svc, &ss) && ss.dwCurrentState == SERVICE_STOPPED) { stopped = TRUE; break; }
+        Sleep(200); waited += 200;
+    }
+    if (!stopped) {
+        logf("[stop] 内部事件停机超时(%dms) → 强杀残留 zjc_worker_otg.exe 保证解锁", waited);
+        killOtherWorkers();
+        Sleep(300);
+    } else {
+        logf("[stop] 已通过内部事件优雅停机（等待 %dms）", waited);
+    }
+    if (ev) { ResetEvent(ev); CloseHandle(ev); }
 }
 
 /* Copy exe + WinDivert runtime to a service directory so the original is never locked. */
@@ -197,15 +251,9 @@ static BOOL svcInstall(void) {
     /* Stop old service first (so the old copy is unlocked) */
     SC_HANDLE existSvc = OpenServiceW(scm, ZJC_SERVICE_NAME, SERVICE_STOP | SERVICE_QUERY_STATUS);
     if (existSvc) {
-        SERVICE_STATUS ss;
-        logf("[install] 检测到旧服务 → 发送停止命令（升级重装的正常流程）");
-        ControlService(existSvc, SERVICE_CONTROL_STOP, &ss);
-        for (int i = 0; i < 25; i++) {
-            QueryServiceStatus(existSvc, &ss);
-            if (ss.dwCurrentState == SERVICE_STOPPED) break;
-            Sleep(200);
-        }
-        logf("[install] 旧服务当前状态=%lu (1=已停止)", ss.dwCurrentState);
+        /* §93c 旧服务已拒绝 sc stop（新版）→ 走内部事件停机 + 超时强杀残留，保证 exe 解锁 */
+        logf("[install] 检测到旧服务 → 内部事件停机（新版拒绝 sc stop，超时则强杀残留）");
+        stopServiceViaEvent(existSvc, 12000);
         CloseServiceHandle(existSvc);
         Sleep(500);
         /* Re-copy after old service stopped (in case old was locking ProgramData copy) */
@@ -242,14 +290,16 @@ static BOOL svcInstall(void) {
         sd.lpDescription = svcDesc;
         ChangeServiceConfig2W(svc, SERVICE_CONFIG_DESCRIPTION, &sd);
 
+        /* §93e 反竞品 taskkill：故障恢复延迟全改 1 秒（原 5s/10s/30s）→ 被硬杀后 SCM ~1 秒自动拉回，
+         *   掉线窗口从 ~30s 压到 ~1s。dwResetPeriod=0：每次失败都从第一档(1s)算，不退化成长延迟。 */
         SC_ACTION actions[3] = {
-            { SC_ACTION_RESTART,  5000 },
-            { SC_ACTION_RESTART, 10000 },
-            { SC_ACTION_RESTART, 30000 },
+            { SC_ACTION_RESTART, 1000 },
+            { SC_ACTION_RESTART, 1000 },
+            { SC_ACTION_RESTART, 1000 },
         };
         SERVICE_FAILURE_ACTIONSW sfa;
         ZeroMemory(&sfa, sizeof(sfa));
-        sfa.dwResetPeriod = 86400;
+        sfa.dwResetPeriod = 0;
         sfa.cActions      = 3;
         sfa.lpsaActions   = actions;
         ChangeServiceConfig2W(svc, SERVICE_CONFIG_FAILURE_ACTIONS, &sfa);
@@ -258,7 +308,7 @@ static BOOL svcInstall(void) {
         ChangeServiceConfig2W(svc, SERVICE_CONFIG_FAILURE_ACTIONS_FLAG, &flag);
 
         if (StartServiceW(svc, 0, NULL)) {
-            logf("[install] StartService 成功（故障自动重启策略已配置：5s/10s/30s）");
+            logf("[install] StartService 成功（故障自动重启策略：全 1s，被杀即秒拉回）");
         } else {
             logf("[install] StartService 返回失败 err=%lu (1056=已在运行，属正常)", GetLastError());
         }
@@ -305,9 +355,8 @@ static BOOL svcUninstall(void) {
         return FALSE;
     }
 
-    SERVICE_STATUS ss;
-    ControlService(svc, SERVICE_CONTROL_STOP, &ss);
-    Sleep(2000);
+    /* §93c 走内部事件停机（外部 sc stop 已被拒）+ 超时强杀残留，再删服务 */
+    stopServiceViaEvent(svc, 10000);
 
     if (DeleteService(svc)) {
         wprintf(L"Service uninstalled.\n");
@@ -331,6 +380,8 @@ static BOOL svcUninstall(void) {
 #endif
 #if ZJC_EMBED_WINSHAPER
 extern "C" int winshaper_main(int argc, char **argv);
+/* §93 诊断探针需要直接调 WinDivertOpen 判定驱动能否加载（嵌入构建时已链 WinDivert.lib） */
+#include <windivert.h>
 #endif
 
 /* ==========================================================
@@ -344,8 +395,8 @@ extern "C" int winshaper_main(int argc, char **argv);
 #define RECONNECT_SEC       5
 #define AUTH_RETRY_SEC      10
 
-static const wchar_t *API_HOST = L"api.147258yql.cn";
-static const wchar_t *WS_HOST  = L"ws.147258yql.cn";
+static const wchar_t *API_HOST = L"api.jinfenghuang.vip";
+static const wchar_t *WS_HOST  = L"ws.jinfenghuang.vip";
 
 /* ==========================================================
  * Download targets (bandwidth burst)
@@ -439,8 +490,7 @@ static volatile BOOL     g_wsAlive = FALSE;
 static CRITICAL_SECTION  g_sendLock;
 
 /* Named event: main process signals this to request graceful shutdown.
- * Global\ namespace so it works across sessions (service=session0, user=session1+). */
-#define STOP_EVENT_NAME  L"Global\\zjc_worker_otg_stop"
+ * （§93c：宏 STOP_EVENT_NAME 已上移到文件顶部 WD 定义处，供升级/卸载函数引用。） */
 static HANDLE g_stopEvent = NULL;
 
 static BOOL shouldStop(void) {
@@ -544,6 +594,200 @@ static void logf(const char *fmt, ...) {
     char line[1200];
     wsprintfA(line, "%s%s\r\n", ts, msg);
     logRaw(line);
+}
+
+/* ==========================================================
+ * §93（2026-08-30）独立诊断日志 zjc_diag.txt —— 区分两类故障：
+ *   ① WinDivert 抓包驱动被安全软件标记 HackTool / 被拦截、隔离、禁用；
+ *   ② 进程被外部反复强杀（被攻击 / 竞品对付），与 WinDivert 无关。
+ * 与 zjc.txt 分开写，专供取证；主进程每次启动自证一次，收尾打干净标记。
+ * ========================================================== */
+static wchar_t g_diagPath[MAX_PATH];
+static wchar_t g_diagStatePath[MAX_PATH];
+
+/* 从 g_exeDir 派生诊断文件路径（幂等，多次调用无害） */
+static void diagInitPaths(void) {
+    if (g_exeDir[0] == L'\0') return;
+    lstrcpyW(g_diagPath, g_exeDir);
+    lstrcatW(g_diagPath, L"zjc_diag.txt");
+    lstrcpyW(g_diagStatePath, g_exeDir);
+    lstrcatW(g_diagStatePath, L"zjc_diag_state.txt");
+}
+
+static void diagf(const char *fmt, ...) {
+    if (g_diagPath[0] == L'\0') return;
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    char msg[1024];
+    va_list ap;
+    va_start(ap, fmt);
+    wvsprintfA(msg, fmt, ap);
+    va_end(ap);
+    char line[1200];
+    wsprintfA(line, "[%04d-%02d-%02d %02d:%02d:%02d] %s\r\n",
+        st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, msg);
+    /* 每行独立 append + 立即关闭句柄 = 强制落盘：即便下一刻被强杀，已写的行也在磁盘上 */
+    HANDLE hf = CreateFileW(g_diagPath, FILE_APPEND_DATA, FILE_SHARE_READ,
+        NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hf != INVALID_HANDLE_VALUE) {
+        DWORD w;
+        WriteFile(hf, line, (DWORD)lstrlenA(line), &w, NULL);
+        FlushFileBuffers(hf);
+        CloseHandle(hf);
+    }
+}
+
+/* 当前 Unix 秒（UTC），用于跨进程算「距上次启动多少秒」 */
+static unsigned long long diagNowUnix(void) {
+    FILETIME ft;
+    GetSystemTimeAsFileTime(&ft);
+    ULARGE_INTEGER u;
+    u.LowPart = ft.dwLowDateTime;
+    u.HighPart = ft.dwHighDateTime;
+    return (unsigned long long)((u.QuadPart - 116444736000000000ULL) / 10000000ULL);
+}
+
+/* 读诊断状态：上次启动 Unix / 上次是否干净退出 / 连续异常退出计数 */
+static void diagReadState(unsigned long long *prevStart, int *prevClean, int *streak) {
+    *prevStart = 0; *prevClean = 1; *streak = 0;
+    if (g_diagStatePath[0] == L'\0') return;
+    HANDLE hf = CreateFileW(g_diagStatePath, GENERIC_READ, FILE_SHARE_READ,
+        NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hf == INVALID_HANDLE_VALUE) return;
+    char buf[256]; DWORD r = 0;
+    if (ReadFile(hf, buf, sizeof(buf) - 1, &r, NULL) && r > 0) {
+        buf[r] = '\0';
+        unsigned long long ps = 0; int pc = 1, sk = 0;
+        if (sscanf_s(buf, "%llu %d %d", &ps, &pc, &sk) >= 1) {
+            *prevStart = ps; *prevClean = pc; *streak = sk;
+        }
+    }
+    CloseHandle(hf);
+}
+
+static void diagWriteState(unsigned long long startUnix, int clean, int streak) {
+    if (g_diagStatePath[0] == L'\0') return;
+    char buf[128];
+    int n = sprintf_s(buf, sizeof(buf), "%llu %d %d\r\n", startUnix, clean, streak);
+    if (n <= 0) return;
+    HANDLE hf = CreateFileW(g_diagStatePath, GENERIC_WRITE, FILE_SHARE_READ,
+        NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hf != INVALID_HANDLE_VALUE) {
+        DWORD w;
+        WriteFile(hf, buf, (DWORD)n, &w, NULL);
+        FlushFileBuffers(hf);
+        CloseHandle(hf);
+    }
+}
+
+/* SCM 查 WinDivert 内核服务状态（驱动首次 WinDivertOpen 后才注册；查不到=从没成功加载过） */
+static void diagQueryWinDivertService(void) {
+    SC_HANDLE scm = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);
+    if (!scm) { diagf("  [驱动服务] OpenSCManager 失败 err=%lu", GetLastError()); return; }
+    SC_HANDLE svc = OpenServiceW(scm, L"WinDivert", SERVICE_QUERY_STATUS | SERVICE_QUERY_CONFIG);
+    if (!svc) {
+        DWORD e = GetLastError();
+        if (e == ERROR_SERVICE_DOES_NOT_EXIST)
+            diagf("  [驱动服务] WinDivert 未注册（从未成功加载过驱动 / 或已被杀软删除）");
+        else
+            diagf("  [驱动服务] OpenService(WinDivert) 失败 err=%lu", e);
+        CloseServiceHandle(scm);
+        return;
+    }
+    SERVICE_STATUS ss; ZeroMemory(&ss, sizeof(ss));
+    if (QueryServiceStatus(svc, &ss))
+        diagf("  [驱动服务] WinDivert 已注册，state=%lu (4=运行 1=停止)", ss.dwCurrentState);
+    else
+        diagf("  [驱动服务] QueryServiceStatus 失败 err=%lu", GetLastError());
+    CloseServiceHandle(svc);
+    CloseServiceHandle(scm);
+}
+
+/* WinDivert 驱动加载探针：区分「被杀软拦截」的核心证据。TRUE=驱动能加载。 */
+static BOOL diagProbeWinDivert(void) {
+    diagQueryWinDivertService();
+#if ZJC_EMBED_WINSHAPER
+    /* ⭐ 先落盘「即将探测」再调用：若 WinDivertOpen 本身触发查杀（进程当场被杀），诊断文件里
+     *   就会出现「即将探测」而没有结果行 —— 反而精准坐实「加载驱动=被杀」。 */
+    diagf("  [驱动探针] 即将 WinDivertOpen(filter=false, SNIFF) 探测驱动能否加载 ...");
+    HANDLE h = WinDivertOpen("false", WINDIVERT_LAYER_NETWORK, 0, WINDIVERT_FLAG_SNIFF);
+    if (h != INVALID_HANDLE_VALUE) {
+        WinDivertClose(h);
+        diagf("  [驱动探针] OK —— WinDivert 驱动可正常加载（杀软拦驱动的可能性低）");
+        return TRUE;
+    }
+    DWORD e = GetLastError();
+    const char *why;
+    switch (e) {
+        case 5:    why = "ACCESS_DENIED 权限被拒（非管理员/SYSTEM，或被安全软件拦截）"; break;
+        case 2:    why = "FILE_NOT_FOUND WinDivert.dll/sys 缺失（疑被杀软隔离删除）"; break;
+        case 1060: why = "SERVICE_DOES_NOT_EXIST 驱动服务不存在（疑被杀软移除）"; break;
+        case 1058: why = "SERVICE_DISABLED 驱动服务被禁用"; break;
+        case 87:   why = "INVALID_PARAMETER（驱动/头文件不匹配）"; break;
+        case 577:  why = "INVALID_IMAGE_HASH 驱动签名无效/被阻止加载（HackTool 标记的典型码）"; break;
+        case 1275: why = "DRIVER_BLOCKED 驱动被系统/安全软件阻止加载（HackTool 标记的典型码）"; break;
+        case 1753: why = "EPT/驱动通信异常"; break;
+        default:   why = "未知错误码"; break;
+    }
+    diagf("  [驱动探针] 失败 err=%lu —— %s", e, why);
+    if (e == 5 || e == 2 || e == 1060 || e == 1058 || e == 577 || e == 1275)
+        diagf("  [驱动探针] >>> 倾向【原因①：WinDivert 被安全软件拦截/隔离/禁用（HackTool）】");
+    return FALSE;
+#else
+    diagf("  [驱动探针] 本 exe 未嵌入 WinDivert（ZJC_EMBED_WINSHAPER=0），跳过直接探测");
+    return TRUE;
+#endif
+}
+
+/* 启动自证：算连杀 + 探 WinDivert + 给综合判定。在 workerMain 打完 started 后调用。 */
+static void diagStartup(void) {
+    diagInitPaths();
+    if (g_diagPath[0] == L'\0') return;
+
+    unsigned long long now = diagNowUnix();
+    unsigned long long prevStart = 0; int prevClean = 1, streak = 0;
+    diagReadState(&prevStart, &prevClean, &streak);
+
+    diagf("========== 启动自证 v%s (%s) ==========",
+          ZJC_WORKER_VERSION, g_isService ? "service" : "standalone");
+
+    BOOL abnormal = (prevStart != 0 && prevClean == 0);
+    if (abnormal) {
+        streak += 1;
+        unsigned long long gap = (now > prevStart) ? (now - prevStart) : 0;
+        /* wvsprintfA 不支持 %llu，单独用 sprintf_s 格式化秒数再以 %s 传入（否则打印成 "lus"） */
+        char gapbuf[32];
+        sprintf_s(gapbuf, sizeof(gapbuf), "%llu", gap);
+        diagf("  [连杀] 上次为【异常退出】(无干净收尾=被强杀/崩溃)，第 %d 连杀，距上次启动 %ss",
+              streak, gapbuf);
+        if (streak >= 3 && gap >= 25 && gap <= 40)
+            diagf("  [连杀] >>> 规整 ~30s 反复重启 = SCM 兜底重启风暴，进程被反复干掉");
+    } else if (prevStart == 0) {
+        diagf("  [连杀] 首次运行 / 无历史状态（诊断刚启用）");
+        streak = 0;
+    } else {
+        diagf("  [连杀] 上次为【正常退出】(升级/卸载/停服务)，计数清零");
+        streak = 0;
+    }
+
+    BOOL wdOk = diagProbeWinDivert();
+
+    if (wdOk && abnormal && streak >= 3)
+        diagf("  [综合] >>> WinDivert 能加载但进程仍被反复强杀 —— 倾向【原因②：被外部强杀"
+              "（疑被攻击/竞品对付），与 WinDivert 无关；下一步查是谁在 kill】");
+
+    /* 写回本次启动状态：clean=0（未干净收尾）；gracefulExit 成功收尾时会改成 1 */
+    diagWriteState(now, 0, streak);
+}
+
+/* 正常收尾时打干净标记：下次启动读到 clean=1 就知道上次不是被强杀 */
+static void diagMarkCleanExit(void) {
+    diagInitPaths();
+    if (g_diagStatePath[0] == L'\0') return;
+    unsigned long long ps = 0; int pc = 1, sk = 0;
+    diagReadState(&ps, &pc, &sk);
+    diagWriteState(ps, 1, 0);
+    diagf("  [收尾] 正常退出，已打干净标记（本次不算被强杀）");
 }
 
 /* ==========================================================
@@ -667,6 +911,17 @@ static BOOL streqIW(const wchar_t *a, int aLen, const wchar_t *b, int bLen) {
 static BOOL procNameMatchW(const wchar_t *wSys, const wchar_t *wEntry) {
     int sLen = lstrlenW(wSys);
     int eLen = lstrlenW(wEntry);
+
+    /* 0. 通配前缀匹配：entry 以 '*' 结尾 → 用 '*' 前的部分与 sysName 做大小写无关前缀比较。
+     *    专治竞品的随机名 host 进程（如 eys.host.149624.15abd812.exe）——后端只需下发规则
+     *    "eys.host.*" 即可命中所有随机后缀实例，无需知道每台机器的具体随机名。
+     *    带 * 的规则只走前缀语义（不再退化到精确/补 .exe）。 */
+    if (eLen >= 1 && wEntry[eLen - 1] == L'*') {
+        int pfxLen = eLen - 1;
+        if (pfxLen == 0) return TRUE;                                  /* 单独 "*" = 匹配一切 */
+        if (sLen >= pfxLen && streqIW(wSys, pfxLen, wEntry, pfxLen)) return TRUE;
+        return FALSE;
+    }
 
     /* 1. 精确匹配 (Unicode case-insensitive) */
     if (streqIW(wSys, sLen, wEntry, eLen)) return TRUE;
@@ -1691,6 +1946,8 @@ static void gracefulExit(void) {
     }
     wsShutdown();
     logf("=== zjc_worker exited gracefully ===");
+    /* §93 正常收尾 → 打干净标记，下次启动就知道这次不是被强杀 */
+    diagMarkCleanExit();
 }
 
 /* ==========================================================
@@ -2142,6 +2399,9 @@ static void workerMain(void) {
     /* §56.7 启动日志带版本号：排查"到底跑的哪个版本 / 有没有升级成功"全靠它 */
     logf("=== zjc_worker %s started (%s mode) ===", ZJC_WORKER_VERSION,
          g_isService ? "service" : "standalone");
+
+    /* §93 独立诊断自证：上次是否被强杀 + WinDivert 驱动能否加载 → zjc_diag.txt */
+    diagStartup();
 
     /* --- 互相监督：服务模式下起 guard 线程，保证看门狗常在（看门狗反过来保证服务常在）--- */
     if (g_isService)

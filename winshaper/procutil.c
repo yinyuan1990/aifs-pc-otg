@@ -24,6 +24,19 @@ BOOL proc_get_basename(DWORD pid, wchar_t *out, size_t max_chars)
 
 static BOOL exe_name_match(const wchar_t *sysName, const wchar_t *rule)
 {
+    /* 通配前缀匹配：rule 以 '*' 结尾 → 前缀匹配。治竞品随机名 host 进程
+     * （如 eys.host.149624.15abd812.exe），规则写 "eys.host.*" 即可整段命中。
+     * 带 * 的规则只走前缀语义，不再退化到精确/补 .exe。 */
+    {
+        size_t rlen = wcslen(rule);
+        if (rlen >= 1 && rule[rlen - 1] == L'*') {
+            size_t pfx = rlen - 1;
+            if (pfx == 0)
+                return TRUE;
+            return (_wcsnicmp(sysName, rule, pfx) == 0) ? TRUE : FALSE;
+        }
+    }
+
     if (_wcsicmp(sysName, rule) == 0)
         return TRUE;
 
