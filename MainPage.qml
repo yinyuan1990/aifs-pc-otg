@@ -316,6 +316,12 @@ Rectangle {
     // 会员等级控制（来自 CONFIG_STATE 消息）
     property bool memberActivated: false           // 是否已激活
     property int memberActivationLevel: 0          // 激活等级 (0=试用全开放, 1=高清, 2=超清, 3=超高帧, 4=超超清)
+    // OTG 档位按会员等级限制（总后台「OTG设置」各级分辨率上限，试用=0 不限）
+    Binding {
+        target: CameraCapsStore
+        property: "memberLevel"
+        value: mainPage.memberActivated ? mainPage.memberActivationLevel : 0
+    }
     property string memberActivationLevelName: ""  // 等级名称
     property var levelFps: [240, 120, 180, 180, 240]  // ⭐ 各等级FPS上限（从登录接口获取，下标0=试用,1=高清,2=超清,3=超高清,4=超高帧）
     property var levelExposureFps: [600, 120, 180, 240, 600]  // ⭐ 各等级超级帧率上限（从登录接口获取，下标0=试用,1=高清,2=超清,3=超高清,4=超高帧）
@@ -2719,6 +2725,16 @@ Rectangle {
                                 drag.minimumX: 0
                                 drag.maximumX: gridFrameBar.width - 18
 
+                                // 拖动会改写滑块 x、冲掉它跟当前帧的绑定；松手接回，之后切帧（滚轮/键盘/同步）进度条继续跟着走
+                                function rebindHandle() {
+                                    gridFrameHandle.x = Qt.binding(function() {
+                                        return gridCell.totalFrames > 1
+                                            ? gridCell.currentFrame / (gridCell.totalFrames - 1) * (gridFrameBar.width - 18) : 0
+                                    })
+                                }
+                                onReleased: rebindHandle()
+                                onCanceled: rebindHandle()
+
                                 property bool ctrlDrag: false
 
                                 onWheel: function(wheel) {
@@ -3947,6 +3963,16 @@ Rectangle {
                                 drag.axis: Drag.XAxis
                                 drag.minimumX: 0
                                 drag.maximumX: frameSliderContainer.width - 16
+
+                                // 拖动会改写滑块 x、冲掉它跟当前帧的绑定；松手接回，播放时进度条继续跟着走
+                                function rebindHandle() {
+                                    frameHandle.x = Qt.binding(function() {
+                                        return slowMotionPlayer.recordedFrames > 1
+                                            ? slowMotionPlayer.currentFrame / (slowMotionPlayer.recordedFrames - 1) * (frameHandle.parent.width - 16) : 0
+                                    })
+                                }
+                                onReleased: rebindHandle()
+                                onCanceled: rebindHandle()
 
                                 onWheel: function(wheel) {
                                     wheel.accepted = true
@@ -9187,6 +9213,7 @@ Rectangle {
         function onLoginSuccess(token, deviceId, deviceUsername, bindingList, pcActivationLevel, pcLevelName, pcExpireAt, deviceLevel, levelFps, levelExposureFps, iceServersFromLogin) {
             // ⭐ 需求#13（2026-07-31）：登录响应带三端最新版本号，与本机版本比对，不一致提示更新。
             //   软提示（toast + 状态栏），不拦截使用；后台未配置（空串）则跳过。
+            CameraCapsStore.levelResolutions = HttpClient.otgLevelResolutions()
             var latestPc = HttpClient.latestPcVersion()
             var localVer = HttpClient.currentAppVersion()
             if (latestPc && latestPc.length > 0 && latestPc !== localVer) {
@@ -11105,6 +11132,16 @@ Rectangle {
                             drag.minimumX: 0
                             drag.maximumX: fullscreenFrameSliderContainer.width - 32
 
+                            // 拖动会改写滑块 x、冲掉它跟当前帧的绑定；松手接回，之后切帧进度条继续跟着走
+                            function rebindHandle() {
+                                fullscreenFrameHandle.x = Qt.binding(function() {
+                                    return fullscreenFrameSliderContainer.totalFrames > 1
+                                        ? fullscreenFrameIndex / (fullscreenFrameSliderContainer.totalFrames - 1) * (fullscreenFrameSliderContainer.width - 32) : 0
+                                })
+                            }
+                            onReleased: rebindHandle()
+                            onCanceled: rebindHandle()
+
                             property bool ctrlDrag: false
 
                             onWheel: function(wheel) {
@@ -11533,6 +11570,16 @@ Rectangle {
                             drag.minimumX: 0
                             drag.maximumX: colPreviewFrameBar.width - 18
 
+                            // 拖动会改写滑块 x、冲掉它跟当前帧的绑定；松手接回，之后切帧进度条继续跟着走
+                            function rebindHandle() {
+                                colPreviewFrameHandle.x = Qt.binding(function() {
+                                    return colPreviewItem.totalFrames > 1
+                                        ? colPreviewItem.frameIdx / (colPreviewItem.totalFrames - 1) * (colPreviewFrameBar.width - 18) : 0
+                                })
+                            }
+                            onReleased: rebindHandle()
+                            onCanceled: rebindHandle()
+
                             property bool ctrlDrag: false
 
                             onWheel: function(wheel) {
@@ -11908,6 +11955,16 @@ Rectangle {
                             drag.minimumX: 0
                             drag.maximumX: zoomFrameSliderContainer.width - 32
 
+                            // 拖动会改写滑块 x、冲掉它跟当前帧的绑定；松手接回，之后切帧进度条继续跟着走
+                            function rebindHandle() {
+                                zoomFrameHandle.x = Qt.binding(function() {
+                                    return zoomFrameSliderContainer.totalFrames > 1
+                                        ? columnPreviewZoomFrame / (zoomFrameSliderContainer.totalFrames - 1) * (zoomFrameSliderContainer.width - 32) : 0
+                                })
+                            }
+                            onReleased: rebindHandle()
+                            onCanceled: rebindHandle()
+
                             property bool ctrlDrag: false
 
                             onWheel: function(wheel) {
@@ -12206,6 +12263,21 @@ Rectangle {
         property string currentDeviceUsername: ""
         property bool isLoading: false
         property var currentDevices: deviceMap[currentUsername] || []
+        // 搜索绑定的 iOS 设备：昵称 / 完整号 / 备注 任一包含关键字即命中（不分大小写）
+        property string searchText: ""
+        property var filteredDevices: {
+            var kw = searchText.trim().toLowerCase()
+            if (kw === "") return currentDevices
+            var out = []
+            for (var i = 0; i < currentDevices.length; i++) {
+                var d = currentDevices[i]
+                var hay = ((d.deviceNickname || "") + "\n" + (d.deviceUsername || "") + "\n" + (d.remark || "")).toLowerCase()
+                if (hay.indexOf(kw) !== -1) out.push(d)
+            }
+            return out
+        }
+
+        onOpened: deviceSearchInput.text = ""
 
         background: Rectangle {
             color: "#FFFFFF"
@@ -12389,9 +12461,53 @@ Rectangle {
                     }
                 }
                 
+                // 搜索绑定设备（昵称 / 完整号 / 备注）
+                TextField {
+                    id: deviceSearchInput
+                    width: parent.width
+                    height: 32
+                    visible: switchAccountDialog.currentDevices.length > 0
+                    placeholderText: "搜索设备：昵称 / 完整号 / 备注"
+                    font.family: "PingFang HK"
+                    font.pixelSize: 13
+                    onTextChanged: switchAccountDialog.searchText = text
+                    leftPadding: 10
+                    rightPadding: 28
+                    background: Rectangle {
+                        color: "#F5F8FA"
+                        radius: 4
+                        border.color: deviceSearchInput.activeFocus ? "#3993D2" : "#E0E0E0"
+                        border.width: 1
+                    }
+
+                    // 清空
+                    Text {
+                        anchors.right: parent.right
+                        anchors.rightMargin: 8
+                        anchors.verticalCenter: parent.verticalCenter
+                        visible: deviceSearchInput.text.length > 0
+                        text: "✕"
+                        font.pixelSize: 12
+                        color: searchClearArea.containsMouse ? "#CC0000" : "#999999"
+
+                        MouseArea {
+                            id: searchClearArea
+                            anchors.fill: parent
+                            anchors.margins: -6
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: deviceSearchInput.text = ""
+                        }
+                    }
+                }
+
                 // 绑定设备列表标题
                 Text {
-                    text: "绑定的设备"
+                    text: {
+                        var total = switchAccountDialog.currentDevices.length
+                        var shown = switchAccountDialog.filteredDevices.length
+                        return shown === total ? "绑定的设备" : "绑定的设备（匹配 " + shown + " / " + total + "）"
+                    }
                     font.family: "PingFang HK"
                     font.pixelSize: 14
                     font.bold: true
@@ -12403,9 +12519,9 @@ Rectangle {
                 ListView {
                     id: deviceListView
                     width: parent.width
-                    height: parent.height - 120
+                    height: parent.height - (deviceSearchInput.visible ? 168 : 120)
                     clip: true
-                    model: switchAccountDialog.currentDevices
+                    model: switchAccountDialog.filteredDevices
                     spacing: 8
                     
                     delegate: Rectangle {
@@ -12644,11 +12760,13 @@ Rectangle {
                     }
                 }
                 
-                // 无设备提示
+                // 无设备 / 无匹配提示
                 Text {
                     anchors.horizontalCenter: parent.horizontalCenter
-                    visible: switchAccountDialog.currentDevices.length === 0 && !switchAccountDialog.isLoading
-                    text: "暂无绑定设备"
+                    visible: switchAccountDialog.filteredDevices.length === 0 && !switchAccountDialog.isLoading
+                    text: switchAccountDialog.currentDevices.length === 0
+                          ? "暂无绑定设备"
+                          : "没有匹配「" + switchAccountDialog.searchText.trim() + "」的设备"
                     font.family: "PingFang HK"
                     font.pixelSize: 14
                     color: "#999999"

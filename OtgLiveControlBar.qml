@@ -67,8 +67,8 @@ RowLayout {
     }
 
     function sizeOptions() {
-        // 只列编码器吃得下的档位（低于编码器最小尺寸的选了必黑）
-        var usable = CameraCapsStore.usableSizes()
+        // 只列编码器吃得下、且会员等级允许的档位（低于编码器最小尺寸的选了必黑；超等级的在面板里灰显说明）
+        var usable = CameraCapsStore.selectableSizes()
         var out = []
         for (var i = 0; i < usable.length; i++)
             out.push({ label: CameraCapsStore.sizeLabel(usable[i]), value: usable[i] })

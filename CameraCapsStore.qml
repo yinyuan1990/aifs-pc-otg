@@ -40,6 +40,11 @@ QtObject {
     // 总后台配置的 OTG 最高帧率（0=不限），设备随能力快照上报；采集/推送都不会超过它
     property int fpsLimit: 0
 
+    // 会员等级（0=试用不限，1-4）+ 总后台「OTG设置」各等级分辨率上限 [{level,width,height}]（PC 登录下发）。
+    // 开通 N 级 → 不超过第 N 级上限的档位可选；比较按长边/短边。MainPage 负责同步这两个值。
+    property int memberLevel: 0
+    property var levelResolutions: []
+
     // 已向设备索要过能力快照的版本（防重复索要）
     property real requestedVersion: -1
 
@@ -80,6 +85,30 @@ QtObject {
 
     function blockedSizeCount() {
         return sizes.length - usableSizes().length
+    }
+
+    // 当前等级的分辨率上限 {width,height}；试用 / 没下发 / 等级没配 = null（不限）
+    function levelCap() {
+        if (memberLevel <= 0) return null
+        for (var i = 0; i < levelResolutions.length; i++)
+            if (levelResolutions[i].level === memberLevel) return levelResolutions[i]
+        return null
+    }
+
+    function levelAllows(s) {
+        var cap = levelCap()
+        if (!cap) return true
+        return Math.max(s.width, s.height) <= Math.max(cap.width, cap.height)
+            && Math.min(s.width, s.height) <= Math.min(cap.width, cap.height)
+    }
+
+    // 编码器吃得下 且 会员等级允许 的档位（底栏下拉只列这些）
+    function selectableSizes() {
+        var usable = usableSizes()
+        var out = []
+        for (var i = 0; i < usable.length; i++)
+            if (levelAllows(usable[i])) out.push(usable[i])
+        return out
     }
 
     // 当前分辨率这一档的 fps 上限。

@@ -85,6 +85,8 @@ public:
     Q_INVOKABLE QString publicIp() const { return m_publicIp; }
     // ⭐ 需求#13：登录响应下发的 PC 最新版本号（空=后台未配置，跳过提示）与本机版本
     Q_INVOKABLE QString latestPcVersion() const { return m_latestPcVersion; }
+    // 总后台「OTG设置」各会员等级分辨率上限 [{level,width,height}] × 4（老后端没有 → 空 = 不限）
+    Q_INVOKABLE QVariantList otgLevelResolutions() const { return m_otgLevelResolutions; }
     Q_INVOKABLE QString currentAppVersion() const;
     Q_INVOKABLE QString currentDeviceId() const { return m_currentDeviceId; }
     // ⭐ 2026-07-15：本次登录实际绑定的设备账号（未传 deviceUsername 时后端默认取第一个绑定），
@@ -380,6 +382,7 @@ private:
     QString m_sessionPassword;
     QString m_publicIp;               // ⭐ §53.20.2：登录响应回填的公网出口 IP
     QString m_latestPcVersion;        // ⭐ 需求#13：登录响应下发的 PC 最新版本号
+    QVariantList m_otgLevelResolutions;
     // ⭐ §53.22-附：登录传输层失败（状态码 0，如复用了被掐的 keep-alive 连接）自动重试一次的标记
     bool m_loginNetRetried = false;
     // ⭐ 2026-08-01：本次登录发生过"设备已解绑(1004)→清本地设备→回退默认设备"自动重登，供 QML 弹提示

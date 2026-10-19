@@ -217,6 +217,8 @@ Window {
             Text {
                 text: "档位（分辨率）" + (CameraCapsStore.usableSizes().length > 0
                                         ? "  共" + CameraCapsStore.usableSizes().length + "档" : "")
+                      + (CameraCapsStore.levelCap()
+                         ? "（当前会员最高 " + CameraCapsStore.levelCap().width + "x" + CameraCapsStore.levelCap().height + "）" : "")
                       + (CameraCapsStore.blockedSizeCount() > 0
                          ? "（另有 " + CameraCapsStore.blockedSizeCount() + " 档低于编码器最小尺寸，已屏蔽）" : "")
                 font.family: "PingFang HK"
@@ -239,7 +241,10 @@ Window {
                         // 编码器吃不下的尺寸（低于硬件 H264/HEVC 最小分辨率）：采集正常但编码器
                         // 一帧不出，点了必黑。这里保留显示并说明原因，但不让点——直接隐藏的话
                         // 用户会疑惑"设备明明有 4 档，面板怎么只有 3 档"。
-                        property bool usable: modelData.encodable !== false
+                        property bool encodable: modelData.encodable !== false
+                        // 超出会员等级上限的档位：显示但不让点，提示升级（试用不限）
+                        property bool levelOk: CameraCapsStore.levelAllows(modelData)
+                        property bool usable: encodable && levelOk
                         property bool active: usable
                                               && modelData.width === CameraCapsStore.curWidth
                                               && modelData.height === CameraCapsStore.curHeight
@@ -257,7 +262,7 @@ Window {
                             text: CameraCapsStore.sizeLabel(modelData)
                                   + (parent.usable
                                      ? (modelData.maxKbps > 0 ? "\n" + modelData.maxKbps + "k" : "")
-                                     : "\n编码器不支持")
+                                     : (!parent.encodable ? "\n编码器不支持" : "\n需升级会员"))
                             horizontalAlignment: Text.AlignHCenter
                             lineHeight: 0.85
                             font.family: "PingFang HK"

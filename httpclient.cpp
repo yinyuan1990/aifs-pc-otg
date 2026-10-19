@@ -366,6 +366,8 @@ void HttpClient::login(const QString &username, const QString &password, int pcL
         //   MainPage 登录成功后与 PHOENIX_VERSION_STR 比对，不一致提示更新（软提示）。
         //   §56.22 OTG 专版读独立的 pcotg 键（老后端没有此键 → 空串 = 跳过软提示，不误报）。
         m_latestPcVersion = obj["latestVersions"].toObject().value("pcotg").toString();
+        m_otgLevelResolutions = obj["otgLevelResolutions"].toArray().toVariantList();
+        qDebug() << "[Login] otgLevelResolutions:" << m_otgLevelResolutions;
         m_currentDeviceId = deviceId;
         m_currentDeviceUsername = deviceUser;  // ⭐ 本次登录实际绑定的设备账号（未指定时=后端默认第一个绑定）
         m_pcActivationLevel = pcLevelResp;
