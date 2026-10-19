@@ -218,7 +218,8 @@ Window {
                 text: "档位（分辨率）" + (CameraCapsStore.usableSizes().length > 0
                                         ? "  共" + CameraCapsStore.usableSizes().length + "档" : "")
                       + (CameraCapsStore.levelCap()
-                         ? "（当前会员最高 " + CameraCapsStore.levelCap().width + "x" + CameraCapsStore.levelCap().height + "）" : "")
+                         ? "（当前会员最高 " + CameraCapsStore.levelCap().width + "x" + CameraCapsStore.levelCap().height
+                           + (CameraCapsStore.levelFpsCap() > 0 ? " @" + CameraCapsStore.levelFpsCap() + "fps" : "") + "）" : "")
                       + (CameraCapsStore.blockedSizeCount() > 0
                          ? "（另有 " + CameraCapsStore.blockedSizeCount() + " 档低于编码器最小尺寸，已屏蔽）" : "")
                 font.family: "PingFang HK"
@@ -340,6 +341,7 @@ Window {
                       + (CameraCapsStore.fpsIsKnown() ? "（协商/实测）" : "（未知，按30估）")
                       + " → 编码器上限 " + panel.pushFpsCeiling + "fps"
                       + (CameraCapsStore.fpsLimit > 0 ? " → 后台最高 " + CameraCapsStore.fpsLimit + "fps" : "")
+                      + (CameraCapsStore.levelFpsCap() > 0 ? " → 会员等级最高 " + CameraCapsStore.levelFpsCap() + "fps" : "")
                       + (CameraCapsStore.deviceThermalCap > 0
                          ? " → ⚠️ 手机发热，热控当前压到 " + CameraCapsStore.deviceThermalCap + "fps（降温自动放开）"
                          : "")

@@ -138,8 +138,17 @@ QtObject {
         return 120
     }
 
+    // 当前会员等级的最高帧率（总后台「OTG设置」）；试用 / 没下发 = 0（不限）
+    function levelFpsCap() {
+        var c = levelCap()
+        return c && c.fps > 0 ? c.fps : 0
+    }
+
+    // 推流帧率上限 = min(后台 OTG 最高帧率, 会员等级最高帧率)
     function applyFpsLimit(fps) {
-        return fpsLimit > 0 ? Math.min(fps, fpsLimit) : fps
+        var f = fpsLimit > 0 ? Math.min(fps, fpsLimit) : fps
+        var lv = levelFpsCap()
+        return lv > 0 ? Math.min(f, lv) : f
     }
 
     function sizeLabel(s) {
