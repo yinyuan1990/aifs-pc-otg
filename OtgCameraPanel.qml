@@ -295,6 +295,23 @@ Window {
                 }
             }
 
+            // 1920 以上（2K/4K 原画）后端按分辨率限观看人数，默认只许 1 人看；有别的电脑在看时 PC 不让切上去
+            Text {
+                Layout.fillWidth: true
+                wrapMode: Text.WordWrap
+                visible: {
+                    var s = CameraCapsStore.sizes
+                    for (var i = 0; i < s.length; i++)
+                        if (Math.max(s[i].width, s[i].height) > 1920) return true
+                    return false
+                }
+                text: "（8K原画下禁止多人观看 网络易崩溃）1920 以上分辨率只许 1 台电脑看，有别的电脑在看时切不上去。"
+                font.family: "PingFang HK"
+                font.pixelSize: 12
+                font.bold: true
+                color: "#E65100"
+            }
+
             // ===== 采集协商结果（只显示，不再手动选）=====
             //   ⭐ 需求#6：「采集格式」固定 MJPEG；⭐ 2026-08-02：「采集帧率」选择也移除——
             //   切档按最大（120）请求、UVC 就近协商，结果在这行如实显示。

@@ -3612,6 +3612,11 @@ Rectangle {
 
                 onSendOtg: function(ptype, payload) {
                     console.log("🔗 [OTG链路|PC下发] " + ptype + " " + JSON.stringify(payload))
+                    if (ptype === "otg_resolution" && viewerLimitBlocks(payload.width, payload.height)) {
+                        showToast(viewerLimitDeniedText(payload.width, payload.height))
+                        sendConfigUpdate("otg_get_caps", {})   // 面板已先改了本地尺寸，问设备要回真值
+                        return
+                    }
                     sendConfigUpdate(ptype, payload)
                     // ⭐ 2026-08-03 修「OTG 切档卡死」：分辨率中途变化，解码器必须等到新关键帧才能
                     //   继续出画面。自带摄像头切档有 300/500/1000/1500ms 四连 PLI（防绿幕/卡帧），
@@ -7081,6 +7086,12 @@ Rectangle {
             //   qlgx 里有这行而 OTG 日志里没有「🔗 [OTG链路|收到]」= 信令没到手机；
             //   qlgx 里没这行 = PC 面板没发（点击没触发）。
             console.log("🔗 [OTG链路|PC下发] " + ptype + " " + JSON.stringify(payload))
+            // OTG 2K/4K 原画：别的电脑在看的台数已到该分辨率上限 → 不切
+            if (ptype === "otg_resolution" && viewerLimitBlocks(payload.width, payload.height)) {
+                showToast(viewerLimitDeniedText(payload.width, payload.height))
+                sendConfigUpdate("otg_get_caps", {})   // 面板已先改了本地尺寸，问设备要回真值
+                return
+            }
             sendConfigUpdate(ptype, payload)
             // ⭐ 2026-08-03 修「OTG 切档卡死」：与底部快捷栏同款——切档后四连 PLI 要关键帧
             //  （自带摄像头切档一直有这套，OTG 通道此前漏了）。
@@ -8997,8 +9008,17 @@ Rectangle {
             if (!devId || devId === "") return
             // ⭐ §56.13b 下发前主动问后端观看数（权威）；查询失败自动回退 PC_PRESENCE 被动判定
             mainPage.queryViewerCountThen(function(count) {
+                mainPage.otherViewerCount = count
                 if (mainPage.connectMode === 0 && count > 0) {
                     console.log("⏭️ [多人观看] §56.13b 后端确认已有 " + count + " 台PC在观看，跳过 STOMP 连接后参数补发（滤镜/LUT/增益/码率），仅拉流")
+                    // 对方正在 2K/4K 原画推流且人数已满：后端会拒这台拉流，这里说清楚原因（不然只看到黑屏）
+                    var cw = CameraCapsStore.curWidth, ch = CameraCapsStore.curHeight
+                    if (Math.max(cw, ch) > 1920) {
+                        var lim = mainPage.viewerLimitForSize(cw, ch)
+                        if (lim > 0 && count >= lim)
+                            showToast("这台手机正在 " + cw + "×" + ch + " 原画推流，已有 " + count + " 台电脑在看（"
+                                      + (lim <= 1 ? mainPage.multiViewBanText : "最多 " + lim + " 人") + "）")
+                    }
                     return
                 }
                 // ⭐ §56.28 OTG 专版：滤镜/LUT/增益补发全部去掉（设备端 OTG 相机自带画质调节，
@@ -9401,6 +9421,51 @@ Rectangle {
 
     // ⭐ §56.13（2026-08-06）多人观看感知（兜底通道）：别的 PC 在观看时每秒往同一设备频道
     //   广播 PC_PRESENCE(viewing=true)，收到就记时刻。仅在**后端查询失败**时作为回退判定。
+    // ============ 按推流分辨率限观看人数（后端拉流鉴权真正拦；这里提示 + 切 2K/4K 前拦）============
+    //   后端 TryDisconnect 带 streamViewerLimits：{srs:{r720,r1080,r2k,r4k}, srt:{…}}，已是生效人数。OTG 走多人线路 SRS。
+    property var streamViewerLimits: ({})
+    property string streamViewerLimitsJson: ""
+    property int otherViewerCount: 0               // 别的电脑在看几台（后端 viewer-count，定时刷新）
+    readonly property string multiViewBanText: "8K原画下禁止多人观看 网络易崩溃"
+    function resBucket(w, h) {
+        var e = Math.max(w, h)
+        return e <= 1280 ? "r720" : (e <= 1920 ? "r1080" : (e <= 2560 ? "r2k" : "r4k"))
+    }
+    // 该分辨率最多几人看（0 = 不知道 / 单人线路 P2P 不限）
+    function viewerLimitForSize(w, h) {
+        var m = mainPage.connectMode === 0 ? mainPage.streamViewerLimits["srs"] : null
+        if (!m || !(w > 0 && h > 0)) return 0
+        var n = Number(m[resBucket(w, h)])
+        return isFinite(n) && n > 0 ? n : 0
+    }
+    function viewerLimitBlocks(w, h) {
+        if (Math.max(w, h) <= 1920) return false
+        var limit = viewerLimitForSize(w, h)
+        if (limit <= 0) return false
+        return Math.max(mainPage.otherViewerCount, otherPcWatching() ? 1 : 0) >= limit
+    }
+    function viewerLimitDeniedText(w, h) {
+        var limit = viewerLimitForSize(w, h)
+        var others = Math.max(mainPage.otherViewerCount, otherPcWatching() ? 1 : 0)
+        return "已有 " + others + " 台别的电脑在看，" + w + "×" + h
+               + (limit <= 1 ? " 原画禁止多人观看（" + mainPage.multiViewBanText + "）" : " 最多 " + limit + " 人看")
+               + "，请先关掉别的电脑再切"
+    }
+    function applyViewerLimits(o) {
+        if (!o || typeof o !== "object") return
+        var js = JSON.stringify(o)
+        if (js === mainPage.streamViewerLimitsJson) return
+        mainPage.streamViewerLimitsJson = js
+        mainPage.streamViewerLimits = o
+    }
+    Timer {
+        interval: 10000
+        repeat: true
+        running: mainPage.deviceOnline && CameraCapsStore.isOtg
+        triggeredOnStart: true
+        onTriggered: mainPage.queryViewerCountThen(function(n) { mainPage.otherViewerCount = n })
+    }
+
     property double lastOtherPcPresenceMs: 0
     function otherPcWatching() {
         // presence 每 1s 一条，3s 窗口内收到过 = 当前确实有别的 PC 在看
@@ -10030,8 +10095,12 @@ Rectangle {
                 CameraCapsStore.applyCaps(message.caps)
             }
         }
-        // ============ RESET_PUBLISH / TryDisconnect：忽略 ============
-        else if (msgType === "RESET_PUBLISH" || msgType === "TryDisconnect") {
+        // ============ TryDisconnect：只取按分辨率的观看人数上限 ============
+        else if (msgType === "TryDisconnect") {
+            if (expectedDeviceId && expectedDeviceId === msgDeviceId) applyViewerLimits(message.streamViewerLimits)
+        }
+        // ============ RESET_PUBLISH：忽略 ============
+        else if (msgType === "RESET_PUBLISH") {
             // 忽略
         }
     }
