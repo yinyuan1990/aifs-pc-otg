@@ -5375,8 +5375,8 @@ Rectangle {
             webrtcClient.disconnect()
         }
         gstPlayer.stop()
-        slowMotionPlayer.clear()
-        captureManager.slowMotionActive = false
+        // 慢放（录像框）不在这里清：断线 / 重连 / 重拉都走 stopAll，同一观看会话内帧库不删、帧号续增（§88），
+        //   录像内容保留到关客户端；只在切设备 / 切账号 / 退登录（resetStreamStateForSwitch，帧库随会话作废）时清
         console.log("🛑 stopAll: 完成")
     }
     
@@ -5448,6 +5448,8 @@ Rectangle {
         clearVideoSurface()
         // §88：截图/慢放帧库随「观看会话」清场——只在这里清（切设备/切账号/退登录）。
         //   管线内部重建（看门狗自愈/心跳清屏重连）不再清帧库，断流重连后旧截图不再变假图。
+        slowMotionPlayer.clear()
+        captureManager.slowMotionActive = false
         gstPlayer.resetCaptureSession()
         publishState = 0
         isConnecting = false
