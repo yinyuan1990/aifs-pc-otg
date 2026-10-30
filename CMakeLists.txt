@@ -5,7 +5,7 @@ project(Phoenix VERSION 0.1 LANGUAGES C CXX)
 # ⭐ §43 版本号单一来源：发版只改这一行！
 #   - autoupdater.cpp 经宏 PHOENIX_VERSION_STR 得到当前版本（不再硬编码）
 #   - pack.bat 解析本行生成 manifest.json / yqlversion_new.json
-set(PHOENIX_APP_VERSION "1.0.10")
+set(PHOENIX_APP_VERSION "1.0.11")
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -213,6 +213,9 @@ set(PHOENIX_QML_FILES
     LiveBarButton.qml        # 公用：实时流底部按钮
     LiveBarMenu.qml          # 公用：实时流底部下拉
     OtgLiveControlBar.qml    # OTG 版实时流底部按钮栏
+    PcSecondaryPrompt.qml    # 输入 PC 二级密码的小弹框（登录页 / 主界面共用）
+    PcSecurityPanel.qml      # 切换账户里的「设备列表」「二级密码」弹框
+    PcKickPanel.qml          # 登录超电脑上限时的电脑列表（二级密码移除一台后重登）
 )
 if(HAVE_KERNEL_TEST)
     list(APPEND PHOENIX_QML_FILES KernelTestView.qml)
