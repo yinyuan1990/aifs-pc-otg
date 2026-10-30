@@ -136,12 +136,26 @@ QNetworkReply* HttpClient::post(const QString &endpoint, const QJsonObject &body
         request.setRawHeader("Authorization", ("Bearer " + m_authToken).toUtf8());
         qDebug() << "[HTTP] Token attached";
     }
+    attachPcSecondary(request, endpoint);
     
     QJsonDocument doc(body);
     QByteArray jsonData = doc.toJson(QJsonDocument::Compact);
     qDebug() << "[HTTP] Body ->" << jsonData;
     
     return m_manager->post(request, jsonData);
+}
+
+// PC 二级密码只给这几类敏感接口带（解绑 / 备注 / 改 PC 密码 / 设备列表改动），带一次就清
+void HttpClient::attachPcSecondary(QNetworkRequest &request, const QString &endpoint)
+{
+    if (m_nextPcSecondary.isEmpty()) return;
+    const bool sensitive = endpoint.contains("/api/binding/set-remark")
+        || endpoint.contains("/api/binding/windows-unbind/")
+        || endpoint.contains("/api/user/password")
+        || endpoint.contains("/api/binding/pc-security/device-");
+    if (!sensitive) return;
+    request.setRawHeader("X-Pc-Secondary", m_nextPcSecondary.toUtf8());
+    m_nextPcSecondary.clear();
 }
 
 QNetworkReply* HttpClient::get(const QString &endpoint)
@@ -189,6 +203,16 @@ void HttpClient::login(const QString &username, const QString &password, int pcL
         body["deviceUsername"] = deviceUsername;
         qDebug() << "[Login] 指定设备登录:" << deviceUsername;
     }
+    // 新电脑第一次登录、账号开了二级密码：用户在弹框里输的那次重登才带
+    if (!m_loginPcSecondary.isEmpty()) {
+        body["pcSecondaryPassword"] = m_loginPcSecondary;
+        m_loginPcSecondary.clear();
+    }
+    m_lastLoginUsername = username;
+    m_lastLoginPassword = password;
+    m_lastLoginPcLevel = pcLevel;
+    m_lastLoginDeviceUsername = deviceUsername;
+    m_lastLoginFallback = fallbackOnUnboundDevice;
     
     qDebug() << "[Login] pcDeviceId:" << m_pcDeviceId << "pcLevel:" << pcLevel;
     
@@ -254,6 +278,23 @@ void HttpClient::login(const QString &username, const QString &password, int pcL
                     QString downloadUrl = obj["downloadUrl"].toString();
                     qDebug() << "[Login] 需要更新版本, downloadUrl:" << downloadUrl;
                     emit loginNeedUpdate(errorMsg, downloadUrl);
+                    return;
+                }
+                // 账号开了二级密码、这台电脑第一次登录（或输错）：页面弹框收密码后 retryLoginWithPcSecondary
+                if (obj.value("needPcSecondary").toBool(false)) {
+                    const QString n = obj.value("pcSecondaryName").toString();
+                    if (!n.isEmpty()) m_pcSecondaryName = n;
+                    qDebug() << "[Login] 需要" << m_pcSecondaryName << ":" << errorMsg;
+                    emit loginNeedPcSecondary(errorMsg);
+                    return;
+                }
+                // 这台新电脑超出账号电脑数上限：后端带了电脑列表（开了二级密码还带移除凭证），页面弹管理列表
+                if (obj["code"].toInt(0) == 1009 && obj.value("pcKick").isObject()) {
+                    const QJsonObject kick = obj.value("pcKick").toObject();
+                    const QString n = kick.value("secondaryName").toString();
+                    if (!n.isEmpty()) m_pcSecondaryName = n;
+                    qDebug() << "[Login] 超电脑上限，弹管理列表 allowed=" << kick.value("allowed").toBool();
+                    emit loginNeedPcKick(errorMsg, kick.toVariantMap());
                     return;
                 }
                 // ⭐ 2026-08-01：code=1004「未绑定该设备」自动回退（登录页路径专用）。
@@ -385,6 +426,11 @@ void HttpClient::login(const QString &username, const QString &password, int pcL
         // ⭐ 2026-07-11：AI 白名单（该 PC 设备号在总后台 AI 白名单 → 走原来 fps 逻辑，不因装了 AI 编程工具锁 30）
         m_aiWhitelisted = obj["aiWhitelisted"].toBool(false);
         qDebug() << "[Login] aiWhitelisted:" << m_aiWhitelisted;
+        m_pcSecondaryEnabled = obj["pcSecondaryEnabled"].toBool(false);
+        {
+            const QString n = obj["pcSecondaryName"].toString().trimmed();
+            m_pcSecondaryName = n.isEmpty() ? QStringLiteral("二级密码") : n;
+        }
         
         qDebug() << "[Login] Success! Username:" << m_loggedInUsername 
                  << "DeviceId:" << deviceId << "DeviceUsername:" << deviceUser 
@@ -643,6 +689,73 @@ void HttpClient::bindDevice(const QString &controlUsername, const QString &devic
         
         qDebug() << "[Bind] Success!" << message;
         emit bindDeviceSuccess(message);
+    });
+}
+
+void HttpClient::retryLoginWithPcSecondary(const QString &pw)
+{
+    if (m_lastLoginUsername.isEmpty()) return;
+    m_loginPcSecondary = pw.trimmed();
+    login(m_lastLoginUsername, m_lastLoginPassword, m_lastLoginPcLevel, m_lastLoginDeviceUsername, m_lastLoginFallback);
+}
+
+void HttpClient::fetchPcSecurity()
+{
+    QNetworkReply *reply = get("/api/binding/pc-security");
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        reply->deleteLater();
+        const QJsonDocument doc = QJsonDocument::fromJson(reply->readAll());
+        const QJsonObject obj = doc.isObject() ? doc.object() : QJsonObject();
+        if (reply->error() != QNetworkReply::NoError || !obj.contains("pcSecondaryEnabled")) {
+            QVariantMap err;
+            err["error"] = obj.value("error").toString(reply->error() == QNetworkReply::ContentNotFoundError
+                    ? QStringLiteral("服务器还没升级，暂时用不了") : QStringLiteral("加载失败，请重试"));
+            emit pcSecurityReceived(err);
+            return;
+        }
+        m_pcSecondaryEnabled = obj.value("pcSecondaryEnabled").toBool(false);
+        const QString n = obj.value("pcSecondaryName").toString().trimmed();
+        if (!n.isEmpty()) m_pcSecondaryName = n;
+        emit pcSecurityReceived(obj.toVariantMap());
+    });
+}
+
+void HttpClient::pcSecurityPost(const QString &action, const QVariantMap &body)
+{
+    QNetworkReply *reply = post("/api/binding/pc-security/" + action, QJsonObject::fromVariantMap(body));
+    connect(reply, &QNetworkReply::finished, this, [this, reply, action]() {
+        reply->deleteLater();
+        const int httpCode = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        const QJsonDocument doc = QJsonDocument::fromJson(reply->readAll());
+        const QJsonObject obj = doc.isObject() ? doc.object() : QJsonObject();
+        const bool ok = httpCode == 200 && !obj.contains("error");
+        const QString msg = ok ? obj.value("message").toString()
+                               : obj.value("error").toString(QStringLiteral("操作失败，请重试"));
+        if (ok && action == "enable") m_pcSecondaryEnabled = true;
+        if (ok && action == "disable") m_pcSecondaryEnabled = false;
+        emit pcSecurityDone(action, ok, msg);
+    });
+}
+
+void HttpClient::pcKickDevice(const QString &ticket, const QString &targetPcDeviceId, const QString &pw)
+{
+    QJsonObject body;
+    body["ticket"] = ticket;
+    body["pcDeviceId"] = m_pcDeviceId;
+    body["targetPcDeviceId"] = targetPcDeviceId;
+    body["pcSecondaryPassword"] = pw.trimmed();
+    QNetworkReply *reply = post("/api/auth/pc-device-kick", body);
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        reply->deleteLater();
+        const int httpCode = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        const QJsonDocument doc = QJsonDocument::fromJson(reply->readAll());
+        const QJsonObject obj = doc.isObject() ? doc.object() : QJsonObject();
+        const bool ok = httpCode == 200 && !obj.contains("error");
+        QString msg = ok ? obj.value("message").toString()
+                         : obj.value("error").toString(httpCode == 0 ? QStringLiteral("网络连接异常，请重试")
+                                                                     : QStringLiteral("操作失败，请重试"));
+        qDebug() << "[PcKick]" << ok << msg;
+        emit pcKickDone(ok, msg);
     });
 }
 
@@ -1426,6 +1539,7 @@ QNetworkReply* HttpClient::put(const QString &endpoint, const QJsonObject &body)
     if (!m_authToken.isEmpty() && !isAuthExemptEndpoint(endpoint)) {
         request.setRawHeader("Authorization", QString("Bearer %1").arg(m_authToken).toUtf8());
     }
+    attachPcSecondary(request, endpoint);
     
     QByteArray jsonData = QJsonDocument(body).toJson(QJsonDocument::Compact);
     qDebug() << "[HTTP] PUT ->" << endpoint << jsonData;

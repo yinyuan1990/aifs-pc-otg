@@ -12319,12 +12319,35 @@ Rectangle {
         toastContainer.opacity = 1
         toastTimer.restart()
     }
+
+    // PC 二级密码：开了的账号，改密码 / 解绑 / 备注前先弹框，输完挂到这一次请求上；没开直接执行
+    PcSecondaryPrompt { id: pcSecPrompt }
+    PcSecurityPanel { id: pcSecurityPanel }
+    PcKickPanel { id: pcKickPanel }
+    function requirePcSecondary(title, cb) {
+        if (!HttpClient.pcSecondaryEnabled()) { cb(); return }
+        pcSecPrompt.ask(title, "", function(pw) { HttpClient.setNextPcSecondary(pw); cb() })
+    }
+    // 切换账户 / 切换设备时，这台电脑对新账号是第一次登录且对方开了二级密码，或超出电脑数上限
+    Connections {
+        target: HttpClient
+        function onLoginNeedPcSecondary(message) {
+            pcSecPrompt.ask("新电脑登录验证", message,
+                function(pw) { HttpClient.retryLoginWithPcSecondary(pw) },
+                function() { HttpClient.loginFailed(1007, "已取消：需要输入" + HttpClient.pcSecondaryName() + "才能登录") })
+        }
+        function onLoginNeedPcKick(message, data) {
+            pcKickPanel.show(message, data,
+                function(pw) { HttpClient.retryLoginWithPcSecondary(pw) },
+                function() { HttpClient.loginFailed(1009, message) })
+        }
+    }
     
     // ============ 切换账号对话框 ============
     Dialog {
         id: switchAccountDialog
         anchors.centerIn: parent
-        width: 500
+        width: 600
         height: 500
         modal: true
         
@@ -12384,8 +12407,43 @@ Rectangle {
                 }
             }
             
+            // 二级密码（开关 / 修改）、设备列表（这个 PC 账号登录过的电脑）
+            Row {
+                anchors.right: switchRefreshBtn.left
+                anchors.rightMargin: 8
+                anchors.verticalCenter: parent.verticalCenter
+                spacing: 8
+                Repeater {
+                    model: [
+                        { key: "devices", label: "设备列表" },
+                        { key: "secondary", label: HttpClient.pcSecondaryName() }
+                    ]
+                    delegate: Rectangle {
+                        width: hdrLabel.implicitWidth + 20
+                        height: 28
+                        radius: 4
+                        color: hdrBtnArea.containsMouse ? "#C8E6C9" : "#E8F5E9"
+                        Text {
+                            id: hdrLabel
+                            anchors.centerIn: parent
+                            text: modelData.label
+                            font.pixelSize: 12
+                            color: "#2E7D32"
+                        }
+                        MouseArea {
+                            id: hdrBtnArea
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: pcSecurityPanel.show(modelData.key)
+                        }
+                    }
+                }
+            }
+
             // 刷新按钮
             Rectangle {
+                id: switchRefreshBtn
                 anchors.right: switchCloseBtn.left
                 anchors.rightMargin: 12
                 anchors.verticalCenter: parent.verticalCenter
@@ -13104,12 +13162,11 @@ Rectangle {
                         cursorShape: Qt.PointingHandCursor
                         onClicked: {
                             var newRemark = remarkInput.text.trim()
-                            HttpClient.setRemark(
-                                remarkDialog.controlUsername,
-                                remarkDialog.deviceUsername,
-                                newRemark
-                            )
+                            var cu = remarkDialog.controlUsername, du = remarkDialog.deviceUsername
                             remarkDialog.close()
+                            requirePcSecondary("修改备注需要" + HttpClient.pcSecondaryName(), function() {
+                                HttpClient.setRemark(cu, du, newRemark)
+                            })
                         }
                     }
                 }
@@ -13729,8 +13786,10 @@ Rectangle {
                                 showToast("两次输入的新密码不一致")
                                 return
                             }
-                            HttpClient.changeLoginPassword(oldPwd, newPwd)
-                            showToast("正在修改登录密码...")
+                            requirePcSecondary("修改密码需要" + HttpClient.pcSecondaryName(), function() {
+                                HttpClient.changeLoginPassword(oldPwd, newPwd)
+                                showToast("正在修改登录密码...")
+                            })
                         }
                     }
                 }
@@ -14024,9 +14083,12 @@ Rectangle {
                                 return
                             }
                             console.log("📍 发送解绑请求 - bindingId:", unbindConfirmDialog.bindingId, "passwordLen:", password.length)
-                            HttpClient.windowsUnbind(unbindConfirmDialog.bindingId, password)
+                            var bid = unbindConfirmDialog.bindingId
                             unbindConfirmDialog.close()
-                            showToast("正在解绑...")
+                            requirePcSecondary("解绑需要" + HttpClient.pcSecondaryName(), function() {
+                                HttpClient.windowsUnbind(bid, password)
+                                showToast("正在解绑...")
+                            })
                         }
                     }
                 }

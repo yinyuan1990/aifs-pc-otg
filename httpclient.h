@@ -9,6 +9,7 @@
 #include <QJsonDocument>
 #include <QSettings>
 #include <QSysInfo>
+#include <QVariantMap>
 
 /**
  * 登录响应数据结构
@@ -104,6 +105,18 @@ public:
     Q_INVOKABLE bool highSpeed240Allowed() const { return m_highSpeed240Allowed; }
     // ⭐ 2026-07-11：AI 白名单（登录响应下发）。true=该 PC 设备号在总后台 AI 白名单 → 走原来 fps 逻辑，不锁 30。
     Q_INVOKABLE bool aiWhitelisted() const { return m_aiWhitelisted; }
+    // PC 二级密码（默认关，用户在「切换账户」里自己开）：开了以后改密码 / 解绑 / 备注 / 设备列表改动、新电脑登录要输
+    Q_INVOKABLE bool pcSecondaryEnabled() const { return m_pcSecondaryEnabled; }
+    Q_INVOKABLE QString pcSecondaryName() const { return m_pcSecondaryName; }
+    // 下一次敏感请求（解绑 / 备注 / 改密码 / 设备列表改动）带上的二级密码，用完即清
+    Q_INVOKABLE void setNextPcSecondary(const QString &pw) { m_nextPcSecondary = pw.trimmed(); }
+    // 登录被要求二级密码（loginNeedPcSecondary）后，带上它按原参数重登
+    Q_INVOKABLE void retryLoginWithPcSecondary(const QString &pw);
+    // 「切换账户 → 设备列表 / 二级密码」：GET 状态 + 电脑列表；POST enable/disable/change/device-remark/device-remove
+    Q_INVOKABLE void fetchPcSecurity();
+    Q_INVOKABLE void pcSecurityPost(const QString &action, const QVariantMap &body);
+    // 登录超电脑上限（loginNeedPcKick）：凭登录返回的凭证 + 二级密码移除一台，结果 pcKickDone，成功后页面再 retryLoginWithPcSecondary
+    Q_INVOKABLE void pcKickDevice(const QString &ticket, const QString &targetPcDeviceId, const QString &pw);
     // ⭐ 2026-07-11：本机是否装了主流 AI 编程工具（Cursor/VSCode/Codex 等）。装了且不在 AI 白名单则推流 fps 锁 30。
     Q_INVOKABLE bool aiCodingToolsDetected() const;
     Q_INVOKABLE void copyToClipboard(const QString &text);
@@ -301,6 +314,11 @@ signals:
     
     // 在线状态结果信号
     void onlineStatusReceived(const QJsonArray &list);
+    void loginNeedPcSecondary(const QString &message);
+    void pcSecurityReceived(const QVariantMap &data);
+    void pcSecurityDone(const QString &action, bool ok, const QString &message);
+    void loginNeedPcKick(const QString &message, const QVariantMap &data);
+    void pcKickDone(bool ok, const QString &message);
     void onlineStatusFailed(int code, const QString &message);
     
     // 设置备注结果信号
@@ -364,6 +382,7 @@ private:
     
     // 判断是否为免认证接口
     bool isAuthExemptEndpoint(const QString &endpoint) const;
+    void attachPcSecondary(QNetworkRequest &request, const QString &endpoint);
     
     // 生成/获取PC设备唯一标识
     QString generatePcDeviceId();
@@ -393,6 +412,13 @@ private:
     QString m_currentDeviceUsername;  // ⭐ 本次登录实际绑定的设备账号
     int m_pcActivationLevel = 0;  // PC端等级，1=豪华版，2=AI全能版
     bool m_aiWhitelisted = false;  // ⭐ AI 白名单：登录响应 aiWhitelisted，命中则走原来 fps 逻辑（不锁 30）
+    bool m_pcSecondaryEnabled = false;
+    QString m_pcSecondaryName = QStringLiteral("二级密码");
+    QString m_nextPcSecondary;
+    QString m_loginPcSecondary;
+    QString m_lastLoginUsername, m_lastLoginPassword, m_lastLoginDeviceUsername;
+    int m_lastLoginPcLevel = 1;
+    bool m_lastLoginFallback = false;
     QString m_pcLevelName;         // 等级名称
     QString m_pcExpireAt;          // AI全能版到期时间
     QString m_pcDeviceId;          // PC设备唯一标识

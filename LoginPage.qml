@@ -222,6 +222,26 @@ Rectangle {
             }
         }
 
+        // 账号开了二级密码、这台电脑第一次登录：弹框输二级密码后按原参数重登（以后这台电脑不再问）
+        function onLoginNeedPcSecondary(message) {
+            loginError = ""
+            loginPcSecPrompt.ask("新电脑登录验证", message,
+                function(pw) { HttpClient.retryLoginWithPcSecondary(pw) },
+                function() {
+                    isLoggingIn = false
+                    loggingInLevel = 0
+                    loginError = "需要输入" + HttpClient.pcSecondaryName() + "才能在这台电脑登录"
+                })
+        }
+
+        // 这台新电脑超出账号电脑数上限：弹电脑列表，输对二级密码移除一台后按原参数重登
+        function onLoginNeedPcKick(message, data) {
+            loginError = ""
+            loginPcKickPanel.show(message, data,
+                function(pw) { HttpClient.retryLoginWithPcSecondary(pw) },
+                function() { HttpClient.loginFailed(1009, message) })
+        }
+
         // §44.2 强制版本号拦截：弹框提示更新 + 点击用浏览器下载新版 exe
         function onLoginNeedUpdate(message, downloadUrl) {
             console.log("需要更新版本:", message, "下载地址:", downloadUrl)
@@ -2025,6 +2045,9 @@ Rectangle {
             onClicked: {}  // 遮罩不允许点击关闭，强制用户处理
         }
     }
+
+    PcSecondaryPrompt { id: loginPcSecPrompt }
+    PcKickPanel { id: loginPcKickPanel }
 
     // ============ 版本过低·需更新对话框 ============
     Rectangle {
