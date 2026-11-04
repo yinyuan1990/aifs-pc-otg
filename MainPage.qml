@@ -9085,14 +9085,15 @@ Rectangle {
             //   现在：P2P 且画面仍有帧 → 只降级状态显示（在线灯灰 + 心跳派生读数复位），
             //   **不停流不清屏**。WS 自动重连(§53.23)恢复后心跳回来一切照旧；断网期间
             //   参数下发自然不可用（用户口径：第一步只保画面）。ICE 若真死了，§54 常驻循环兜底。
-            //   SRS 模式媒体走服务器，服务器断了画面必死 → 维持原收口不变。
+            //   SRS / SRT 模式媒体走节点、也不经主服务器（11-04：后端每次部署 WS 断，这里原来对非 P2P 无条件 stopAll，
+            //   画面跟着黑）→ 同样保画面；流真没了由心跳超时 + 无帧收口。
             //   ⚠️ 必须带 publishState===1：所有**主动**断开路径（切换账号/切设备/退出登录/
             //   睡眠/被踢）都是「先 resetStreamStateForSwitch/stopAll（其中 publishState 已置 0）、
             //   后断 WS」——publishState 条件保证这些"必须断"的场景绝不会误入保画面分支
             //  （fps 统计有 ~1s 时效，单靠它可能撞上停流后的陈旧读数）。
-            if (connectMode === 1 && publishState === 1 && currentPlayingFps() > 0) {
-                console.log("🔌 STOMP 断开但 P2P 画面仍在(" + currentPlayingFps() + "fps) → 保画面，只降级状态显示（需求#9）")
-                statusText.text = "信令已断开（P2P 画面直连中，等待重连）"
+            if (publishState === 1 && currentPlayingFps() > 0) {
+                console.log("🔌 STOMP 断开但画面仍在(mode=" + connectMode + ", " + currentPlayingFps() + "fps) → 保画面，只降级状态显示（需求#9）")
+                statusText.text = connectMode === 1 ? "信令已断开（P2P 画面直连中，等待重连）" : "信令已断开（画面继续播放，等待重连）"
                 mainPage.deviceOnline = false
                 mainPage.resetDeviceReportedStats()
                 liveInfoFps.text = "FPS: --"
