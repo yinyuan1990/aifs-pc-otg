@@ -113,6 +113,7 @@ bool HttpClient::isAuthExemptEndpoint(const QString &endpoint) const
     QString p = endpoint.toLower();
     return p.contains("/api/auth/login") || 
            p.contains("/api/auth/register") ||
+           p.contains("/api/auth/captcha") ||     // 登录前领验证码：不带旧 token（作废的 token 会被 401）
            p.contains("/register") ||
            p.contains("/api/binding/devices") ||  // 查询绑定设备列表不需要 Token
            p.contains("/api/binding/manual-bind");  // 手动绑定不需要 Token
@@ -208,6 +209,13 @@ void HttpClient::login(const QString &username, const QString &password, int pcL
         body["pcSecondaryPassword"] = m_loginPcSecondary;
         m_loginPcSecondary.clear();
     }
+    // 图形验证码：用户在弹框里点完字的那次重登才带（验证码一次性，用完即清）
+    if (!m_loginCaptchaId.isEmpty()) {
+        body["captchaId"] = m_loginCaptchaId;
+        body["captchaTrack"] = QJsonObject::fromVariantMap(m_loginCaptchaTrack);
+        m_loginCaptchaId.clear();
+        m_loginCaptchaTrack.clear();
+    }
     m_lastLoginUsername = username;
     m_lastLoginPassword = password;
     m_lastLoginPcLevel = pcLevel;
@@ -278,6 +286,12 @@ void HttpClient::login(const QString &username, const QString &password, int pcL
                     QString downloadUrl = obj["downloadUrl"].toString();
                     qDebug() << "[Login] 需要更新版本, downloadUrl:" << downloadUrl;
                     emit loginNeedUpdate(errorMsg, downloadUrl);
+                    return;
+                }
+                // 后台开了 PC 登录图形验证码：页面弹验证码（1010 没带 / 1011 没通过），点完后 retryLoginWithCaptcha
+                if (obj.value("needCaptcha").toBool(false)) {
+                    qDebug() << "[Login] 需要图形验证 code=" << obj["code"].toInt(0) << ":" << errorMsg;
+                    emit loginNeedCaptcha(obj["code"].toInt(0) == 1011 ? errorMsg : QString());
                     return;
                 }
                 // 账号开了二级密码、这台电脑第一次登录（或输错）：页面弹框收密码后 retryLoginWithPcSecondary
@@ -696,6 +710,38 @@ void HttpClient::retryLoginWithPcSecondary(const QString &pw)
 {
     if (m_lastLoginUsername.isEmpty()) return;
     m_loginPcSecondary = pw.trimmed();
+    login(m_lastLoginUsername, m_lastLoginPassword, m_lastLoginPcLevel, m_lastLoginDeviceUsername, m_lastLoginFallback);
+}
+
+void HttpClient::fetchCaptcha()
+{
+    QNetworkReply *reply = get("/api/auth/captcha");
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        reply->deleteLater();
+        const QJsonObject obj = QJsonDocument::fromJson(reply->readAll()).object();
+        if (reply->error() != QNetworkReply::NoError || obj.value("captchaId").toString().isEmpty()) {
+            QString msg = obj.value("error").toString();
+            if (msg.isEmpty()) msg = QStringLiteral("获取验证码失败，请点「换一张」重试");
+            qDebug() << "[Captcha] 获取失败:" << reply->errorString() << msg;
+            emit captchaFetchFailed(msg);
+            return;
+        }
+        // 后端给的是 base64（可能已带 data: 前缀），QML Image 直接用 data URL 显示
+        auto dataUrl = [](const QString &s, const QString &mime) {
+            return s.startsWith(QStringLiteral("data:")) ? s : QStringLiteral("data:%1;base64,%2").arg(mime, s);
+        };
+        QVariantMap m = obj.toVariantMap();
+        m["backgroundImage"] = dataUrl(obj.value("backgroundImage").toString(), QStringLiteral("image/jpeg"));
+        m["templateImage"] = dataUrl(obj.value("templateImage").toString(), QStringLiteral("image/png"));
+        emit captchaReady(m);
+    });
+}
+
+void HttpClient::retryLoginWithCaptcha(const QString &captchaId, const QVariantMap &track)
+{
+    if (m_lastLoginUsername.isEmpty()) return;
+    m_loginCaptchaId = captchaId;
+    m_loginCaptchaTrack = track;
     login(m_lastLoginUsername, m_lastLoginPassword, m_lastLoginPcLevel, m_lastLoginDeviceUsername, m_lastLoginFallback);
 }
 

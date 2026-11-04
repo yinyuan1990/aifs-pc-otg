@@ -234,6 +234,18 @@ Rectangle {
                 })
         }
 
+        // 后台开了 PC 登录图形验证码：弹验证码，依次点完字后带上坐标按原参数重登
+        function onLoginNeedCaptcha(message) {
+            loginError = ""
+            loginCaptchaPrompt.ask(message,
+                function(id, track) { HttpClient.retryLoginWithCaptcha(id, track) },
+                function() {
+                    isLoggingIn = false
+                    loggingInLevel = 0
+                    loginError = "需要完成图形验证才能登录"
+                })
+        }
+
         // 这台新电脑超出账号电脑数上限：弹电脑列表，输对二级密码移除一台后按原参数重登
         function onLoginNeedPcKick(message, data) {
             loginError = ""
@@ -2048,6 +2060,7 @@ Rectangle {
 
     PcSecondaryPrompt { id: loginPcSecPrompt }
     PcKickPanel { id: loginPcKickPanel }
+    CaptchaPrompt { id: loginCaptchaPrompt }
 
     // ============ 版本过低·需更新对话框 ============
     Rectangle {

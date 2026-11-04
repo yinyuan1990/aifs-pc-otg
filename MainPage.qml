@@ -12342,7 +12342,13 @@ Rectangle {
                 function(pw) { HttpClient.retryLoginWithPcSecondary(pw) },
                 function() { HttpClient.loginFailed(1009, message) })
         }
+        function onLoginNeedCaptcha(message) {
+            captchaPrompt.ask(message,
+                function(id, track) { HttpClient.retryLoginWithCaptcha(id, track) },
+                function() { HttpClient.loginFailed(1010, "已取消：需要完成图形验证才能登录") })
+        }
     }
+    CaptchaPrompt { id: captchaPrompt }
     
     // ============ 切换账号对话框 ============
     Dialog {

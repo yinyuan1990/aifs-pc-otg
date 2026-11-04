@@ -112,6 +112,10 @@ public:
     Q_INVOKABLE void setNextPcSecondary(const QString &pw) { m_nextPcSecondary = pw.trimmed(); }
     // 登录被要求二级密码（loginNeedPcSecondary）后，带上它按原参数重登
     Q_INVOKABLE void retryLoginWithPcSecondary(const QString &pw);
+    // 登录被要求图形验证码（loginNeedCaptcha）：fetchCaptcha 领一张（captchaReady / captchaFetchFailed），
+    // 用户依次点完字后 retryLoginWithCaptcha 带上点击坐标按原参数重登
+    Q_INVOKABLE void fetchCaptcha();
+    Q_INVOKABLE void retryLoginWithCaptcha(const QString &captchaId, const QVariantMap &track);
     // 「切换账户 → 设备列表 / 二级密码」：GET 状态 + 电脑列表；POST enable/disable/change/device-remark/device-remove
     Q_INVOKABLE void fetchPcSecurity();
     Q_INVOKABLE void pcSecurityPost(const QString &action, const QVariantMap &body);
@@ -315,6 +319,9 @@ signals:
     // 在线状态结果信号
     void onlineStatusReceived(const QJsonArray &list);
     void loginNeedPcSecondary(const QString &message);
+    void loginNeedCaptcha(const QString &message);
+    void captchaReady(const QVariantMap &captcha);
+    void captchaFetchFailed(const QString &message);
     void pcSecurityReceived(const QVariantMap &data);
     void pcSecurityDone(const QString &action, bool ok, const QString &message);
     void loginNeedPcKick(const QString &message, const QVariantMap &data);
@@ -416,6 +423,8 @@ private:
     QString m_pcSecondaryName = QStringLiteral("二级密码");
     QString m_nextPcSecondary;
     QString m_loginPcSecondary;
+    QString m_loginCaptchaId;
+    QVariantMap m_loginCaptchaTrack;
     QString m_lastLoginUsername, m_lastLoginPassword, m_lastLoginDeviceUsername;
     int m_lastLoginPcLevel = 1;
     bool m_lastLoginFallback = false;
