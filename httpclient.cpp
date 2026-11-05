@@ -204,6 +204,10 @@ void HttpClient::login(const QString &username, const QString &password, int pcL
         body["deviceUsername"] = deviceUsername;
         qDebug() << "[Login] 指定设备登录:" << deviceUsername;
     }
+    // 已登录状态下的重登 = 主界面切换账户 / 切换设备：带上当前 token，后端核对是这台电脑正登着的 PC 账号就不要图形验证码
+    if (!m_authToken.isEmpty() && !m_loggedInUsername.isEmpty()) {
+        body["switchToken"] = m_authToken;
+    }
     // 新电脑第一次登录、账号开了二级密码：用户在弹框里输的那次重登才带
     if (!m_loginPcSecondary.isEmpty()) {
         body["pcSecondaryPassword"] = m_loginPcSecondary;
@@ -750,6 +754,40 @@ void HttpClient::retryLoginWithCaptcha(const QString &captchaId, const QVariantM
     login(m_lastLoginUsername, m_lastLoginPassword, m_lastLoginPcLevel, m_lastLoginDeviceUsername, m_lastLoginFallback);
 }
 
+bool HttpClient::askOpCaptcha(const QJsonObject &resp, std::function<void(const QJsonObject &)> retry,
+                              std::function<void()> cancel)
+{
+    if (!resp.value("needCaptcha").toBool(false)) return false;
+    m_opCaptchaRetry = std::move(retry);
+    m_opCaptchaCancel = std::move(cancel);
+    qDebug() << "[Captcha] 操作需要图形验证 code=" << resp.value("code").toInt(0);
+    emit opNeedCaptcha(resp.value("code").toInt(0) == 1011 ? resp.value("error").toString() : QString());
+    return true;
+}
+
+void HttpClient::retryOpWithCaptcha(const QString &captchaId, const QVariantMap &track)
+{
+    auto retry = std::move(m_opCaptchaRetry);
+    m_opCaptchaRetry = nullptr;
+    m_opCaptchaCancel = nullptr;
+    if (!retry) return;
+    QJsonObject cap;
+    cap["captchaId"] = captchaId;
+    if (track.contains(QStringLiteral("answer")))   // 数字计算：只交结果
+        cap["captchaAnswer"] = track.value(QStringLiteral("answer")).toString();
+    else
+        cap["captchaTrack"] = QJsonObject::fromVariantMap(track);
+    retry(cap);
+}
+
+void HttpClient::cancelOpCaptcha()
+{
+    auto cancel = std::move(m_opCaptchaCancel);
+    m_opCaptchaRetry = nullptr;
+    m_opCaptchaCancel = nullptr;
+    if (cancel) cancel();
+}
+
 void HttpClient::fetchPcSecurity()
 {
     QNetworkReply *reply = get("/api/binding/pc-security");
@@ -773,12 +811,26 @@ void HttpClient::fetchPcSecurity()
 
 void HttpClient::pcSecurityPost(const QString &action, const QVariantMap &body)
 {
-    QNetworkReply *reply = post("/api/binding/pc-security/" + action, QJsonObject::fromVariantMap(body));
-    connect(reply, &QNetworkReply::finished, this, [this, reply, action]() {
+    sendPcSecurity(action, QJsonObject::fromVariantMap(body));
+}
+
+void HttpClient::sendPcSecurity(const QString &action, const QJsonObject &body)
+{
+    QNetworkReply *reply = post("/api/binding/pc-security/" + action, body);
+    connect(reply, &QNetworkReply::finished, this, [this, reply, action, body]() {
         reply->deleteLater();
         const int httpCode = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         const QJsonDocument doc = QJsonDocument::fromJson(reply->readAll());
         const QJsonObject obj = doc.isObject() ? doc.object() : QJsonObject();
+        if (askOpCaptcha(obj,
+                [this, action, body](const QJsonObject &cap) {
+                    QJsonObject b = body;
+                    for (auto it = cap.begin(); it != cap.end(); ++it) b[it.key()] = it.value();
+                    sendPcSecurity(action, b);
+                },
+                [this, action]() { emit pcSecurityDone(action, false, QStringLiteral("已取消：需要完成图形验证")); })) {
+            return;
+        }
         const bool ok = httpCode == 200 && !obj.contains("error");
         const QString msg = ok ? obj.value("message").toString()
                                : obj.value("error").toString(QStringLiteral("操作失败，请重试"));
@@ -1454,13 +1506,17 @@ void HttpClient::changeDevicePassword(const QString &controlUsername, const QStr
     body["currentSecondaryPassword"] = currentSecondaryPassword;
     body["newLoginPassword"] = newLoginPassword;
     body["newSecondaryPassword"] = newSecondaryPassword;
-    
+    sendChangeDevicePassword(body);
+}
+
+void HttpClient::sendChangeDevicePassword(const QJsonObject &body)
+{
+    const QString deviceUsername = body.value("deviceUsername").toString();
     qDebug() << "[HTTP] POST -> /api/binding/change-device-password";
-    qDebug() << "[HTTP] Body ->" << QJsonDocument(body).toJson(QJsonDocument::Compact);
     
     QNetworkReply *reply = post("/api/binding/change-device-password", body);
     
-    connect(reply, &QNetworkReply::finished, this, [this, reply, deviceUsername]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, deviceUsername, body]() {
         reply->deleteLater();
         
         int httpCode = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
@@ -1473,6 +1529,15 @@ void HttpClient::changeDevicePassword(const QString &controlUsername, const QStr
             QJsonDocument doc = QJsonDocument::fromJson(responseData);
             if (!doc.isNull() && doc.isObject()) {
                 QJsonObject obj = doc.object();
+                if (askOpCaptcha(obj,
+                        [this, body](const QJsonObject &cap) {
+                            QJsonObject b = body;
+                            for (auto it = cap.begin(); it != cap.end(); ++it) b[it.key()] = it.value();
+                            sendChangeDevicePassword(b);
+                        },
+                        [this]() { emit changePasswordFailed(1010, QStringLiteral("已取消：需要完成图形验证")); })) {
+                    return;
+                }
                 if (obj.contains("error")) errorMsg = obj["error"].toString();
                 else if (obj.contains("message")) errorMsg = obj["message"].toString();
             }
@@ -1515,12 +1580,17 @@ void HttpClient::changeLoginPassword(const QString &oldPassword, const QString &
     QJsonObject body;
     body["oldPassword"] = oldPassword;
     body["newPassword"] = newPassword;
+    sendChangeLoginPassword(body, m_nextPcSecondary);
+}
 
+void HttpClient::sendChangeLoginPassword(const QJsonObject &body, const QString &pcSecondary)
+{
     qDebug() << "[HTTP] PUT -> /api/user/password (修改登录密码)";
 
+    m_nextPcSecondary = pcSecondary;
     QNetworkReply *reply = put("/api/user/password", body);
 
-    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, body, pcSecondary]() {
         reply->deleteLater();
 
         int httpCode = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
@@ -1530,6 +1600,16 @@ void HttpClient::changeLoginPassword(const QString &oldPassword, const QString &
 
         QJsonDocument doc = QJsonDocument::fromJson(responseData);
         QJsonObject obj = doc.isObject() ? doc.object() : QJsonObject();
+
+        if (askOpCaptcha(obj,
+                [this, body, pcSecondary](const QJsonObject &cap) {
+                    QJsonObject b = body;
+                    for (auto it = cap.begin(); it != cap.end(); ++it) b[it.key()] = it.value();
+                    sendChangeLoginPassword(b, pcSecondary);
+                },
+                [this]() { emit changeLoginPasswordFailed(1010, QStringLiteral("已取消：需要完成图形验证")); })) {
+            return;
+        }
 
         if ((reply->error() != QNetworkReply::NoError && httpCode != 200) || httpCode >= 400) {
             QString errorMsg = obj.contains("error") ? obj["error"].toString()

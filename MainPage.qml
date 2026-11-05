@@ -12347,6 +12347,12 @@ Rectangle {
                 function(id, track) { HttpClient.retryLoginWithCaptcha(id, track) },
                 function() { HttpClient.loginFailed(1010, "已取消：需要完成图形验证才能登录") })
         }
+        // 改登录密码 / 二级密码 / 改手机密码：后台开了 PC 验证码时先过验证码，点完按原参数重发
+        function onOpNeedCaptcha(message) {
+            captchaPrompt.ask(message,
+                function(id, track) { HttpClient.retryOpWithCaptcha(id, track) },
+                function() { HttpClient.cancelOpCaptcha() })
+        }
     }
     CaptchaPrompt { id: captchaPrompt }
     

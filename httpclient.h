@@ -10,6 +10,7 @@
 #include <QSettings>
 #include <QSysInfo>
 #include <QVariantMap>
+#include <functional>
 
 /**
  * 登录响应数据结构
@@ -116,6 +117,9 @@ public:
     // 用户依次点完字后 retryLoginWithCaptcha 带上点击坐标按原参数重登
     Q_INVOKABLE void fetchCaptcha();
     Q_INVOKABLE void retryLoginWithCaptcha(const QString &captchaId, const QVariantMap &track);
+    // 改登录密码 / 二级密码开启修改关闭 / 改手机密码被要求图形验证码（opNeedCaptcha）：点完按原参数重发，取消发对应的失败信号
+    Q_INVOKABLE void retryOpWithCaptcha(const QString &captchaId, const QVariantMap &track);
+    Q_INVOKABLE void cancelOpCaptcha();
     // 「切换账户 → 设备列表 / 二级密码」：GET 状态 + 电脑列表；POST enable/disable/change/device-remark/device-remove
     Q_INVOKABLE void fetchPcSecurity();
     Q_INVOKABLE void pcSecurityPost(const QString &action, const QVariantMap &body);
@@ -320,6 +324,7 @@ signals:
     void onlineStatusReceived(const QJsonArray &list);
     void loginNeedPcSecondary(const QString &message);
     void loginNeedCaptcha(const QString &message);
+    void opNeedCaptcha(const QString &message);
     void captchaReady(const QVariantMap &captcha);
     void captchaFetchFailed(const QString &message);
     void pcSecurityReceived(const QVariantMap &data);
@@ -390,6 +395,15 @@ private:
     // 判断是否为免认证接口
     bool isAuthExemptEndpoint(const QString &endpoint) const;
     void attachPcSecondary(QNetworkRequest &request, const QString &endpoint);
+
+    // 敏感操作：body 是要发的完整请求体，pcSecondary 是这次要带的二级密码（验证码重发时原样再带）
+    void sendChangeLoginPassword(const QJsonObject &body, const QString &pcSecondary);
+    void sendChangeDevicePassword(const QJsonObject &body);
+    void sendPcSecurity(const QString &action, const QJsonObject &body);
+    // 回复里有 needCaptcha：记下重发 / 取消办法，发 opNeedCaptcha，返回 true
+    bool askOpCaptcha(const QJsonObject &resp, std::function<void(const QJsonObject &)> retry, std::function<void()> cancel);
+    std::function<void(const QJsonObject &)> m_opCaptchaRetry;
+    std::function<void()> m_opCaptchaCancel;
     
     // 生成/获取PC设备唯一标识
     QString generatePcDeviceId();
