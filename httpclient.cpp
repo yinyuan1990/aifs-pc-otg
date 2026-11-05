@@ -212,7 +212,10 @@ void HttpClient::login(const QString &username, const QString &password, int pcL
     // 图形验证码：用户在弹框里点完字的那次重登才带（验证码一次性，用完即清）
     if (!m_loginCaptchaId.isEmpty()) {
         body["captchaId"] = m_loginCaptchaId;
-        body["captchaTrack"] = QJsonObject::fromVariantMap(m_loginCaptchaTrack);
+        if (m_loginCaptchaTrack.contains(QStringLiteral("answer")))   // 数字计算：只交结果
+            body["captchaAnswer"] = m_loginCaptchaTrack.value(QStringLiteral("answer")).toString();
+        else
+            body["captchaTrack"] = QJsonObject::fromVariantMap(m_loginCaptchaTrack);
         m_loginCaptchaId.clear();
         m_loginCaptchaTrack.clear();
     }
@@ -715,7 +718,8 @@ void HttpClient::retryLoginWithPcSecondary(const QString &pw)
 
 void HttpClient::fetchCaptcha()
 {
-    QNetworkReply *reply = get("/api/auth/captcha");
+    // types = 本版本会的几种（后台选的方式这里没有就给文字点选）
+    QNetworkReply *reply = get("/api/auth/captcha?types=WORD_IMAGE_CLICK,SLIDER,MATH");
     connect(reply, &QNetworkReply::finished, this, [this, reply]() {
         reply->deleteLater();
         const QJsonObject obj = QJsonDocument::fromJson(reply->readAll()).object();
@@ -732,7 +736,8 @@ void HttpClient::fetchCaptcha()
         };
         QVariantMap m = obj.toVariantMap();
         m["backgroundImage"] = dataUrl(obj.value("backgroundImage").toString(), QStringLiteral("image/jpeg"));
-        m["templateImage"] = dataUrl(obj.value("templateImage").toString(), QStringLiteral("image/png"));
+        const QString tpl = obj.value("templateImage").toString();
+        m["templateImage"] = tpl.isEmpty() ? QString() : dataUrl(tpl, QStringLiteral("image/png"));
         emit captchaReady(m);
     });
 }
