@@ -223,10 +223,12 @@ Rectangle {
         }
 
         // 账号开了二级密码、这台电脑第一次登录：弹框输二级密码后按原参数重登（以后这台电脑不再问）
+        // 弹框等用户输入期间停掉 12s 兜底计时，提交重登时再开（不然输得慢会误报「连接超时」）
         function onLoginNeedPcSecondary(message) {
             loginError = ""
+            loggingInWatchdog.stop()
             loginPcSecPrompt.ask("新电脑登录验证", message,
-                function(pw) { HttpClient.retryLoginWithPcSecondary(pw) },
+                function(pw) { loggingInWatchdog.restart(); HttpClient.retryLoginWithPcSecondary(pw) },
                 function() {
                     isLoggingIn = false
                     loggingInLevel = 0
@@ -237,8 +239,9 @@ Rectangle {
         // 后台开了 PC 登录图形验证码：弹验证码，依次点完字后带上坐标按原参数重登
         function onLoginNeedCaptcha(message) {
             loginError = ""
+            loggingInWatchdog.stop()
             loginCaptchaPrompt.ask(message,
-                function(id, track) { HttpClient.retryLoginWithCaptcha(id, track) },
+                function(id, track) { loggingInWatchdog.restart(); HttpClient.retryLoginWithCaptcha(id, track) },
                 function() {
                     isLoggingIn = false
                     loggingInLevel = 0
@@ -249,8 +252,9 @@ Rectangle {
         // 这台新电脑超出账号电脑数上限：弹电脑列表，输对二级密码移除一台后按原参数重登
         function onLoginNeedPcKick(message, data) {
             loginError = ""
+            loggingInWatchdog.stop()
             loginPcKickPanel.show(message, data,
-                function(pw) { HttpClient.retryLoginWithPcSecondary(pw) },
+                function(pw) { loggingInWatchdog.restart(); HttpClient.retryLoginWithPcSecondary(pw) },
                 function() { HttpClient.loginFailed(1009, message) })
         }
 
