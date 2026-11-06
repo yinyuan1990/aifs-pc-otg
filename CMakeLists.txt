@@ -218,6 +218,7 @@ set(PHOENIX_QML_FILES
     PcSecurityPanel.qml      # 切换账户里的「设备列表」「二级密码」弹框
     PcKickPanel.qml          # 登录超电脑上限时的电脑列表（二级密码移除一台后重登）
     CaptchaPrompt.qml        # 登录图形验证码（文字点选，登录页 / 主界面共用）
+    PwEye.qml                # 密码框明 / 密文切换眼睛（二级密码默认明文）
 )
 if(HAVE_KERNEL_TEST)
     list(APPEND PHOENIX_QML_FILES KernelTestView.qml)

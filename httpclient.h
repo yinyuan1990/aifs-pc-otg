@@ -401,6 +401,7 @@ private:
     void sendChangeLoginPassword(const QJsonObject &body, const QString &pcSecondary);
     void sendChangeDevicePassword(const QJsonObject &body);
     void sendPcSecurity(const QString &action, const QJsonObject &body);
+    void sendManualBind(const QJsonObject &body);
     // 回复里有 needCaptcha：记下重发 / 取消办法，发 opNeedCaptcha，返回 true
     bool askOpCaptcha(const QJsonObject &resp, std::function<void(const QJsonObject &)> retry, std::function<void()> cancel);
     std::function<void(const QJsonObject &)> m_opCaptchaRetry;

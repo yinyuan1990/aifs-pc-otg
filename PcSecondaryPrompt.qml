@@ -79,11 +79,12 @@ Popup {
             id: pwInput
             width: root.width - 40
             height: 36
-            echoMode: TextInput.Password
+            rightPadding: 30
             placeholderText: "请输入" + HttpClient.pcSecondaryName()
             font.pixelSize: 14
             maximumLength: 20
             onAccepted: root.submit()
+            PwEye {}
         }
         Row {
             anchors.right: parent.right

@@ -1742,11 +1742,11 @@ Rectangle {
                             font.bold: true
                             color: "#CCCCCC"
                         placeholderTextColor: "#808080"
-                        echoMode: TextInput.Password
                         background: Item {}
                         leftPadding: 0
-                        rightPadding: 0
+                        rightPadding: 28
                         verticalAlignment: TextInput.AlignVCenter
+                        PwEye {}
                         
                         cursorDelegate: Rectangle {
                             width: 2; height: 18; color: "#3993D2"

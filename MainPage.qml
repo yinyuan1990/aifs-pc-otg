@@ -10278,7 +10278,6 @@ Rectangle {
                     width: parent.width
                     height: 40
                     placeholderText: "请输入绑定密码"
-                    echoMode: TextInput.Password
                     color: "#263238"
                     placeholderTextColor: "#999999"
                     background: Rectangle {
@@ -10288,8 +10287,9 @@ Rectangle {
                         border.width: 1
                     }
                     leftPadding: 12
-                    rightPadding: 12
+                    rightPadding: 32
                     verticalAlignment: TextInput.AlignVCenter
+                    PwEye {}
                 }
             }
             

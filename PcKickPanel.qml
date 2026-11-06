@@ -186,10 +186,11 @@ Popup {
                 visible: root.allowed
                 width: 280
                 height: 36
-                echoMode: TextInput.Password
+                rightPadding: 30
                 maximumLength: 20
                 enabled: !root.busy && !root.succeeded
                 placeholderText: "请输入" + root.secName
+                PwEye {}
             }
             Text {
                 width: parent.width

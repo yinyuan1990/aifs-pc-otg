@@ -1282,16 +1282,33 @@ void HttpClient::manualBind(const QString &deviceNickname, const QString &passwo
     body["deviceNickname"] = deviceNickname;
     body["password"] = password;
     body["secondaryPassword"] = secondaryPassword;
-    
+    sendManualBind(body);
+}
+
+void HttpClient::sendManualBind(const QJsonObject &body)
+{
+    const QString deviceNickname = body.value("deviceNickname").toString();
     QNetworkReply *reply = post("/api/binding/manual-bind", body);
     
-    connect(reply, &QNetworkReply::finished, this, [this, reply, deviceNickname]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, deviceNickname, body]() {
         reply->deleteLater();
         
         int httpCode = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         QByteArray responseData = reply->readAll();
         
         qDebug() << "[HTTP] ManualBind Response <-" << httpCode << responseData;
+        
+        // 绑定手机：后台开了 PC 验证码时先过验证码，点完按原参数重发
+        const QJsonDocument capDoc = QJsonDocument::fromJson(responseData);
+        if (capDoc.isObject() && askOpCaptcha(capDoc.object(),
+                [this, body](const QJsonObject &cap) {
+                    QJsonObject b = body;
+                    for (auto it = cap.begin(); it != cap.end(); ++it) b[it.key()] = it.value();
+                    sendManualBind(b);
+                },
+                [this]() { emit manualBindFailed(400, QStringLiteral("已取消：需要完成图形验证才能绑定")); })) {
+            return;
+        }
         
         if (reply->error() != QNetworkReply::NoError && httpCode != 200) {
             QString errorMsg = reply->errorString();

@@ -279,8 +279,8 @@ Popup {
                 visible: !root.enabledState
                 width: parent.width
                 spacing: 8
-                TextField { id: newPw1; width: parent.width; height: 36; echoMode: TextInput.Password; maximumLength: 20; placeholderText: "设置" + root.secName + "（4~20 位字母或数字）" }
-                TextField { id: newPw2; width: parent.width; height: 36; echoMode: TextInput.Password; maximumLength: 20; placeholderText: "再输一次" }
+                TextField { id: newPw1; width: parent.width; height: 36; rightPadding: 30; maximumLength: 20; placeholderText: "设置" + root.secName + "（4~20 位字母或数字）"; PwEye {} }
+                TextField { id: newPw2; width: parent.width; height: 36; rightPadding: 30; maximumLength: 20; placeholderText: "再输一次"; PwEye {} }
                 Button {
                     text: "开启" + root.secName
                     highlighted: true
@@ -299,9 +299,9 @@ Popup {
                 width: parent.width
                 spacing: 8
                 Text { text: "修改" + root.secName; font.pixelSize: 13; font.bold: true; color: "#263238" }
-                TextField { id: oldPw; width: parent.width; height: 34; echoMode: TextInput.Password; maximumLength: 20; placeholderText: "原" + root.secName }
-                TextField { id: chPw1; width: parent.width; height: 34; echoMode: TextInput.Password; maximumLength: 20; placeholderText: "新" + root.secName + "（4~20 位字母或数字）" }
-                TextField { id: chPw2; width: parent.width; height: 34; echoMode: TextInput.Password; maximumLength: 20; placeholderText: "再输一次新" + root.secName }
+                TextField { id: oldPw; width: parent.width; height: 34; rightPadding: 30; maximumLength: 20; placeholderText: "原" + root.secName; PwEye {} }
+                TextField { id: chPw1; width: parent.width; height: 34; rightPadding: 30; maximumLength: 20; placeholderText: "新" + root.secName + "（4~20 位字母或数字）"; PwEye {} }
+                TextField { id: chPw2; width: parent.width; height: 34; rightPadding: 30; maximumLength: 20; placeholderText: "再输一次新" + root.secName; PwEye {} }
                 Button {
                     text: "修改"
                     highlighted: true
@@ -317,7 +317,7 @@ Popup {
                 Text { text: "关闭" + root.secName; font.pixelSize: 13; font.bold: true; color: "#263238" }
                 Row {
                     spacing: 8
-                    TextField { id: offPw; width: 240; height: 34; echoMode: TextInput.Password; maximumLength: 20; placeholderText: "当前" + root.secName }
+                    TextField { id: offPw; width: 240; height: 34; rightPadding: 30; maximumLength: 20; placeholderText: "当前" + root.secName; PwEye {} }
                     Button {
                         text: "关闭"
                         onClicked: {
