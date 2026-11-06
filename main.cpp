@@ -41,6 +41,7 @@
 #include "gstplayer.h"
 #include "httpclient.h"
 #include "websocketclient.h"
+#include "netproxy.h"
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QProcess>
@@ -870,7 +871,7 @@ int main(int argc, char *argv[])
     //     --enable-gpu-rasterization + --enable-zero-copy：GPU 光栅化 + 零拷贝，减轻主线程/CPU。
     //     --enable-accelerated-video-decode + 相关 features：启用硬件视频解码（H.264 走 GPU，卸掉 CPU 解码）。
     //     --ignore-gpu-blocklist：Qt WebEngine 常因驱动在黑名单里回退软件渲染，强制启用 GPU。
-    qputenv("QTWEBENGINE_CHROMIUM_FLAGS",
+    QByteArray webFlags =
             "--disable-web-security "
             "--autoplay-policy=no-user-gesture-required "
             "--ignore-certificate-errors "
@@ -889,7 +890,12 @@ int main(int argc, char *argv[])
             //   webplayer_test.html 的 SRS H265 CHECK 日志可看 kernelSupportsH265 实际值。
             "--enable-features=D3D11VideoDecoder,AcceleratedVideoDecodeLinuxGL,PlatformHEVCDecoderSupport,WebRtcAllowH265Receive "
             "--force-fieldtrials=WebRTC-Video-H26xPacketBuffer/Enabled "
-            "--disable-features=WebRtcHideLocalIpsWithMdns");
+            "--disable-features=WebRtcHideLocalIpsWithMdns";
+    // 内核网页同样不吃被同行改坏的系统代理（见 netproxy.h）；只在启动时生效，切模式后下次启动跟上
+    if (!NetProxy::usingSystem())
+        webFlags += " --no-proxy-server";
+    earlyLog(NetProxy::usingSystem() ? "[网络] 走系统代理" : "[网络] 直连（不走系统代理）");
+    qputenv("QTWEBENGINE_CHROMIUM_FLAGS", webFlags);
     QtWebEngineQuick::initialize();
     earlyLog("[WebEngine] QtWebEngineQuick::initialize() done");
 #endif

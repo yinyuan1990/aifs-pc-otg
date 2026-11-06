@@ -1,4 +1,5 @@
 #include "gstplayer.h"
+#include "netproxy.h"
 #include "capturedebuglog.h"
 #include "p2ploguploader.h"
 #include "h265support.h"   // ⭐ H265 专属逻辑（元素工厂/关键帧判断/独立日志），与本文件 H264 链路解耦
@@ -4966,6 +4967,7 @@ void GstPlayer::sendOfferToSRS(const QString &sdp)
     request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
     request.setRawHeader("Accept", "application/json");
     
+    NetProxy::apply(m_networkManager, url);
     QNetworkReply *reply = m_networkManager->post(request, jsonData);
     
     srsLog(QString("[http] POST Offer 到 SRS（已重试 %1 次，§54 常驻重试无上限）").arg(retryCount));

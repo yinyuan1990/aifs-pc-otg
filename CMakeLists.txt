@@ -5,7 +5,7 @@ project(Phoenix VERSION 0.1 LANGUAGES C CXX)
 # ⭐ §43 版本号单一来源：发版只改这一行！
 #   - autoupdater.cpp 经宏 PHOENIX_VERSION_STR 得到当前版本（不再硬编码）
 #   - pack.bat 解析本行生成 manifest.json / yqlversion_new.json
-set(PHOENIX_APP_VERSION "1.0.15")
+set(PHOENIX_APP_VERSION "1.0.16")
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -102,6 +102,7 @@ qt_add_executable(Phoenix
     httpclient.h
     p2ploguploader.cpp   # ⭐ P2P诊断日志上报器（总后台开关控制，按推流ID分流上传）
     p2ploguploader.h
+    netproxy.h
     zjcinstaller.cpp     # ⭐ zjc_worker 分离后：查版本→按需从服务器下载安装服务→上报状态
     zjcinstaller.h
     websocketclient.cpp

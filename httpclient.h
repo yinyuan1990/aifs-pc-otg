@@ -385,6 +385,7 @@ private:
     
     // 通用 PUT 请求
     QNetworkReply* put(const QString &endpoint, const QJsonObject &body);
+    QNetworkReply* trackNet(QNetworkReply *reply);
     
     // 发送iOS相机设定更新（通用方法）
     void sendCameraSettingUpdate(const QString &ptype, const QJsonObject &config);

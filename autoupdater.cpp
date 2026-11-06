@@ -1,4 +1,5 @@
 ﻿#include "autoupdater.h"
+#include "netproxy.h"
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonArray>
@@ -125,6 +126,7 @@ void AutoUpdater::checkForUpdates()
     QNetworkRequest req(url);
     req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
     
+    NetProxy::apply(m_networkManager, url);
     QNetworkReply *reply = m_networkManager->get(req);
     
     connect(reply, &QNetworkReply::finished, this, [this, reply]() {
@@ -288,6 +290,7 @@ void AutoUpdater::downloadAndInstall()
     
     QUrl downloadUrl(actualDownloadUrl);
     QNetworkRequest downloadReq(downloadUrl);
+    NetProxy::apply(m_networkManager, downloadUrl);
     m_downloadReply = m_networkManager->get(downloadReq);
     
     connect(m_downloadReply, &QNetworkReply::downloadProgress, this, [this](qint64 received, qint64 total) {
@@ -508,6 +511,7 @@ void AutoUpdater::startManifestUpdate()
     url += (url.contains('?') ? "&v=" : "?v=") + QString::number(QDateTime::currentMSecsSinceEpoch());
     qlgxLog("manifest: 拉取清单 " + url);
 
+    NetProxy::apply(m_networkManager, QUrl(url));
     QNetworkReply *reply = m_networkManager->get(QNetworkRequest(QUrl(url)));
     connect(reply, &QNetworkReply::finished, this, [this, reply]() {
         if (reply->error() != QNetworkReply::NoError) {
@@ -678,6 +682,7 @@ void AutoUpdater::downloadNextManifestFile()
     }
 
     QUrl url(m_manifestBaseUrl + "/" + mf.path);
+    NetProxy::apply(m_networkManager, url);
     m_downloadReply = m_networkManager->get(QNetworkRequest(url));
 
     connect(m_downloadReply, &QNetworkReply::readyRead, this, [this]() {

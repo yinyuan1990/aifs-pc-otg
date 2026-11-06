@@ -1,4 +1,5 @@
 #include "httpclient.h"
+#include "netproxy.h"
 #include "zjcinstaller.h"
 #include <QNetworkRequest>
 #include <QUrlQuery>
@@ -143,7 +144,15 @@ QNetworkReply* HttpClient::post(const QString &endpoint, const QJsonObject &body
     QByteArray jsonData = doc.toJson(QJsonDocument::Compact);
     qDebug() << "[HTTP] Body ->" << jsonData;
     
-    return m_manager->post(request, jsonData);
+    NetProxy::apply(m_manager, request.url());
+    return trackNet(m_manager->post(request, jsonData));
+}
+
+// 每个请求结束都告诉 NetProxy 网络通不通（直连连续连不上才改走系统代理，见 netproxy.h）
+QNetworkReply* HttpClient::trackNet(QNetworkReply *reply)
+{
+    connect(reply, &QNetworkReply::finished, this, [reply]() { NetProxy::noteReply(reply, QStringLiteral("接口请求")); });
+    return reply;
 }
 
 // PC 二级密码只给这几类敏感接口带（解绑 / 备注 / 改 PC 密码 / 设备列表改动），带一次就清
@@ -175,7 +184,8 @@ QNetworkReply* HttpClient::get(const QString &endpoint)
         qDebug() << "[HTTP] Token attached";
     }
     
-    return m_manager->get(request);
+    NetProxy::apply(m_manager, request.url());
+    return trackNet(m_manager->get(request));
 }
 
 void HttpClient::login(const QString &username, const QString &password, int pcLevel, const QString &deviceUsername,
@@ -236,9 +246,10 @@ void HttpClient::login(const QString &username, const QString &password, int pcL
     //   机会消耗掉直接报失败，新回调又触发重试，行为混乱）。只认最新一代，旧响应直接丢弃。
     const int gen = ++m_loginGeneration;
     
+    const bool sysAtSend = NetProxy::usingSystem();
     QNetworkReply *reply = post("/api/auth/login/control", body);
     
-    connect(reply, &QNetworkReply::finished, this, [this, reply, gen, username, password, pcLevel, deviceUsername, fallbackOnUnboundDevice]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, gen, username, password, pcLevel, deviceUsername, fallbackOnUnboundDevice, sysAtSend]() {
         reply->deleteLater();
         
         if (gen != m_loginGeneration) {
@@ -263,9 +274,12 @@ void HttpClient::login(const QString &username, const QString &password, int pcL
             //   复用了被 nginx/后端掐掉的旧 keep-alive 连接 → "连接已关闭"，POST 不会
             //   自动重试）→ 自动补一次重试：新请求会开新 TCP 连接，几乎必然成功。
             //   只重试一次，防服务器真宕机时无限循环。
-            if (httpCode == 0 && !m_loginNetRetried) {
+            //   这次失败让 NetProxy 切了直连 / 系统代理 → 用新方式再试一次（同一次点击里就能登上）
+            const bool proxySwitched = NetProxy::usingSystem() != sysAtSend;
+            if (httpCode == 0 && (!m_loginNetRetried || proxySwitched)) {
                 m_loginNetRetried = true;
-                qDebug() << "[Login] 传输层错误(" << errorMsg << ") → 800ms 后自动重试一次";
+                qDebug() << "[Login] 传输层错误(" << errorMsg << ") → 800ms 后自动重试一次"
+                         << (proxySwitched ? (NetProxy::usingSystem() ? "（改走系统代理）" : "（改回直连）") : "");
                 QTimer::singleShot(800, this, [this, username, password, pcLevel, deviceUsername]() {
                     login(username, password, pcLevel, deviceUsername);
                 });
@@ -1675,7 +1689,8 @@ QNetworkReply* HttpClient::put(const QString &endpoint, const QJsonObject &body)
     QByteArray jsonData = QJsonDocument(body).toJson(QJsonDocument::Compact);
     qDebug() << "[HTTP] PUT ->" << endpoint << jsonData;
     
-    return m_manager->put(request, jsonData);
+    NetProxy::apply(m_manager, request.url());
+    return trackNet(m_manager->put(request, jsonData));
 }
 
 // ============ iOS相机设定接口 ============

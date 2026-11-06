@@ -1,4 +1,5 @@
 #include "webrtcclient.h"
+#include "netproxy.h"
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QDebug>
@@ -414,6 +415,7 @@ void WebRTCClient::sendOfferToSRS(const QString &sdp)
     QNetworkRequest request(url);
     request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
     
+    NetProxy::apply(m_networkManager, url);
     QNetworkReply *reply = m_networkManager->post(request, requestData);
     
     QObject::connect(reply, &QNetworkReply::finished, this, [this, reply]() {

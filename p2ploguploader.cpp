@@ -1,5 +1,6 @@
 #include "p2ploguploader.h"
 #include "httpclient.h"
+#include "netproxy.h"
 
 #include <QNetworkRequest>
 #include <QNetworkReply>
@@ -72,6 +73,7 @@ void P2PLogUploader::checkConfig()
 {
     QUrl url(HttpClient::instance()->baseUrl() + "/api/p2plog/config");
     QNetworkRequest req(url);
+    NetProxy::apply(&m_nam, url);
     QNetworkReply *reply = m_nam.get(req);
     connect(reply, &QNetworkReply::finished, this, [this, reply]() {
         reply->deleteLater();
@@ -116,6 +118,7 @@ void P2PLogUploader::flush()
 
         QNetworkRequest req(QUrl(HttpClient::instance()->baseUrl() + "/api/p2plog/upload"));
         req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+        NetProxy::apply(&m_nam, req.url());
         QNetworkReply *reply = m_nam.post(req, QJsonDocument(body).toJson(QJsonDocument::Compact));
         connect(reply, &QNetworkReply::finished, this, [this, reply]() {
             reply->deleteLater();

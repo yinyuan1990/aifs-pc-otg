@@ -1,4 +1,5 @@
 #include "websocketclient.h"
+#include "netproxy.h"
 #include <QDebug>
 #include <QUrl>
 #include <QUrlQuery>
@@ -115,7 +116,9 @@ void WebSocketClient::connectToServer()
     
     QString wsUrl = buildWebSocketUrl();
     m_connectStartedAtMs = QDateTime::currentMSecsSinceEpoch();   // §53.23：挂起判定基线
-    qDebug() << "[WebSocket] 🔗 发起连接（第" << (m_reconnectAttempts + 1) << "次尝试）";
+    qDebug() << "[WebSocket] 🔗 发起连接（第" << (m_reconnectAttempts + 1) << "次尝试）"
+             << (NetProxy::usingSystem() ? "走系统代理" : "直连");
+    m_socket->setProxy(NetProxy::forUrl(QUrl(wsUrl)));
     m_socket->open(QUrl(wsUrl));
     m_connectWatchdog->start();   // §53.23：10s 内必须到 STOMP CONNECTED，否则强拆重试
 }
@@ -318,6 +321,7 @@ void WebSocketClient::unsubscribeWebRTCSignaling()
 void WebSocketClient::onConnected()
 {
     m_reconnectAttempts = 0;
+    NetProxy::reportSuccess();
     
     // ⭐ §53.23：连接生命周期日志（此前 onConnected/onDisconnected/onError 零日志，
     //   「连接为什么要几十秒/为什么连不上」在 phoenix_log 里全是盲区）
@@ -368,6 +372,19 @@ void WebSocketClient::onError(QAbstractSocket::SocketError error)
     // ⭐ §53.23：错误必须落日志（此前零日志，连接失败原因全是盲区）
     qDebug() << "[WebSocket] ❌ 连接错误:" << error << errorMsg
              << "(state=" << m_socket->state() << ")";
+    // 代理类错误 = 系统代理那条路不通（同行把代理指到了死端口），算一次连不上；直连的失败由接口请求统计
+    switch (error) {
+    case QAbstractSocket::ProxyAuthenticationRequiredError:
+    case QAbstractSocket::ProxyConnectionRefusedError:
+    case QAbstractSocket::ProxyConnectionClosedError:
+    case QAbstractSocket::ProxyConnectionTimeoutError:
+    case QAbstractSocket::ProxyNotFoundError:
+    case QAbstractSocket::ProxyProtocolError:
+        NetProxy::reportTransportFailure(QStringLiteral("实时连接"));
+        break;
+    default:
+        break;
+    }
     
     m_connectWatchdog->stop();   // §53.23：本次尝试已出结果，重试交给 scheduleReconnect
     setConnecting(false);
