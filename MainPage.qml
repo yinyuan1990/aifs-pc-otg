@@ -7083,6 +7083,7 @@ Rectangle {
     //   下发一律 otg_ 前缀，与自带摄像头那套 ptype 分家（Android 侧 OtgConfigRouter 独立消费）。
     OtgCameraPanel {
         id: otgCameraPanel
+        onExitAppRequested: askExitDeviceApp()
         onSendOtg: function(ptype, payload) {
             // ⭐ 全链路日志锚点⓪（PC 侧，进 qlgx.txt）：面板每次点击/拖动实际发了什么。
             //   qlgx 里有这行而 OTG 日志里没有「🔗 [OTG链路|收到]」= 信令没到手机；
@@ -8325,6 +8326,22 @@ Rectangle {
         
         // 使用 sendMessageJson 直接发送 JSON 字符串
         WebSocketClient.sendMessageJson(destination, jsonStr)
+    }
+
+    // 外接摄像头设定「退出程序」：确认后让手机停推流、直接关闭 App（手机上不提示）
+    function askExitDeviceApp() {
+        if (!HttpClient.currentDeviceId()) {
+            showToast("未连接设备")
+            return
+        }
+        exitAppConfirmDialog.open()
+    }
+    function doExitDeviceApp() {
+        console.log("🚪 让手机退出程序")
+        if (publishState === 1) stopAll()
+        publishState = 0
+        sendDeviceCommand("EXIT_APP")
+        showToast("已让手机退出程序")
     }
     
     // ⭐ 帧率限制 Timer（切换档位后 1 秒推送帧率）
@@ -13956,6 +13973,138 @@ Rectangle {
         }
     }
     
+    // ============ 让手机退出程序确认对话框 ============
+    Dialog {
+        id: exitAppConfirmDialog
+        anchors.centerIn: parent
+        width: 360
+        height: 200
+        modal: true
+
+        background: Rectangle {
+            color: "#FFFFFF"
+            radius: 8
+            border.color: "#A5D6A7"
+            border.width: 1
+        }
+
+        header: Item {
+            height: 50
+
+            Text {
+                anchors.left: parent.left
+                anchors.leftMargin: 20
+                anchors.verticalCenter: parent.verticalCenter
+                text: "让手机退出程序"
+                font.family: "PingFang HK"
+                font.pixelSize: 16
+                font.bold: true
+                color: "#263238"
+            }
+
+            Rectangle {
+                anchors.right: parent.right
+                anchors.rightMargin: 12
+                anchors.verticalCenter: parent.verticalCenter
+                width: 28
+                height: 28
+                radius: 14
+                color: exitAppCloseArea.containsMouse ? "#F0F0F0" : "transparent"
+
+                Text {
+                    anchors.centerIn: parent
+                    text: "✕"
+                    font.pixelSize: 14
+                    color: "#666666"
+                }
+
+                MouseArea {
+                    id: exitAppCloseArea
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: exitAppConfirmDialog.close()
+                }
+            }
+
+            Rectangle {
+                anchors.bottom: parent.bottom
+                width: parent.width
+                height: 1
+                color: "#C8E6C9"
+            }
+        }
+
+        contentItem: Column {
+            spacing: 16
+            padding: 20
+
+            Text {
+                width: parent.width - 40
+                text: "确定让手机退出程序吗？<br><font color='#E53935'>手机会停止推流并直接关闭 App（手机上不提示），要在手机上重新打开。</font>"
+                textFormat: Text.RichText
+                font.family: "PingFang HK"
+                font.pixelSize: 14
+                color: "#333333"
+                wrapMode: Text.Wrap
+            }
+
+            Row {
+                anchors.horizontalCenter: parent.horizontalCenter
+                spacing: 16
+
+                Rectangle {
+                    width: 100
+                    height: 36
+                    radius: 4
+                    color: exitAppCancelArea.containsMouse ? "#E8E8E8" : "#F0F0F0"
+
+                    Text {
+                        anchors.centerIn: parent
+                        text: "取消"
+                        font.family: "PingFang HK"
+                        font.pixelSize: 14
+                        color: "#546E7A"
+                    }
+
+                    MouseArea {
+                        id: exitAppCancelArea
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: exitAppConfirmDialog.close()
+                    }
+                }
+
+                Rectangle {
+                    width: 100
+                    height: 36
+                    radius: 4
+                    color: exitAppOkArea.containsMouse ? "#D32F2F" : "#E53935"
+
+                    Text {
+                        anchors.centerIn: parent
+                        text: "退出程序"
+                        font.family: "PingFang HK"
+                        font.pixelSize: 14
+                        color: "#FFFFFF"
+                    }
+
+                    MouseArea {
+                        id: exitAppOkArea
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            exitAppConfirmDialog.close()
+                            doExitDeviceApp()
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // ============ 解绑确认对话框 ============
     Dialog {
         id: unbindConfirmDialog

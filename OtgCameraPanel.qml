@@ -26,6 +26,8 @@ Window {
 
     // ptype 以 otg_ 开头，payload 是对象
     signal sendOtg(string ptype, var payload)
+    // 标题栏「退出程序」：面板先关（它置顶，确认框在主窗口里会被挡住），由主页面弹确认框
+    signal exitAppRequested()
 
     // 推送帧率 / 码率：以**设备回报的真值**为准（初始值来自后端下发的配置，
     // 面板自己猜一个缺省会和设备实际状态对不上——之前面板显示 50%、设备其实是 60%）
@@ -157,6 +159,36 @@ Window {
                 }
 
                 Rectangle {
+                    anchors.right: otgCloseBtn.left
+                    anchors.rightMargin: 10
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: otgExitAppText.implicitWidth + 16
+                    height: 26
+                    radius: 6
+                    color: otgExitAppArea.containsMouse ? "#D32F2F" : "#E53935"
+                    Text {
+                        id: otgExitAppText
+                        anchors.centerIn: parent
+                        text: "退出程序"
+                        font.family: "PingFang HK"
+                        font.pixelSize: 12
+                        font.bold: true
+                        color: "#FFFFFF"
+                    }
+                    MouseArea {
+                        id: otgExitAppArea
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            panel.close()
+                            panel.exitAppRequested()
+                        }
+                    }
+                }
+
+                Rectangle {
+                    id: otgCloseBtn
                     anchors.right: parent.right
                     anchors.verticalCenter: parent.verticalCenter
                     width: 26; height: 26; radius: 13
