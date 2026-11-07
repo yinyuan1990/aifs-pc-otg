@@ -6,6 +6,7 @@
 #include "gstcapturedecoder.h"
 #include "naluframestore.h"
 #include "capturedebuglog.h"
+#include "gzlog.h"
 #include <QCoreApplication>
 #include <QFile>
 #include <QDebug>
@@ -450,6 +451,28 @@ void SlowMotionPlayer::prevFrame()
     }
 }
 
+void SlowMotionPlayer::stepFrames(int delta)
+{
+    gzLog("SLW", QString("切帧 %1%2 当前=%3 已录=%4%5").arg(delta > 0 ? "+" : "").arg(delta)
+        .arg(m_currentFrame).arg(m_recordedFrames).arg(m_followLive ? " 跟随实时" : ""));
+    if (delta == 0) return;
+    if (m_followLive) {
+        m_followLive = false;
+    }
+    if (m_playbackTimer->isActive()) {
+        m_playbackTimer->stop();
+        m_isPlaying = false;
+        emit playingChanged();
+    }
+    if (m_recordedFrames <= 0) return;
+    const int target = qBound(0, m_currentFrame + delta, m_recordedFrames - 1);
+    if (target != m_currentFrame) {
+        setCurrentFrame(target);
+    } else {
+        gzLog("SLW", QString("已到%1，不动").arg(delta > 0 ? "最后一帧" : "第一帧"));
+    }
+}
+
 void SlowMotionPlayer::jumpToFrame(int frame)
 {
     // 用户手动跳转（拖动滑块），停止跟随实时流
@@ -624,6 +647,10 @@ void SlowMotionPlayer::renderToVideoSink(int frameOffset)
 
     if (m_decodeThread) {
         m_pendingFrameOffset = frameOffset;
+        if (!m_isPlaying && !m_followLive) {
+            m_gzReqTimer.start();
+            gzLog("SLW", QString("请求解码 frame=%1").arg(frameOffset));
+        }
         m_decodeThread->requestDecode(globalIndex, frameOffset, m_followLive);
     }
 }
@@ -634,6 +661,12 @@ void SlowMotionPlayer::onFrameDecoded(int frameOffset, const QVideoFrame &frame)
     // 但如果当前在 PLAYBACK 状态，不跳帧（需要顺序播放）
     if (m_state == RECORDING && m_followLive && frameOffset != m_pendingFrameOffset) {
         return;  // 跳过旧帧
+    }
+    if (!m_isPlaying && !m_followLive && m_gzReqTimer.isValid()) {
+        gzLog("SLW", QString("出图 frame=%1 %2x%3 距请求%4ms%5").arg(frameOffset)
+            .arg(frame.width()).arg(frame.height()).arg(m_gzReqTimer.elapsed())
+            .arg(frameOffset != m_pendingFrameOffset ? QString("（已滚到 %1，这帧过期）").arg(m_pendingFrameOffset) : QString())
+            + (frame.isValid() ? "" : " 解码失败"));
     }
     
     if (m_videoSink && frame.isValid()) {

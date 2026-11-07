@@ -994,10 +994,10 @@ Rectangle {
             }
         }
         function onNextFrameTriggered() {
-            slowMotionPlayer.nextFrame()
+            slowMotionPlayer.stepFrames(mainPage.frameStep)
         }
         function onPrevFrameTriggered() {
-            slowMotionPlayer.prevFrame()
+            slowMotionPlayer.stepFrames(-mainPage.frameStep)
         }
     }
 
@@ -2506,6 +2506,7 @@ Rectangle {
                             
                             onWheel: function(wheel) {
                                 wheel.accepted = true  // 阻止事件传播到其他区域
+                                mainPage.gzWheel("网格", wheel, "item=" + gridCell.dataIndex + " 当前帧=" + gridCell.currentFrame + " 总=" + gridCell.totalFrames)
                                 // ⭐ 确保焦点和选中（防止首次滚轮时 S 键不生效）
                                 ensureFocusAndSelect()
                                 if (!gridCell.hasData || gridCell.totalFrames <= 0) return
@@ -2739,6 +2740,7 @@ Rectangle {
 
                                 onWheel: function(wheel) {
                                     wheel.accepted = true
+                                    mainPage.gzWheel("网格进度条", wheel, "item=" + gridCell.dataIndex + " 当前帧=" + gridCell.currentFrame + " 总=" + gridCell.totalFrames)
                                     if (gridCell.totalFrames <= 0) return
                                     var target = wheel.angleDelta.y > 0 ? gridCell.currentFrame - 1 : gridCell.currentFrame + 1
                                     mainPage.jumpCaptureFrame(gridCell.dataIndex, target)
@@ -3794,14 +3796,15 @@ Rectangle {
                                 if (slowmoMouseArea.panMoved) { slowmoMouseArea.panMoved = false; return }
                                 // ⭐ 左键=上一帧，右键=下一帧
                                 if (mouse.button === Qt.LeftButton) {
-                                    slowMotionPlayer.prevFrame()
+                                    slowMotionPlayer.stepFrames(-mainPage.frameStep)
                                 } else if (mouse.button === Qt.RightButton) {
-                                    slowMotionPlayer.nextFrame()
+                                    slowMotionPlayer.stepFrames(mainPage.frameStep)
                                 }
                             }
                             
                             onWheel: function(wheel) {
                                 wheel.accepted = true  // 阻止事件传播
+                                mainPage.gzWheel("慢放画面", wheel, "当前帧=" + slowMotionPlayer.currentFrame)
                                 if (!slowMotionPlayer.hasContent) return
 
                                 // ⭐ S+滚轮: 慢放独立局部放大 (鼠标位置为中心)
@@ -3843,11 +3846,7 @@ Rectangle {
                                 }
 
                                 // 普通滚轮: 切换帧 (会自动暂停跟随实时流)
-                                if (wheel.angleDelta.y > 0) {
-                                    slowMotionPlayer.prevFrame()
-                                } else {
-                                    slowMotionPlayer.nextFrame()
-                                }
+                                slowMotionPlayer.stepFrames(wheel.angleDelta.y > 0 ? -mainPage.frameStep : mainPage.frameStep)
                             }
                         }
                     }
@@ -3930,9 +3929,9 @@ Rectangle {
                             anchors.fill: parent
                             onWheel: function(wheel) {
                                 wheel.accepted = true
+                                mainPage.gzWheel("慢放进度条", wheel, "当前帧=" + slowMotionPlayer.currentFrame)
                                 if (!slowMotionPlayer.hasContent) return
-                                if (wheel.angleDelta.y > 0) slowMotionPlayer.prevFrame()
-                                else slowMotionPlayer.nextFrame()
+                                slowMotionPlayer.stepFrames(wheel.angleDelta.y > 0 ? -mainPage.frameStep : mainPage.frameStep)
                             }
                             onClicked: function(mouse) {
                                 if (slowMotionPlayer.recordedFrames > 1) {
@@ -3981,9 +3980,9 @@ Rectangle {
 
                                 onWheel: function(wheel) {
                                     wheel.accepted = true
+                                    mainPage.gzWheel("慢放进度条把手", wheel, "当前帧=" + slowMotionPlayer.currentFrame)
                                     if (!slowMotionPlayer.hasContent) return
-                                    if (wheel.angleDelta.y > 0) slowMotionPlayer.prevFrame()
-                                    else slowMotionPlayer.nextFrame()
+                                    slowMotionPlayer.stepFrames(wheel.angleDelta.y > 0 ? -mainPage.frameStep : mainPage.frameStep)
                                 }
 
                                 onPositionChanged: {
@@ -5029,7 +5028,7 @@ Rectangle {
                     fullscreenGoToFrame(fullscreenFrameIndex - mainPage.frameStep)
                 }
             } else if (slowMotionPlayer.hasContent) {
-                slowMotionPlayer.prevFrame()
+                slowMotionPlayer.stepFrames(-mainPage.frameStep)
             } else if (captureManager.currentItemIndex >= 0) {
                 stepCaptureFrame(captureManager.currentItemIndex, "prev")
             }
@@ -5053,7 +5052,7 @@ Rectangle {
                     fullscreenGoToFrame(fullscreenFrameIndex + mainPage.frameStep)
                 }
             } else if (slowMotionPlayer.hasContent) {
-                slowMotionPlayer.nextFrame()
+                slowMotionPlayer.stepFrames(mainPage.frameStep)
             } else if (captureManager.currentItemIndex >= 0) {
                 stepCaptureFrame(captureManager.currentItemIndex, "next")
             }
@@ -8328,6 +8327,35 @@ Rectangle {
         WebSocketClient.sendMessageJson(destination, jsonStr)
     }
 
+    // gz.txt：截图 / 慢放每次滚轮的原始事件（angleDelta 很小或为 0 的鼠标 / 触摸板、离上次多久、按了什么键）
+    property double gzLastWheelMs: 0
+    // 主界面卡顿：100ms 一跳，实际间隔超 250ms 记一条（滚轮不灵是不是界面卡住）
+    Timer {
+        id: gzStallTimer
+        interval: 100
+        repeat: true
+        running: true
+        property double lastMs: 0
+        onTriggered: {
+            var now = GzLog.nowMs()
+            if (lastMs > 0 && now - lastMs > 250)
+                GzLog.log("STALL", "主界面卡了约 " + Math.round(now - lastMs - interval) + "ms")
+            lastMs = now
+        }
+    }
+    function gzWheel(view, wheel, info) {
+        var now = GzLog.nowMs()
+        var gap = gzLastWheelMs > 0 ? Math.round(now - gzLastWheelMs) : -1
+        gzLastWheelMs = now
+        GzLog.log("WHEEL", view + " angle=" + wheel.angleDelta.x + "," + wheel.angleDelta.y
+            + " pixel=" + wheel.pixelDelta.x + "," + wheel.pixelDelta.y
+            + " 距上次" + gap + "ms"
+            + (wheel.modifiers & Qt.ControlModifier ? " Ctrl" : "")
+            + (mainPage.sKeyPressed ? " S键" : "")
+            + " 步长=" + mainPage.frameStep
+            + (info ? " " + info : ""))
+    }
+
     // 外接摄像头设定「退出程序」：确认后让手机停推流、直接关闭 App（手机上不提示）
     function askExitDeviceApp() {
         if (!HttpClient.currentDeviceId()) {
@@ -10886,6 +10914,7 @@ Rectangle {
             onClicked: closeFullscreenViewer()
             
             onWheel: function(wheel) {
+                mainPage.gzWheel("全屏背景", wheel, "item=" + fullscreenItemIndex + " 当前帧=" + fullscreenFrameIndex)
                 if (mainPage.sKeyPressed) {
                     // ⭐ PC等级1(豪华版)：禁用全屏查看局部放大
                     if (mainPage.pcActivationLevel < 2) {
@@ -11017,6 +11046,7 @@ Rectangle {
                     }
                     
                     onWheel: function(wheel) {
+                        mainPage.gzWheel("全屏图片", wheel, "item=" + fullscreenItemIndex + " 当前帧=" + fullscreenFrameIndex)
                         if (mainPage.sKeyPressed) {
                             // ⭐ S + 滚轮：以鼠标位置为中心缩放；§84 第一档直达 2 倍
                             var oldZoom = fullscreenZoom
@@ -11177,6 +11207,7 @@ Rectangle {
                         anchors.fill: parent
                         onWheel: function(wheel) {
                             wheel.accepted = true
+                            mainPage.gzWheel("全屏进度条", wheel, "item=" + fullscreenItemIndex + " 当前帧=" + fullscreenFrameIndex)
                             if (fullscreenFrameSliderContainer.totalFrames <= 0) return
                             if (wheel.angleDelta.y > 0) fullscreenGoToFrame(fullscreenFrameIndex - 1)
                             else fullscreenGoToFrame(fullscreenFrameIndex + 1)
@@ -11235,6 +11266,7 @@ Rectangle {
 
                             onWheel: function(wheel) {
                                 wheel.accepted = true
+                                mainPage.gzWheel("全屏进度条把手", wheel, "item=" + fullscreenItemIndex + " 当前帧=" + fullscreenFrameIndex)
                                 if (fullscreenFrameSliderContainer.totalFrames <= 0) return
                                 if (wheel.angleDelta.y > 0) fullscreenGoToFrame(fullscreenFrameIndex - 1)
                                 else fullscreenGoToFrame(fullscreenFrameIndex + 1)
@@ -11505,6 +11537,7 @@ Rectangle {
 
                             onWheel: function(wheel) {
                                 wheel.accepted = true
+                                mainPage.gzWheel("列预览", wheel, "item=" + colPreviewItem.myIndex + " 当前帧=" + colPreviewItem.frameIdx + " 总=" + colPreviewItem.totalFrames)
                                 var idx = colPreviewItem.myIndex
 
                                 // ⭐ Ctrl+滚轮：本列所有 item 同步切帧 / 同步缩放
@@ -11673,6 +11706,7 @@ Rectangle {
 
                             onWheel: function(wheel) {
                                 wheel.accepted = true
+                                mainPage.gzWheel("列预览进度条", wheel, "item=" + colPreviewItem.myIndex + " 当前帧=" + colPreviewItem.frameIdx + " 总=" + colPreviewItem.totalFrames)
                                 if (colPreviewItem.totalFrames <= 0) return
                                 if (wheel.angleDelta.y > 0) columnPreviewJumpSingleFrame(colPreviewItem.myIndex, colPreviewItem.frameIdx - 1)
                                 else columnPreviewJumpSingleFrame(colPreviewItem.myIndex, colPreviewItem.frameIdx + 1)
@@ -11773,6 +11807,7 @@ Rectangle {
             onClicked: closeColumnPreviewZoom()
             
             onWheel: function(wheel) {
+                mainPage.gzWheel("列预览放大背景", wheel, "当前帧=" + columnPreviewZoomFrame)
                 if (mainPage.sKeyPressed) {
                     // S + 滚轮：缩放；§84 第一档直达 2 倍
                     var oldZoom = columnPreviewZoomScale
@@ -11874,6 +11909,7 @@ Rectangle {
                         }
                     }
                     onWheel: function(wheel) {
+                        mainPage.gzWheel("列预览放大图片", wheel, "当前帧=" + columnPreviewZoomFrame)
                         if (mainPage.sKeyPressed) {
                             var oldZoom = columnPreviewZoomScale
                             // §84 第一档直达 2 倍
@@ -12001,6 +12037,7 @@ Rectangle {
                         anchors.fill: parent
                         onWheel: function(wheel) {
                             wheel.accepted = true
+                            mainPage.gzWheel("列预览放大进度条", wheel, "当前帧=" + columnPreviewZoomFrame)
                             if (zoomFrameSliderContainer.totalFrames <= 0) return
                             if (wheel.angleDelta.y > 0) columnPreviewZoomGoToFrame(columnPreviewZoomFrame - 1)
                             else columnPreviewZoomGoToFrame(columnPreviewZoomFrame + 1)
@@ -12058,6 +12095,7 @@ Rectangle {
 
                             onWheel: function(wheel) {
                                 wheel.accepted = true
+                                mainPage.gzWheel("列预览放大进度条把手", wheel, "当前帧=" + columnPreviewZoomFrame)
                                 if (zoomFrameSliderContainer.totalFrames <= 0) return
                                 if (wheel.angleDelta.y > 0) columnPreviewZoomGoToFrame(columnPreviewZoomFrame - 1)
                                 else columnPreviewZoomGoToFrame(columnPreviewZoomFrame + 1)

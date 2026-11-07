@@ -4,6 +4,7 @@
 #include "slowmotionplayer.h"
 #include "webframesource.h"
 #include "capturedebuglog.h"
+#include "gzlog.h"
 #include <QtConcurrent>
 #include <QThreadPool>
 #include <QStandardPaths>
@@ -1194,8 +1195,12 @@ QImage CaptureManager::decodeFromDisk(int itemIndex, int frameOffset)
     if (m_clearGeneration.load(std::memory_order_acquire) != gen) return QImage();
     if (!m_frameSource) return QImage();
 
+    QElapsedTimer gzT;
+    gzT.start();
     QByteArray data = m_frameSource->readH264Frame(globalIndex);
+    const qint64 gzReadMs = gzT.elapsed();
     if (data.isEmpty()) {
+        gzLog("DEC", QString("item=%1 frame=%2 读盘为空（文件不在）").arg(itemIndex).arg(frameOffset));
         captureDebugLog("CAP", QString("decodeFromDisk file MISSING item=%1 frame=%2 global=%3")
             .arg(itemIndex).arg(frameOffset).arg(globalIndex));
         return QImage();
@@ -1214,6 +1219,7 @@ QImage CaptureManager::decodeFromDisk(int itemIndex, int frameOffset)
     if (m_frameSource->frameFormat() == IFrameSource::FrameFormat::JPEG) {
         // JPEG 解码不碰任何共享状态，全程锁外
         if (!result.loadFromData(data, "JPEG")) {
+            gzLog("DEC", QString("item=%1 frame=%2 JPEG 解码失败 %3KB").arg(itemIndex).arg(frameOffset).arg(data.size() / 1024));
             captureDebugLog("CAP", QString("decodeFromDisk JPEG FAIL item=%1 frame=%2 global=%3 bytes=%4")
                 .arg(itemIndex).arg(frameOffset).arg(globalIndex).arg(data.size()));
             return QImage();
@@ -1254,17 +1260,25 @@ QImage CaptureManager::decodeFromDisk(int itemIndex, int frameOffset)
             return QImage();
         }
         if (result.isNull()) {
+            gzLog("DEC", QString("item=%1 frame=%2 H264 解码失败 %3KB 用时%4ms").arg(itemIndex).arg(frameOffset)
+                .arg(data.size() / 1024).arg(gzT.elapsed()));
             captureDebugLog("CAP", QString("decodeFromDisk H264 FAIL item=%1 frame=%2 global=%3 %4")
                 .arg(itemIndex).arg(frameOffset).arg(globalIndex).arg(captureDebugNaluPreview(data)));
             return QImage();
         }
     }
 
+    const qint64 gzDecodeMs = gzT.elapsed() - gzReadMs;
     if (m_videoRotation != 0) {
         QTransform t;
         t.rotate(m_videoRotation);
         result = result.transformed(t, Qt::FastTransformation);  // 整帧旋转也在锁外
     }
+    gzLog("DEC", QString("item=%1 frame=%2 %3 %4x%5 源%6KB 读盘%7ms 解码%8ms 旋转%9ms")
+        .arg(itemIndex).arg(frameOffset)
+        .arg(m_frameSource->frameFormat() == IFrameSource::FrameFormat::JPEG ? "JPEG" : "H264")
+        .arg(result.width()).arg(result.height()).arg(data.size() / 1024)
+        .arg(gzReadMs).arg(gzDecodeMs).arg(gzT.elapsed() - gzReadMs - gzDecodeMs));
 
     captureDebugLog("CAP", QString("decodeFromDisk OK item=%1 frame=%2 size=%3x%4")
         .arg(itemIndex).arg(frameOffset).arg(result.width()).arg(result.height()));
@@ -1275,8 +1289,10 @@ void CaptureManager::evictFrameCache()
 {
     // ⭐ 2026-07-19：张数上限之外加字节预算（全分辨率帧 4K≈33MB/张，纯按张数封顶
     //   会吃掉数 GB 内存，低端机换页→整机停顿→实时流卡）
+    int gzEvicted = 0;
     while (m_frameCache.size() > 1
            && (m_frameCache.size() >= MAX_FRAME_CACHE || m_frameCacheBytes > MAX_FRAME_CACHE_BYTES)) {
+        ++gzEvicted;
         qint64 lruKey = -1;
         qint64 lruOrder = INT64_MAX;
         for (auto it = m_frameCache.begin(); it != m_frameCache.end(); ++it) {
@@ -1291,6 +1307,10 @@ void CaptureManager::evictFrameCache()
         } else {
             break;
         }
+    }
+    if (gzEvicted > 0) {
+        gzLog("CACHE", QString("挤出 %1 帧，剩 %2 帧 / %3MB").arg(gzEvicted)
+            .arg(m_frameCache.size()).arg(m_frameCacheBytes / (1024 * 1024)));
     }
 }
 
@@ -1447,7 +1467,11 @@ void CaptureManager::gotoFrame(int itemIndex, int frameOffset)
 
         CaptureItem &item = m_items[itemIndex];
         totalFrames = item.totalFrames();
+        const int gzReq = frameOffset;
         frameOffset = qBound(0, frameOffset, totalFrames - 1);
+        gzLog("GOTO", QString("item=%1 %2 -> 请求%3%4 总%5帧").arg(itemIndex).arg(item.currentOffset)
+            .arg(gzReq).arg(gzReq != frameOffset ? QString("（到头，改成%1）").arg(frameOffset) : QString())
+            .arg(totalFrames));
 
         if (item.currentOffset != frameOffset) {
             item.currentOffset = frameOffset;
@@ -1547,11 +1571,13 @@ void CaptureManager::scheduleFrameDecode(int itemIndex, int frameOffset)
     }
 
     const int gen = m_clearGeneration.load(std::memory_order_acquire);
+    QElapsedTimer gzQueued;
+    gzQueued.start();
 
     // ⭐ 2026-07-19：改专用单线程池 + 出队时作废陈旧任务（见头文件 m_wantedOffset 注释）。
     //   快速滚动时积压的「早已滚过去的帧」在这里被微秒级跳过，不再全分辨率解码+换图，
     //   解码/纹理上传只跟得上机器能力，实时流（同主线程/渲染线程）不再被拖卡。
-    m_decodePool.start([this, itemIndex, frameOffset, jobKey, gen]() {
+    m_decodePool.start([this, itemIndex, frameOffset, jobKey, gen, gzQueued]() {
         if (m_clearGeneration.load(std::memory_order_acquire) != gen) {
             QMutexLocker lock(&m_decodeMutex);
             m_pendingDecodes.remove(jobKey);
@@ -1563,10 +1589,13 @@ void CaptureManager::scheduleFrameDecode(int itemIndex, int frameOffset)
             const int wanted = m_wantedOffset.value(itemIndex, frameOffset);
             if (qAbs(frameOffset - wanted) > DECODE_KEEP_WINDOW) {
                 m_pendingDecodes.remove(jobKey);
+                gzLog("QUEUE", QString("item=%1 frame=%2 作废（已滚到 %3），排队%4ms")
+                    .arg(itemIndex).arg(frameOffset).arg(wanted).arg(gzQueued.elapsed()));
                 return;   // 用户已滚到别处，此帧作废
             }
         }
 
+        gzLog("QUEUE", QString("item=%1 frame=%2 开始解码，排队%3ms").arg(itemIndex).arg(frameOffset).arg(gzQueued.elapsed()));
         const QImage img = decodeFromDisk(itemIndex, frameOffset);
         bool shouldNotify = false;
         {
@@ -1580,6 +1609,8 @@ void CaptureManager::scheduleFrameDecode(int itemIndex, int frameOffset)
             }
         }
         if (shouldNotify) {
+            gzLog("QUEUE", QString("item=%1 frame=%2 解码完成入缓存，通知界面（从排队起 %3ms）")
+                .arg(itemIndex).arg(frameOffset).arg(gzQueued.elapsed()));
             QMetaObject::invokeMethod(this, [this, itemIndex, frameOffset]() {
                 emit frameImageReady(itemIndex, frameOffset);
             }, Qt::QueuedConnection);
@@ -1640,10 +1671,17 @@ QImage CaptureManager::getFrameImage(int itemIndex, int frameOffset)
                 cacheIt.value().accessOrder = ++m_frameCacheCounter;
             }
             captureDebugLog("CAP", "getFrameImage HIT cache");
+            gzLog("IMG", QString("item=%1 frame=%2 缓存命中 %3x%4").arg(itemIndex).arg(frameOffset)
+                .arg(cached.width()).arg(cached.height()));
             return cached;
         }
     }
 
+    {
+        QMutexLocker decodeLock(&m_decodeMutex);
+        gzLog("IMG", QString("item=%1 frame=%2 缓存没有，先给空图、排队解码（缓存 %3 帧 / %4MB）")
+            .arg(itemIndex).arg(frameOffset).arg(m_frameCache.size()).arg(m_frameCacheBytes / (1024 * 1024)));
+    }
     scheduleFrameDecode(itemIndex, frameOffset);
 
     captureDebugLog("CAP", QString("getFrameImage ASYNC pending return empty item=%1 frame=%2")

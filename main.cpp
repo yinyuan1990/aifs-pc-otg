@@ -49,6 +49,7 @@
 #include "qrcodegenerator.h"
 #include "autoupdater.h"
 #include "p2ploguploader.h"
+#include "gzlog.h"
 #include "zjcinstaller.h"   // ⭐ zjc_worker 分离后按需下载安装 + 上报
 
 // ⭐ Qt WebEngine（Chromium 内核）—— 仅当 CMake 检测到 WebEngine 时启用（HAVE_WEBENGINE）
@@ -1051,6 +1052,7 @@ int main(int argc, char *argv[])
 
     // 注册 P2PLogUploader 单例（P2P诊断日志上报，总后台开关控制，按推流ID分流）
     qmlRegisterSingletonInstance("Aifs.Components", 1, 0, "P2PLogUploader", P2PLogUploader::instance());
+    qmlRegisterSingletonInstance("Aifs.Components", 1, 0, "GzLog", GzLog::instance());
 
     QQmlApplicationEngine engine;
 

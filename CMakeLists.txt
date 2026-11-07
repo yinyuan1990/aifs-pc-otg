@@ -89,6 +89,8 @@ qt_add_executable(Phoenix
     gstcapturedecoder.h
     capturedebuglog.cpp
     capturedebuglog.h
+    gzlog.cpp            # gz.txt 截图 / 慢放滚轮切帧专用排查日志
+    gzlog.h
     gstplayer.cpp        # GStreamer 实时流 + NALU 存储
     gstplayer.h
     h265support.cpp      # ⭐ H265(HEVC) P2P 支持（元素工厂/IRAP判断/独立日志，与 H264 主链路解耦）

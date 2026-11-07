@@ -12,6 +12,7 @@
 #include <QThread>
 #include <QQueue>
 #include <QWaitCondition>
+#include <QElapsedTimer>
 #include <atomic>
 #include "iframesource.h"   // ⭐ 帧源抽象（GStreamer / 网页内核 二选一注入）
 
@@ -151,6 +152,8 @@ public:
     // 帧步进
     Q_INVOKABLE void nextFrame();
     Q_INVOKABLE void prevFrame();
+    // 前后跳 delta 帧（滚轮 / 左右键 / ← → 按「滚轮帧数」F5–F8），到头到尾停住
+    Q_INVOKABLE void stepFrames(int delta);
     Q_INVOKABLE void jumpToFrame(int frame);
     
     // 获取帧图像（从JPEG文件读取）
@@ -228,6 +231,7 @@ private:
     // 异步解码线程（避免主线程阻塞导致实时流卡顿）
     SlowMotionDecodeThread *m_decodeThread = nullptr;
     int m_pendingFrameOffset = -1;  // 等待解码的帧（用于跳帧优化）
+    QElapsedTimer m_gzReqTimer;     // gz.txt：手动切帧「请求解码 → 出图」耗时
     
     // 常量
     static constexpr double MULTIPLIER_MIN = 1.0;
