@@ -1215,6 +1215,7 @@ QImage CaptureManager::decodeFromDisk(int itemIndex, int frameOffset)
     //   在 checkout 期间看不到该实例（map 里已置空），不会 double-delete；归还时若条目
     //   已被删/清空则由本线程自行销毁，过期解码结果由调用方的 generation 校验丢弃。
     QImage result;
+    qint64 gzConvertMs = 0;   // gz.txt：H264 解完后转成 RGB 用了多久（JPEG 没有这一步）
     // ⭐ 按帧源格式分支：网页内核(JPEG)直接 QImage 解，GStreamer(H264) 走软解码器。
     if (m_frameSource->frameFormat() == IFrameSource::FrameFormat::JPEG) {
         // JPEG 解码不碰任何共享状态，全程锁外
@@ -1241,6 +1242,7 @@ QImage CaptureManager::decodeFromDisk(int itemIndex, int frameOffset)
 
         decoder->flush();
         result = decoder->decodeNalu(data);
+        gzConvertMs = decoder->lastConvertMs();
 
         // checkin：item 还在就归还实例；期间被 removeItem/clearAll 删掉则自行销毁
         bool returned = false;
@@ -1274,11 +1276,13 @@ QImage CaptureManager::decodeFromDisk(int itemIndex, int frameOffset)
         t.rotate(m_videoRotation);
         result = result.transformed(t, Qt::FastTransformation);  // 整帧旋转也在锁外
     }
-    gzLog("DEC", QString("item=%1 frame=%2 %3 %4x%5 源%6KB 读盘%7ms 解码%8ms 旋转%9ms")
+    // 「解码」= 取解码器 + H264 / JPEG 解码；「转色」= 解出来的 YUV 转成 RGB（11-13 起分开记，之前两项合在「解码」里）
+    gzLog("DEC", QString("item=%1 frame=%2 %3 %4x%5 源%6KB 读盘%7ms 解码%8ms 转色%9ms 旋转%10ms")
         .arg(itemIndex).arg(frameOffset)
         .arg(m_frameSource->frameFormat() == IFrameSource::FrameFormat::JPEG ? "JPEG" : "H264")
         .arg(result.width()).arg(result.height()).arg(data.size() / 1024)
-        .arg(gzReadMs).arg(gzDecodeMs).arg(gzT.elapsed() - gzReadMs - gzDecodeMs));
+        .arg(gzReadMs).arg(qMax<qint64>(0, gzDecodeMs - gzConvertMs)).arg(gzConvertMs)
+        .arg(gzT.elapsed() - gzReadMs - gzDecodeMs));
 
     captureDebugLog("CAP", QString("decodeFromDisk OK item=%1 frame=%2 size=%3x%4")
         .arg(itemIndex).arg(frameOffset).arg(result.width()).arg(result.height()));
@@ -1578,44 +1582,84 @@ void CaptureManager::scheduleFrameDecode(int itemIndex, int frameOffset)
     //   快速滚动时积压的「早已滚过去的帧」在这里被微秒级跳过，不再全分辨率解码+换图，
     //   解码/纹理上传只跟得上机器能力，实时流（同主线程/渲染线程）不再被拖卡。
     m_decodePool.start([this, itemIndex, frameOffset, jobKey, gen, gzQueued]() {
-        if (m_clearGeneration.load(std::memory_order_acquire) != gen) {
-            QMutexLocker lock(&m_decodeMutex);
-            m_pendingDecodes.remove(jobKey);
-            return;
-        }
-
-        {
-            QMutexLocker lock(&m_decodeMutex);
-            const int wanted = m_wantedOffset.value(itemIndex, frameOffset);
-            if (qAbs(frameOffset - wanted) > DECODE_KEEP_WINDOW) {
-                m_pendingDecodes.remove(jobKey);
-                gzLog("QUEUE", QString("item=%1 frame=%2 作废（已滚到 %3），排队%4ms")
-                    .arg(itemIndex).arg(frameOffset).arg(wanted).arg(gzQueued.elapsed()));
-                return;   // 用户已滚到别处，此帧作废
-            }
-        }
-
-        gzLog("QUEUE", QString("item=%1 frame=%2 开始解码，排队%3ms").arg(itemIndex).arg(frameOffset).arg(gzQueued.elapsed()));
-        const QImage img = decodeFromDisk(itemIndex, frameOffset);
-        bool shouldNotify = false;
-        {
-            QMutexLocker lock(&m_decodeMutex);
-            m_pendingDecodes.remove(jobKey);
-            // ⭐ 2026-07-24：解码期间不再持锁，removeItem/clearAll 可能已清过缓存，
-            //   generation 变了的过期帧禁止回填（否则按旧索引写入=脏缓存）
-            if (!img.isNull() && m_clearGeneration.load(std::memory_order_acquire) == gen) {
-                putFrameCache(itemIndex, frameOffset, img);
-                shouldNotify = true;
-            }
-        }
-        if (shouldNotify) {
-            gzLog("QUEUE", QString("item=%1 frame=%2 解码完成入缓存，通知界面（从排队起 %3ms）")
-                .arg(itemIndex).arg(frameOffset).arg(gzQueued.elapsed()));
-            QMetaObject::invokeMethod(this, [this, itemIndex, frameOffset]() {
-                emit frameImageReady(itemIndex, frameOffset);
-            }, Qt::QueuedConnection);
-        }
+        runDecodeJob(itemIndex, frameOffset, jobKey, gen, gzQueued, 0);
     });
+}
+
+void CaptureManager::runDecodeJob(int itemIndex, int frameOffset, qint64 jobKey, int gen,
+                                  QElapsedTimer gzQueued, int deferCount)
+{
+    if (m_clearGeneration.load(std::memory_order_acquire) != gen) {
+        QMutexLocker lock(&m_decodeMutex);
+        m_pendingDecodes.remove(jobKey);
+        return;
+    }
+
+    bool defer = false;
+    bool gzIsTarget = true;
+    int gzAheadItem = -1;
+    int gzAheadFrame = -1;
+    {
+        QMutexLocker lock(&m_decodeMutex);
+        const int wanted = m_wantedOffset.value(itemIndex, frameOffset);
+        gzIsTarget = (frameOffset == wanted);
+        if (qAbs(frameOffset - wanted) > DECODE_KEEP_WINDOW) {
+            m_pendingDecodes.remove(jobKey);
+            gzLog("QUEUE", QString("item=%1 frame=%2 作废（已滚到 %3），排队%4ms")
+                .arg(itemIndex).arg(frameOffset).arg(wanted).arg(gzQueued.elapsed()));
+            return;   // 用户已滚到别处，此帧作废
+        }
+        // ⭐ 2026-11-13「分辨率越高截图滚轮越卡」（gz.txt 实锤）：原来窗口内的帧按排队先后挨个解，
+        //   滚得比解码快时（4K 一帧约 100ms，每秒只解得出 10 帧，手滚 15~30 格 / 秒）解码线程一直在解
+        //   落后目标 1~3 帧的旧帧，解完目标又往前走了 → 界面一帧都不换、停手还要再等 1~4 帧。
+        //   现在：这帧不是当前目标帧（前后预取 / 滚过去的旧目标），而有目标帧还在后面排着（本格的，或列预览 /
+        //   Ctrl 联动时别的格子的）→ 挪到队尾，让目标帧先解（同慢放「只解最新」）；目标帧都解完后它要是
+        //   还在窗口内再解，当预取用。
+        //   目标帧在排队 = 一定排在本任务后面（单线程池，正在跑的就是本任务），挪一次就到它后面，不会空转；
+        //   DECODE_MAX_DEFER 只是兜底。
+        if (!gzIsTarget && deferCount < DECODE_MAX_DEFER) {
+            for (auto it = m_wantedOffset.constBegin(); it != m_wantedOffset.constEnd(); ++it) {
+                if (m_pendingDecodes.contains(qint64(it.key()) * 1000000 + it.value())) {
+                    defer = true;
+                    gzAheadItem = it.key();
+                    gzAheadFrame = it.value();
+                    break;
+                }
+            }
+        }
+    }
+    if (defer) {
+        if (deferCount == 0) {
+            gzLog("QUEUE", QString("item=%1 frame=%2 让路（item=%3 的目标帧 %4 还没解，先解它），排队%5ms")
+                .arg(itemIndex).arg(frameOffset).arg(gzAheadItem).arg(gzAheadFrame).arg(gzQueued.elapsed()));
+        }
+        m_decodePool.start([this, itemIndex, frameOffset, jobKey, gen, gzQueued, deferCount]() {
+            runDecodeJob(itemIndex, frameOffset, jobKey, gen, gzQueued, deferCount + 1);
+        });
+        return;
+    }
+
+    gzLog("QUEUE", QString("item=%1 frame=%2 开始解码，排队%3ms%4").arg(itemIndex).arg(frameOffset)
+        .arg(gzQueued.elapsed()).arg(gzIsTarget ? "" : "（预取）"));
+    const QImage img = decodeFromDisk(itemIndex, frameOffset);
+    bool shouldNotify = false;
+    {
+        QMutexLocker lock(&m_decodeMutex);
+        m_pendingDecodes.remove(jobKey);
+        // ⭐ 2026-07-24：解码期间不再持锁，removeItem/clearAll 可能已清过缓存，
+        //   generation 变了的过期帧禁止回填（否则按旧索引写入=脏缓存）
+        if (!img.isNull() && m_clearGeneration.load(std::memory_order_acquire) == gen) {
+            putFrameCache(itemIndex, frameOffset, img);
+            shouldNotify = true;
+        }
+    }
+    if (shouldNotify) {
+        gzLog("QUEUE", QString("item=%1 frame=%2 解码完成入缓存，通知界面（从排队起 %3ms）")
+            .arg(itemIndex).arg(frameOffset).arg(gzQueued.elapsed()));
+        QMetaObject::invokeMethod(this, [this, itemIndex, frameOffset]() {
+            emit frameImageReady(itemIndex, frameOffset);
+        }, Qt::QueuedConnection);
+    }
 }
 
 void CaptureManager::nextFrame(int itemIndex)

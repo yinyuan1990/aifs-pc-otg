@@ -1,6 +1,7 @@
 #include "gstcapturedecoder.h"
 #include "capturedebuglog.h"
 #include <QDebug>
+#include <QElapsedTimer>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -120,6 +121,11 @@ QImage GstCaptureDecoder::decodeNalu(const QByteArray &naluData)
 
     CaptureDebugScope scope("DEC", "decodeNalu", 100);
 
+    QElapsedTimer gzT;
+    gzT.start();
+    m_lastDecodeMs = 0;
+    m_lastConvertMs = 0;
+
     m_packet->data = const_cast<uint8_t*>(
         reinterpret_cast<const uint8_t*>(naluData.constData()));
     m_packet->size = naluData.size();
@@ -141,7 +147,9 @@ QImage GstCaptureDecoder::decodeNalu(const QByteArray &naluData)
         return QImage();
     }
 
+    m_lastDecodeMs = gzT.elapsed();
     QImage result = frameToImage();
+    m_lastConvertMs = gzT.elapsed() - m_lastDecodeMs;
     if (!result.isNull()) {
         m_lastDecoded = result;
         captureDebugLog("DEC", QString("decodeNalu OK %1x%2 %3")

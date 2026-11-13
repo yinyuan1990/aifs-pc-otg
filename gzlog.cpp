@@ -6,6 +6,8 @@
 #include <QFile>
 #include <QMutex>
 #include <QMutexLocker>
+#include <QQuickItem>
+#include <QQuickWindow>
 #include <QThread>
 #include <QThreadPool>
 
@@ -84,4 +86,55 @@ GzLog *GzLog::instance()
 double GzLog::nowMs() const
 {
     return double(gzClock().nsecsElapsed()) / 1e6;
+}
+
+void GzLog::markShow(const QString &what, QObject *item)
+{
+    auto *quickItem = qobject_cast<QQuickItem *>(item);
+    QQuickWindow *window = quickItem ? quickItem->window() : nullptr;
+    if (!window) return;
+    attachWindow(window);
+
+    QMutexLocker locker(&m_showMutex);
+    if (m_marks.size() >= 16) m_marks.removeFirst();   // 窗口没在画（最小化等）时别越攒越多
+    ShowMark mark;
+    mark.what = what;
+    mark.window = window;
+    mark.t0Ns = gzClock().nsecsElapsed();
+    m_marks.append(mark);
+    m_markCount.store(int(m_marks.size()), std::memory_order_release);
+}
+
+void GzLog::attachWindow(QQuickWindow *window)
+{
+    if (m_windows.contains(window)) return;
+    m_windows.insert(window);
+    connect(window, &QObject::destroyed, this, [this, window]() { m_windows.remove(window); });
+
+    // 下面两个回调在渲染线程上直接跑（DirectConnection），所以只做极少的事
+    // ① 场景同步完：此前登记的换图已经交给渲染线程
+    connect(window, &QQuickWindow::afterSynchronizing, this, [this, window]() {
+        if (m_markCount.load(std::memory_order_acquire) == 0) return;
+        QMutexLocker locker(&m_showMutex);
+        for (ShowMark &m : m_marks) {
+            if (m.window == window) m.synced = true;
+        }
+    }, Qt::DirectConnection);
+    // ② 这一帧画完并交换缓冲：已同步的换图算上屏，写日志
+    connect(window, &QQuickWindow::frameSwapped, this, [this, window]() {
+        if (m_markCount.load(std::memory_order_acquire) == 0) return;
+        QVector<ShowMark> done;
+        {
+            QMutexLocker locker(&m_showMutex);
+            for (int i = 0; i < m_marks.size(); ) {
+                if (m_marks[i].window == window && m_marks[i].synced) done.append(m_marks.takeAt(i));
+                else ++i;
+            }
+            m_markCount.store(int(m_marks.size()), std::memory_order_release);
+        }
+        const qint64 nowNs = gzClock().nsecsElapsed();
+        for (const ShowMark &m : done) {
+            gzLog("SHOW", QString("%1 换图到上屏 %2ms").arg(m.what).arg((nowNs - m.t0Ns) / 1000000));
+        }
+    }, Qt::DirectConnection);
 }

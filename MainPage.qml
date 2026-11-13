@@ -941,9 +941,10 @@ Rectangle {
         }
         function onFrameImageReady(itemIndex, frameOffset) {
             // ⭐ 全屏：目标帧解码完成 → 推进显示帧（未缓存时保持旧画面, 此刻才换, 无白屏）
+            //   2026-11-13：滚轮滚得比解码快时，解出来的帧比现在显示的离目标更近就先显示（gzFrameWorthShowing，同慢放）
             if (mainPage.fullscreenViewerVisible
                     && itemIndex === mainPage.fullscreenItemIndex
-                    && frameOffset === mainPage.fullscreenFrameIndex) {
+                    && mainPage.gzFrameWorthShowing(frameOffset, mainPage.fullscreenDisplayFrame, mainPage.fullscreenFrameIndex)) {
                 mainPage.fullscreenDisplayFrame = frameOffset
                 mainPage.fullscreenRefreshToken = Date.now()
             }
@@ -951,7 +952,7 @@ Rectangle {
             if (mainPage.columnPreviewZoomItemIdx >= 0
                     && mainPage.columnPreviewZoomItemIdx < mainPage.columnPreviewItems.length
                     && mainPage.columnPreviewItems[mainPage.columnPreviewZoomItemIdx] === itemIndex
-                    && frameOffset === mainPage.columnPreviewZoomFrame) {
+                    && mainPage.gzFrameWorthShowing(frameOffset, mainPage.columnPreviewZoomDisplayFrame, mainPage.columnPreviewZoomFrame)) {
                 mainPage.columnPreviewZoomDisplayFrame = frameOffset
                 mainPage.columnPreviewRefreshToken = Date.now()
             }
@@ -959,7 +960,7 @@ Rectangle {
             if (mainPage.columnPreviewVisible && mainPage.columnPreviewItems.length > 0) {
                 for (var i = 0; i < mainPage.columnPreviewItems.length; i++) {
                     if (mainPage.columnPreviewItems[i] === itemIndex
-                            && mainPage.columnPreviewFrames[i] === frameOffset) {
+                            && mainPage.gzFrameWorthShowing(frameOffset, mainPage.columnPreviewDisplayFrames[i], mainPage.columnPreviewFrames[i])) {
                         var disp = mainPage.columnPreviewDisplayFrames.slice()
                         disp[i] = frameOffset
                         mainPage.columnPreviewDisplayFrames = disp
@@ -2153,6 +2154,7 @@ Rectangle {
                         //   （曾经加过一层 z:50 的独立感应层来"解决"闪烁，副作用是itemMouseArea 从此再也
                         //   收不到 hover，连带"鼠标悬停即选中该item"「A键放大跟随鼠标」都失效了——已撤回。）
                         property bool frameBarHovered: false
+                        property int shownFrame: -1           // 图片现在显示的是哪一帧（itemImage.loadFrame 里记）
                         
                         function rebindFrameProperties() {
                             gridCell.currentFrame = Qt.binding(function() {
@@ -2190,9 +2192,11 @@ Rectangle {
                                 }
                             }
                             function onFrameImageReady(itemIndex, frameOffset) {
-                                if (itemIndex === gridCell.dataIndex && frameOffset === gridCell.currentFrame) {
+                                // 2026-11-13：滚轮滚得比解码快时，解出来的帧比现在显示的离目标更近就先显示（同慢放）
+                                if (itemIndex === gridCell.dataIndex
+                                        && mainPage.gzFrameWorthShowing(frameOffset, gridCell.shownFrame, gridCell.currentFrame)) {
                                     gridCell.frameVersion++
-                                    itemImage.loadCurrentFrame()
+                                    itemImage.loadFrame(frameOffset)
                                 }
                             }
                             // ⭐ AI 牌位置放大：把识别到的牌中心对齐到格子中心并放大
@@ -2614,8 +2618,13 @@ Rectangle {
                                 mirrorVertically: mainPage.videoMirrorMode === "vertical"
 
                                 function loadCurrentFrame() {
+                                    loadFrame(gridCell.currentFrame)
+                                }
+                                function loadFrame(f) {
                                     if (gridCell.hasData) {
-                                        source = "image://capture/frame/" + gridCell.dataIndex + "/" + gridCell.currentFrame + "?v=" + gridCell.frameVersion
+                                        gridCell.shownFrame = f
+                                        GzLog.markShow("网格 item=" + gridCell.dataIndex + " frame=" + f, itemImage)
+                                        source = "image://capture/frame/" + gridCell.dataIndex + "/" + f + "?v=" + gridCell.frameVersion
                                     }
                                 }
 
@@ -8342,6 +8351,25 @@ Rectangle {
                 GzLog.log("STALL", "主界面卡了约 " + Math.round(now - lastMs - interval) + "ms")
             lastMs = now
         }
+    }
+    // 2026-11-13「分辨率越高截图滚轮越卡」：解码完成的帧 f 要不要先显示。
+    //   原来只有 f 等于目标帧才换图，滚得比解码快时解出来的全是「刚滚过去的帧」→ 一帧都不显示、画面整段不动。
+    //   现在：f 就是目标帧，或者比现在显示的那帧（shown）离目标更近，就先显示（往回滚时旧方向的帧不会更近，不显示）。
+    function gzFrameWorthShowing(f, shown, target) {
+        if (f === target) return true
+        if (shown === undefined || shown === null || shown < 0) return false
+        return Math.abs(f - target) < Math.abs(shown - target)
+    }
+    // gz.txt「SHOW … 换图到上屏 Nms」：全屏 / 列预览 / 列预览放大每次换图记一条（网格在 itemImage.loadFrame 里记）
+    onFullscreenRefreshTokenChanged: {
+        if (fullscreenViewerVisible)
+            GzLog.markShow("全屏 item=" + fullscreenItemIndex + " frame=" + fullscreenDisplayFrame, mainPage)
+    }
+    onColumnPreviewRefreshTokenChanged: {
+        if (columnPreviewZoomItemIdx >= 0)
+            GzLog.markShow("列预览放大 frame=" + columnPreviewZoomDisplayFrame, mainPage)
+        else if (columnPreviewVisible)
+            GzLog.markShow("列预览 frames=" + columnPreviewDisplayFrames.join(","), mainPage)
     }
     function gzWheel(view, wheel, info) {
         var now = GzLog.nowMs()

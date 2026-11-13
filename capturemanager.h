@@ -15,6 +15,7 @@
 #include <QPair>
 #include <QVariantMap>
 #include <QThreadPool>
+#include <QElapsedTimer>
 #include <atomic>
 #include "gpupipeline.h"
 #include "gstplayer.h"
@@ -439,6 +440,9 @@ private:
     QImage decodeFromDisk(int itemIndex, int frameOffset);
     static QByteArray readNaluFile(const QString &dir, int frameOffset);
     void scheduleFrameDecode(int itemIndex, int frameOffset);
+    // 解码池里跑的单个任务：出队时作废 / 让目标帧先解（挪到队尾，deferCount 记挪了几次）/ 解码入缓存
+    void runDecodeJob(int itemIndex, int frameOffset, qint64 jobKey, int gen,
+                      QElapsedTimer gzQueued, int deferCount);
     void ensureCardDetector();                                  // 懒加载检测器+模型
     void requestCardDetect(int itemIndex, int frameOffset, int attempt = 0);  // 派发检测（取帧为空时限次定时重试）
     bool tryGetFrameCache(int itemIndex, int frameOffset, QImage *out) const;
@@ -531,6 +535,8 @@ private:
     // 快速滚动不再产生「停手后还解几秒陈旧帧」的积压。
     QHash<int, int> m_wantedOffset;
     static constexpr int DECODE_KEEP_WINDOW = 3;   // 覆盖 gotoFrame±1 与 onBatchWritten±3 预取
+    // 2026-11-13：非目标帧出队时，目标帧还在排队就让它先解（见 runDecodeJob）；这是挪队尾次数的兜底上限
+    static constexpr int DECODE_MAX_DEFER = 64;
 
     // ⭐ 2026-07-19「按住空格连拍卡实时流」：截图最小间隔（键盘自动重复 ~30 次/s →
     //   每秒 30 次 item 创建+grid 重排+解码+纹理上传，低端机主线程被顶死）。
