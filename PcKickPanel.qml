@@ -2,9 +2,11 @@ import QtQuick
 import QtQuick.Controls
 import Aifs.Components 1.0
 
-// 登录时这台新电脑超出账号电脑数上限（后端 1009 带 pcKick）：列出登录过的电脑，输对二级密码移除一台后按原参数重登。
-//   账号没开二级密码时只能看，不能移除（只凭账号密码不能踢别的电脑）；禁止登录的电脑不能移除。
-//   show(提示, pcKick, 成功回调(二级密码), 取消回调)
+// 登录时这台新电脑超出账号电脑数上限（后端 1009 带 pcKick）：列出登录过的电脑，移除一台后按原参数重登。
+//   账号开了二级密码：要输对二级密码才能移除；没开：不用密码直接移除（11-20 用户定）。禁止登录的电脑不能移除。
+//   后端字段：ticket = 移除凭证（有才能移除）；needSecondary = 要不要输二级密码；message = 给本版本的提示。
+//   老后端没有 needSecondary / message：按原来的 allowed 判断（没开二级密码的只能看）。
+//   show(提示, pcKick, 成功回调(二级密码，没开时是空串), 取消回调)
 Popup {
     id: root
     anchors.centerIn: Overlay.overlay
@@ -18,6 +20,8 @@ Popup {
     property string message: ""
     property string ticket: ""
     property bool allowed: false
+    property bool needPw: true
+    property bool oldBackend: false
     property var devices: []
     property int maxDevices: 10
     property string secName: "二级密码"
@@ -30,9 +34,11 @@ Popup {
     property var cancelCallback: null
 
     function show(msg, data, onDone, onCancel) {
-        message = msg || ""
+        oldBackend = data.needSecondary === undefined
+        message = data.message || msg || ""
         ticket = data.ticket || ""
-        allowed = !!data.allowed && ticket.length > 0
+        allowed = ticket.length > 0 && (!oldBackend || !!data.allowed)
+        needPw = oldBackend ? true : !!data.needSecondary
         devices = data.devices || []
         maxDevices = data.maxDevices || 10
         secName = data.secondaryName || HttpClient.pcSecondaryName()
@@ -44,15 +50,14 @@ Popup {
         status = ""
         pwInput.text = ""
         open()
-        if (allowed) pwInput.forceActiveFocus()
+        if (allowed && needPw) pwInput.forceActiveFocus()
     }
     function setStatus(ok, msg) { statusOk = ok; status = msg || "" }
     function fmtTime(t) { return t ? String(t).replace("T", " ").substring(0, 16) : "-" }
 
     function askRemove(d) {
         if (busy) return
-        var pw = pwInput.text.trim()
-        if (pw.length === 0) {
+        if (needPw && pwInput.text.trim().length === 0) {
             setStatus(false, "请先输入" + secName)
             pwInput.forceActiveFocus()
             return
@@ -80,6 +85,11 @@ Popup {
                 root.succeeded = true
                 kickCloseTimer.start()
             } else {
+                // 领凭证后账号才开启二级密码：后端按移除那一刻算，会回「请输入二级密码」→ 把密码框放出来
+                if (!root.needPw && message.indexOf(root.secName) >= 0) {
+                    root.needPw = true
+                    pwInput.forceActiveFocus()
+                }
                 root.setStatus(false, message)
             }
         }
@@ -113,7 +123,7 @@ Popup {
                     text: "移除"; width: 80; highlighted: true
                     onClicked: {
                         var id = confirmPopup.dev.pcDeviceId
-                        var pw = pwInput.text.trim()
+                        var pw = root.needPw ? pwInput.text.trim() : ""
                         confirmPopup.close()
                         root.busy = true
                         root.usedPw = pw
@@ -176,14 +186,16 @@ Popup {
                 wrapMode: Text.WordWrap
                 font.pixelSize: 12
                 color: "#666666"
-                text: root.allowed
-                      ? "输入" + root.secName + "，选一台不用的电脑点「移除」，移除后自动重新登录。"
-                      : "这个账号没开启" + root.secName + "，这里不能移除。请在已登录的电脑上「切换账户 → 设备列表」移除不用的电脑"
-                        + "（或在那里开启" + root.secName + "后回来移除），也可以联系管理员。"
+                text: !root.allowed
+                      ? (root.oldBackend ? "这个账号没开启" + root.secName + "，这里不能移除。" : "这里暂时不能移除。")
+                        + "请在已登录的电脑上「切换账户 → 设备列表」移除不用的电脑，也可以联系管理员。"
+                      : root.needPw
+                        ? "输入" + root.secName + "，选一台不用的电脑点「移除」，移除后自动重新登录。"
+                        : "选一台不用的电脑点「移除」，移除后自动重新登录。这个账号没开启" + root.secName + "，不用输密码。"
             }
             TextField {
                 id: pwInput
-                visible: root.allowed
+                visible: root.allowed && root.needPw
                 width: 280
                 height: 36
                 rightPadding: 30
